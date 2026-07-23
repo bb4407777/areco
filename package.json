@@ -1,0 +1,73 @@
+{
+  "name": "areco",
+  "version": "2.2.0",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": "github:bb4407777/areco",
+  "homepage": "https://github.com/bb4407777/areco#readme",
+  "bugs": "https://github.com/bb4407777/areco/issues",
+  "license": "Apache-2.0",
+  "author": "bb4407777",
+  "files": [
+    "dist",
+    "scripts/areco-msg.mjs",
+    "config.example.json",
+    "NOTICE"
+  ],
+  "bin": {
+    "areco": "dist/server/index.cjs"
+  },
+  "type": "module",
+  "description": "CLI Agent 网页远程座舱 —— 在浏览器/手机上远程驾驶 Claude Code、Codex、Reasonix 等 CLI 编程智能体",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch packages/server/src/index.ts",
+    "dev:client": "vite",
+    "build": "npm run typecheck && vite build && node scripts/build-server.mjs",
+    "typecheck": "vue-tsc -p packages/client/tsconfig.json --noEmit && tsc -p packages/server/tsconfig.json --noEmit",
+    "start": "node dist/server/index.cjs",
+    "prepublishOnly": "npm run build && npm test",
+    "hash": "tsx packages/server/src/services/password.ts",
+    "test": "tsx --test packages/server/src/services/templates.test.ts packages/server/src/services/agent-transcript.test.ts packages/server/src/services/session-namer.test.ts packages/server/src/services/traffic-monitor.test.ts packages/server/src/services/rooms.test.ts packages/server/src/services/room-relay.test.ts packages/server/src/services/room-dispatch.test.ts packages/server/src/services/project-db.test.ts packages/server/src/services/project-files.test.ts packages/server/src/services/history.test.ts packages/server/src/services/session.test.ts packages/server/src/ws/resize-policy.test.ts packages/client/src/utils/format.test.ts packages/client/src/utils/sessionGroups.test.ts packages/client/src/utils/projectArtifacts.test.ts"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "pdfjs-dist": "^6.1.200"
+  },
+  "devDependencies": {
+    "@koa/bodyparser": "^5.1.1",
+    "@koa/router": "^13.1.0",
+    "@types/koa": "^2.15.0",
+    "@types/koa__router": "^12.0.4",
+    "@types/koa-static": "^4.0.4",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/addon-serialize": "0.13.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/headless": "5.5.0",
+    "@xterm/xterm": "5.5.0",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.25.0",
+    "highlight.js": "^11.11.0",
+    "koa": "^2.16.0",
+    "koa-static": "^5.0.0",
+    "markdown-it": "^14.1.0",
+    "naive-ui": "^2.41.0",
+    "pinia": "^2.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0",
+    "vue-tsc": "^2.2.0",
+    "ws": "^8.18.0"
+  }
+}

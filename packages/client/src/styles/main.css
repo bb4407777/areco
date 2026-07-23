@@ -1,0 +1,142 @@
+/* 全局基线：双主题 CSS 变量（data-theme 切换）、动效 token、safe-area、滚动条 */
+:root {
+  /* 动效曲线 token：进出场用 --ease-out（先快后慢），屏上位移用 --ease-in-out；禁再手写散装 cubic-bezier */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+}
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #101014;
+  --panel: #17171c;
+  --bar: #141419;
+  --border: #26262e;
+  --border-strong: #33333d;
+  --text: #e6e6ea;
+  --muted: #9a9aa5;
+  --faint: #6f7480;
+  --accent: #63e2b7;
+  --accent-text: #101014;
+  --input-bg: #101014;
+  --chip-bg: #1f1f26;
+  --key-bg: #1c1c22;
+  --hover: #2a2a33;
+  --danger: #e88080;
+  --danger-bg: rgba(232, 128, 128, 0.12);
+  --bubble-user-bg: #1f3d33;
+  --bubble-user-border: #2b5847;
+  --bubble-ai-bg: #1a1a20;
+  --bubble-ai-border: #26262e;
+  --fold-bg: #14141a;
+  --fold-border: #222229;
+  --fold-text: #b7bcc6;
+  --code-bg: #101014;
+  --term-bg: #101014;
+  --banner-bg: rgba(46, 36, 18, 0.92);
+  --banner-border: #4a3a1f;
+  --banner-text: #f2c97d;
+  --thinking: #8f86c9;
+  --shadow: rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --bar: #ffffff;
+  --border: #e3e5ea;
+  --border-strong: #d3d6de;
+  --text: #23272f;
+  --muted: #667085;
+  --faint: #98a2b3;
+  --accent: #0ea373;
+  --accent-text: #ffffff;
+  --input-bg: #ffffff;
+  --chip-bg: #eef0f3;
+  --key-bg: #f2f3f6;
+  --hover: #e8eaee;
+  --danger: #d92d20;
+  --danger-bg: rgba(217, 45, 32, 0.08);
+  --bubble-user-bg: #d9f4e8;
+  --bubble-user-border: #b2e5cf;
+  --bubble-ai-bg: #ffffff;
+  --bubble-ai-border: #e3e5ea;
+  --fold-bg: #f7f8fa;
+  --fold-border: #e9ebef;
+  --fold-text: #414b5a;
+  --code-bg: #f2f3f6;
+  --term-bg: #ffffff;
+  --banner-bg: rgba(255, 250, 235, 0.95);
+  --banner-border: #f0d9a8;
+  --banner-text: #8a5a00;
+  --thinking: #6d5fc0;
+  --shadow: rgba(16, 24, 40, 0.12);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  /* manipulation = 保留滚动/双指缩放，去掉 iOS 双击放大（座舱里连点会话被放大的问题）与点按 300ms 延迟 */
+  touch-action: manipulation;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "PingFang SC", "Segoe UI", system-ui, -apple-system, sans-serif;
+  overscroll-behavior: none;
+}
+
+#app {
+  height: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 通用淡入淡出（横幅类低频状态提示）：只柔化出现，不做位移；
+   reduce 场景属「保留的透明度渐变」，无需额外覆盖 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 150ms var(--ease-out);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* 减弱动效：保留透明度渐变（reduce ≠ zero），去掉位移/缩放。
+   集中覆盖各组件 scoped 规则，须 !important 压过其属性选择器特异性 */
+@media (prefers-reduced-motion: reduce) {
+  .cards-move {
+    transition: none !important;
+  }
+  .cards-enter-active {
+    transition: opacity 200ms ease !important;
+  }
+  .cards-enter-from {
+    transform: none !important;
+  }
+  .card:active,
+  .send-btn:active {
+    transform: none !important;
+  }
+  .jump-enter-from,
+  .jump-leave-to {
+    /* translateX 是水平定位不是动效，必须保留 */
+    transform: translateX(-50%) !important;
+  }
+}

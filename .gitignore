@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+config.json
+# 本机 agent 启动器（绝对路径/私有配置），不入仓
+bin/
+*.log
+.DS_Store

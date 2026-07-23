@@ -1,0 +1,45 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8790,
+    "passwordHash": "",
+    "sessionTtlHours": 72,
+    "title": "Areco",
+    "allowedHosts": [],
+    "maxSessions": 0,
+    "insecureNoAuth": false,
+    "fileRootsUnrestricted": false
+  },
+  "templates": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "command": "claude",
+      "args": ["--setting-sources", "user", "--dangerously-skip-permissions"],
+      "cwd": "",
+      "color": "#d97757",
+      "autoStart": false,
+      "enabled": true
+    },
+    {
+      "id": "codex",
+      "name": "OpenAI Codex",
+      "command": "codex",
+      "args": ["--sandbox", "danger-full-access"],
+      "cwd": "",
+      "color": "#10a37f",
+      "autoStart": false,
+      "enabled": true
+    },
+    {
+      "id": "shell",
+      "name": "Shell (zsh)",
+      "command": "zsh",
+      "args": [],
+      "cwd": "",
+      "color": "#7d8590",
+      "autoStart": false,
+      "enabled": true
+    }
+  ]
+}

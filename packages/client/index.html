@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- maximum-scale=1：禁 iOS 双击缩放与输入聚焦缩放；双指缩放 iOS 出于无障碍仍会保留 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#101014" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Areco" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icon-192.png?v=2" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg?v=2" />
+    <link rel="icon" type="image/png" href="/icon-192.png?v=2" />
+    <title>Areco</title>
+    <script>
+      // 部署自检（内联：须先于 app 入口执行，且不依赖任何外部 chunk——失效的正是入口 chunk 本身）。
+      // 并行会话频繁 rebuild，emptyOutDir 会删掉旧哈希 chunk；浏览器/PWA 缓存的旧 index.html 引用的入口 chunk 就 404，
+      // 入口 JS 起不来 → app 静默死亡（点啥都没反应，router.onError 注册不上）。
+      // 启动时 no-store 拉最新 index.html，入口哈希对不上就清 caches + 强刷一次；sessionStorage 同入口只刷一次防死循环。
+      (function () {
+        try {
+          var entryOf = function (d) { var s = d.querySelector('script[type="module"][src^="/assets/"]'); return s && s.getAttribute('src'); };
+          var run = function () {
+            var cur = entryOf(document);
+            if (!cur) return; // dev 入口是 /src/main.ts，非 /assets/，跳过
+            if (sessionStorage.getItem('ar-selfcheck') === cur) return; // 已对当前入口刷过一次，防循环
+            fetch(location.pathname, { cache: 'no-store', credentials: 'same-origin' })
+              .then(function (r) { return r.ok ? r.text() : null; })
+              .then(function (html) {
+                if (!html) return;
+                var m = html.match(/src="(\/assets\/(?:js\/)?index-[^"]+)"/);
+                if (!m || m[1] === cur) return; // 已是最新
+                sessionStorage.setItem('ar-selfcheck', cur);
+                var go = function () { location.reload(); };
+                if (window.caches) caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }).then(go, go);
+                else go();
+              }).catch(function () {});
+          };
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+          else run();
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
