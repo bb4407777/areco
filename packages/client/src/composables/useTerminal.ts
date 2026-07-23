@@ -562,7 +562,14 @@ export function useTerminal(sessionId: string) {
 
   function attach() {
     if (!term) return
-    fitNow()
+    // 本地 fit 拿正确 cols/rows，但不单独发 resize——attach 自带尺寸，
+    // 服务端处理 attach 时会 resize PTY；额外发 resize 会让 kimi 先 3J 重绘一帧再收 attach 快照。
+    if (fit && container && container.clientWidth >= 20 && container.clientHeight >= 20) {
+      const wasAtBottom = term.buffer.active.viewportY >= term.buffer.active.baseY
+      try { fit.fit() } catch { /* noop */ }
+      if (wasAtBottom) term.scrollToBottom()
+      lastReported = { cols: term.cols, rows: term.rows }
+    }
     wsClient.send({ type: 'attach', sessionId, cols: term.cols, rows: term.rows })
   }
 
@@ -592,6 +599,9 @@ export function useTerminal(sessionId: string) {
       pendingBytes = 0
       currentEpoch = msg.epoch
       appliedOffset = msg.offset
+      // reset 同步清屏、write 异步渲染——间隙会画一帧空白。隐藏元素跨过间隙，回调里再亮。
+      const el = container?.querySelector('.xterm') as HTMLElement | null
+      if (el) el.style.visibility = 'hidden'
       term.reset()
       if (msg.cols !== term.cols || msg.rows !== term.rows) {
         // exited 会话按落盘快照的原始尺寸呈现；运行中会话服务端已按我方尺寸 resize，两者相等
@@ -602,11 +612,13 @@ export function useTerminal(sessionId: string) {
           // 快照=会话最新状态，写完显式回底：reset 后 xterm 在部分场景（大快照分块、
           // alt-buffer 切换）视口停在顶部不动（2026-07-22 维护者报障"输入命令后跳回顶部"）
           term?.scrollToBottom()
+          if (el) el.style.visibility = ''
           startSettleGuard() // 回调后仍有补写/reflow 顶回开头的缝隙，结算窗内多点回底
           wsClient.queueAck(sessionId, msg.offset)
         })
       } else {
         term.scrollToBottom()
+        if (el) el.style.visibility = ''
         startSettleGuard()
       }
       return
@@ -627,7 +639,14 @@ export function useTerminal(sessionId: string) {
       // \x1bc（RIS 全重置）同效，一并检测（Qwen3.8 复核建议：堵 claude/ink 系错误恢复路径）。
       const wipe = msg.data.includes('\x1b[3J') || msg.data.includes('\x1bc')
       term.write(msg.data, () => {
-        if (wipe) term?.scrollToBottom()
+        if (wipe) {
+          // write 回调与 xterm 渲染 rAF 可能交错：回调时渲染器已画了一帧 viewport=0。
+          // rAF 排在 xterm 渲染之后，确保拉回动作覆盖最近一帧；再补一个 150ms 点防 reflow 尾弹。
+          requestAnimationFrame(() => term?.scrollToBottom())
+          window.setTimeout(() => {
+            if (!isUserScrolling()) term?.scrollToBottom()
+          }, 150)
+        }
         wsClient.queueAck(sessionId, msg.offset)
       })
     }

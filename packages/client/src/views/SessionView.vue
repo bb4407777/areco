@@ -162,7 +162,8 @@ function onMenu(key: string) {
       </Transition>
     </div>
 
-    <MobileKeyBar v-if="ui.isTouch && isLive" :session-id="sessionId" />
+    <!-- 始终占位：v-if 卸载会改变终端容器高度 → resize → kimi TUI 3J 重绘 → 视口跳转 -->
+    <MobileKeyBar :session-id="sessionId" :class="{ 'keybar-off': !(ui.isTouch && isLive) }" />
     <!-- 死会话也可直接发：服务端自动 resume 拉起、就绪后注入（gateway sendline 自动恢复） -->
     <PromptBar :session-id="sessionId" :placeholder="isLive ? undefined : '会话已退出，发送将自动恢复对话…'" />
   </div>
@@ -230,5 +231,9 @@ function onMenu(key: string) {
   color: var(--banner-text);
   font-size: 13px;
   backdrop-filter: blur(4px);
+}
+.keybar-off {
+  visibility: hidden;
+  pointer-events: none;
 }
 </style>
