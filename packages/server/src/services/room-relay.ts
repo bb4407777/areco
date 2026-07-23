@@ -129,8 +129,10 @@ export interface RoomRelayOpts {
 }
 
 export class RoomRelay {
-  /** 项目 → 已见最大消息 id；未见过的项目首轮只记游标不重放（防重启后历史 mention 轰炸终端） */
+  /** 项目 → 已见最大消息 id；未见过的项目首轮：启动前存量快进、启动后新帖照投（详见 tick） */
   private cursors = new Map<string, number>()
+  /** 中继启动时刻：tick 初见房间时区分「启动前的历史」（快进不补投）与「启动后的新帖」（照投） */
+  private startedAtMs = 0
   /** 项目 → 当前 agent 互调链路深度（人发言清零；内存态，重启归零） */
   private chainDepth = new Map<string, number>()
   /** auto-recall 注入块缓存：root message id → 注入块（null=无命中/失败）。同一根消息投多个成员复用，不重复起子进程 */
@@ -158,6 +160,7 @@ export class RoomRelay {
 
   start() {
     if (this.timer) return
+    this.startedAtMs = Date.now()
     // 会话被删除时联动移除项目里指向它的 member，否则悬空 member 发消息静默失效（首次 start 挂一次）
     this.manager.on('removed', (sessionId) => this.onSessionRemoved(sessionId))
     this.timer = setInterval(() => {
@@ -276,7 +279,18 @@ export class RoomRelay {
       }
       const cursor = this.cursors.get(room.id)
       if (cursor === undefined) {
+        // 初见房间（含重启后首轮）：中继启动前的存量快进不补投（防重启重放轰炸），
+        // 启动后到达的照投——建房即发首条的竞态不再被吞（2026-07-24 会诊房间丢首条实锤）。
+        // createdAt 是秒级 ISO，留 3s 容差
+        const freshAfter = this.startedAtMs - 3000
+        let ff = 0
+        for (const m of msgs) if (Date.parse(m.createdAt) < freshAfter) ff = m.id
         this.cursors.set(room.id, msgs.length ? msgs[msgs.length - 1].id : 0)
+        for (const m of msgs) {
+          if (m.id <= ff) continue
+          this.broadcast({ type: 'roomMessage', roomId: room.id, message: this.toRoomMessage(room, m) })
+          this.onMessageStored(room, m)
+        }
         continue
       }
       let hadNew = false
@@ -313,8 +327,8 @@ export class RoomRelay {
    *  1) mention 投递（parallel=现状全员即注；serial=只放行当前轮到的成员；claim=全员发「先报认领」）；
    *  2) claim 认领：本条 from 报 [claim] → 原子批准唯一 Implementer（与 serial 轮转互斥，见 handleClaim）；
    *  3) 串行推进：本条 from 命中 active serial dispatch 的 current_target → 当前 delivery 落定、放下一位。 */
-  private onMessageStored(room: RoomInfo, m: { id: number; from: string; body: string; humanRelay?: boolean }) {
-    this.deliverMentions(room, m.from, m.body, m.id, m.humanRelay ?? false)
+  private onMessageStored(room: RoomInfo, m: { id: number; from: string; body: string; to?: string; humanRelay?: boolean }) {
+    this.deliverMentions(room, m.from, m.body, m.id, m.humanRelay ?? false, m.to)
     this.handleClaim(room, m)
     this.advanceSerial(room, m.from)
   }
@@ -327,9 +341,16 @@ export class RoomRelay {
    *  - 调度底账（2026-07-22）：message_targets 落真实收件人（广播展开成成员名），
    *    幂等建 dispatch + deliveries；parallel 全员即注（现状），serial 只放行成员顺序第一位。
    */
-  private deliverMentions(room: RoomInfo, from: string, body: string, currentId: number, humanRelay = false) {
+  private deliverMentions(room: RoomInfo, from: string, body: string, currentId: number, humanRelay = false, toField?: string) {
     if (room.archivedAt !== null) return
-    const { targets, all } = parseMentions(body, room.members)
+    const parsed = parseMentions(body, room.members)
+    let { targets, all } = parsed
+    // 外部通道（areco-msg CLI 直写 projects.db）的收件人记在 to_agent 列、正文不一定带 @：
+    // 正文无 @ 时按列投递，不再静默吞（2026-07-24 会诊房间连吞两条任务书实锤）
+    if (!targets.length && !all && toField) {
+      if (toField === ALL_MENTION) all = true
+      else if (room.members.some((m) => m.kind === 'session' && m.name === toField)) targets = [toField]
+    }
     // 转述闸：只有白名单 agent（如微信通道 Hermes 转维护者原话）的 human_relay 标记生效；
     // 名单外打标一律忽略——否则任何 agent 都能自我清零链深，防环闸形同虚设
     const relayAsHuman = humanRelay && this.humanRelayAgents.includes(from)
@@ -341,9 +362,10 @@ export class RoomRelay {
     // 多空格等）会被误判为人类发言 → 默认广播全体 + 清零 chainDepth + 投递过滤 m.name!==from 失效
     // （from 不在 members）→ agent 收到自己刚发的消息 → 再回执 → 死循环。chainDepth 防环闸因每次走
     // human 分支清零而永不触发。2026-07-20 修。
+    const senderMember = room.members.find((m) => m.name === from)
     const senderKind = from === this.rooms.humanName || relayAsHuman
       ? 'human'
-      : (room.members.find((m) => m.name === from)?.kind ?? 'session')
+      : (senderMember?.kind ?? 'session')
     // 人类发言默认广播全体；agent 发言需显式 @（all 或具体成员）才投递
     const broadcastAll = all || (senderKind === 'human' && targets.length === 0)
     if (!targets.length && !broadcastAll) return
@@ -351,7 +373,9 @@ export class RoomRelay {
     let depthBlocked = false
     if (senderKind === 'human') {
       this.chainDepth.set(room.id, 0)
-    } else {
+    } else if (senderMember) {
+      // 只计房内成员互调的链深：外部终端/编排者（from 不在花名册）代发不增不清——
+      // 连续委派不同成员不是互调循环（2026-07-24 会诊房间第 4 条任务书被 MAX_DEPTH 误拦实锤）
       const depth = (this.chainDepth.get(room.id) ?? 0) + 1
       this.chainDepth.set(room.id, depth)
       depthBlocked = depth >= MAX_DEPTH

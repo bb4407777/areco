@@ -143,6 +143,7 @@ test('归档期间外部直写消息只推进游标，恢复后不补投', () =>
   const broadcasts: unknown[] = []
   const relay = new RoomRelay(rooms, manager as never, (msg) => broadcasts.push(msg))
   const tick = () => (relay as unknown as { tick(): void }).tick()
+  futureStart(relay) // 测试共享临时根（各用例房间互相可见）：视同中继后启动，首轮快进他案存量
 
   rooms.archive(roomId)
   tick()
@@ -153,6 +154,63 @@ test('归档期间外部直写消息只推进游标，恢复后不补投', () =>
 
   assert.deepEqual(sent, {}, '恢复后不应把归档期间消息补投给 agent')
   assert.equal(broadcasts.length, 0, '归档期间消息不应推送到实时项目流')
+})
+
+// ---- 2026-07-24 会诊房间三连修：to_agent 列兜底 / 初见竞态 / 外部编排者不计链深 ----
+
+/** 把 relay 的启动时刻拨到未来：共享临时根里其他用例的存量房间首轮一律快进，隔离开案新帖 */
+function futureStart(relay: unknown) {
+  ;(relay as { startedAtMs: number }).startedAtMs = Date.now() + 60_000
+}
+
+test('外部直写消息正文无 @ 时按 to_agent 列投递（CLI 收件人不再被吞）', () => {
+  const { rooms, roomId, team } = setup()
+  rooms.setDispatchMode(roomId, 'parallel')
+  const { manager, sent } = mockManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  futureStart(relay)
+  const tick = () => (relay as unknown as { tick(): void }).tick()
+  tick() // 初见房间建游标（他案存量快进；本房尚无消息）
+  projectDb.send(team, '外部编排者', 'B', '任务书：请复核方案（正文无 @）')
+  tick()
+  assert.equal(sent['sb']?.length, 1, '应按 to_agent 列投给 B')
+  assert.equal(sent['sa'], undefined, '未指定的 A 不应收到')
+})
+
+test('外部编排者（非花名册）连续委派不触发互调深度闸；房内成员互调仍计链深', () => {
+  const { rooms, roomId, team } = setup()
+  rooms.setDispatchMode(roomId, 'parallel')
+  const { manager, sent } = mockManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  futureStart(relay)
+  const tick = () => (relay as unknown as { tick(): void }).tick()
+  tick()
+  for (let i = 1; i <= 5; i++) projectDb.send(team, '外部编排者', 'A', `@A 第 ${i} 条任务`)
+  tick()
+  assert.equal(sent['sa']?.length, 5, '外部编排者代发不计链深，5 条全投')
+
+  // 房内成员互调：depth 1/2 投递，第 3 条（≥MAX_DEPTH）只落库
+  relay.postMessage(roomId, 'A', '@B 互调 1')
+  relay.postMessage(roomId, 'A', '@B 互调 2')
+  relay.postMessage(roomId, 'A', '@B 互调 3')
+  assert.equal(sent['sb']?.length, 2, '成员互调达 MAX_DEPTH 后不再投递')
+})
+
+test('初见房间：中继启动前的存量快进不补投，之后的新帖照投', () => {
+  const { rooms, roomId, team } = setup()
+  rooms.setDispatchMode(roomId, 'parallel')
+  projectDb.send(team, 'Owner', 'all', '@all 启动前的存量消息')
+  const { manager, sent } = mockManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  // 模拟中继在消息落库之后才启动（重启恢复场景）
+  futureStart(relay)
+  const tick = () => (relay as unknown as { tick(): void }).tick()
+  tick()
+  assert.deepEqual(sent, {}, '启动前存量不补投（防重启重放）')
+  projectDb.send(team, 'Owner', 'all', '@all 启动后的新帖')
+  tick()
+  assert.equal(sent['sa']?.length, 1, '之后的新帖照投')
+  assert.match(sent['sa'][0], /启动后的新帖/)
 })
 
 // ---- auto-recall 记忆注入（2026-07-22）：recallRunner 注入点替换 spawnSync，不起真 python 子进程 ----
