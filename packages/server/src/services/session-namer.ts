@@ -1,7 +1,8 @@
 // 会话名演化跟踪器：增量扫 agent transcript 的新增完整行，产出两类命名候选——
 //  ① 原生标题：claude custom-title 行 / workbuddy ai-title 行
 //    （kimi 原生标题在同会话目录 state.json，行里没有，由 manager 用 kimiTitleOf 直读）
-//  ② 最新用户 prompt：codex/qclaw/reasonix/kimi 没有原生标题时的演化名——话题漂移跟随最新输入
+//  ② 最新用户 prompt：codex/qclaw/reasonix/kimi 的演化名——话题漂移跟随最新输入
+//    （kimi 的 state.json 原生标题生成后不更新，manager 已改为 prompt 优先、原生标题兜底）
 // claude 系只收 ① 不追 prompt：Claude 自己的命名保留（ Claude Code 会随话题重写 custom-title，
 // 跟着它就是演化）。本模块纯函数无 Session 依赖，改名决策（autoNamed 锁定）在 session-manager。
 import type { AgentKind } from './agent-transcript'
@@ -170,7 +171,7 @@ export class NameTracker {
 /**
  * 本轮候选名：原生标题优先（agent 自己的语义命名），无原生标题用最新 prompt 演化。
  * claude 只要 custom-title（保留 Claude 自己的命名，不拿 prompt 覆盖）。
- * kimi 原生标题在 state.json 由 manager 直读，不在此合并。
+ * kimi 原生标题在 state.json 由 manager 直读、仅作兜底（prompt 演化优先），不在此合并。
  */
 export function nameCandidateOf(tracker: NameTracker, source: NameSource): string {
   if (source === 'claude') return tracker.nativeTitle

@@ -520,7 +520,8 @@ export class SessionManager extends EventEmitter {
 
   /**
    * 跟随 agent 原生标题/最新 prompt 演化会话名：只服务 autoNamed（未被手动 rename 锁定）会话。
-   * claude 系只跟 custom-title（保留 Claude 自己的命名）；kimi 优先 state.json 原生标题；
+   * claude 系只跟 custom-title（保留 Claude 自己的命名）；kimi 原生标题（state.json）生成后不再
+   * 更新，故优先跟最新用户 prompt 演化、原生标题仅作兜底（2026-07-23 高律师定）；
    * codex/qclaw/reasonix/workbuddy 无原生标题时用最新用户 prompt 演化。增量扫描，10s 一轮。
    */
   private refreshNames() {
@@ -557,7 +558,7 @@ export class SessionManager extends EventEmitter {
         }
         const candidate =
           source.kind === 'kimi'
-            ? kimiTitleOf(source.path) || nameCandidateOf(entry.tracker, source.kind)
+            ? nameCandidateOf(entry.tracker, source.kind) || kimiTitleOf(source.path)
             : nameCandidateOf(entry.tracker, source.kind ?? 'claude')
         // 话题延续不换名（与当前名高度重合的补充命令别把名字越换越碎）；明显新话题才演化
         if (candidate && !isTopicContinuation(session.name, candidate) && session.evolveName(candidate)) {
