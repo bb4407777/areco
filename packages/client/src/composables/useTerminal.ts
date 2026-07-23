@@ -362,7 +362,11 @@ export function useTerminal(sessionId: string) {
     pending = []
     pendingBytes = 0
     const last = chunks[chunks.length - 1]!
-    term.write(chunks.map((c) => c.data).join(''), () => wsClient.queueAck(sessionId, last.offset))
+    const wipe = chunks.some((c) => c.data.includes('\x1b[3J') || c.data.includes('\x1bc'))
+    term.write(chunks.map((c) => c.data).join(''), () => {
+      if (wipe) term?.scrollToBottom() // 见 output 分支注释：3J 清屏重绘后同帧拉回，消顶闪
+      wsClient.queueAck(sessionId, last.offset)
+    })
   }
 
   function scheduleFlush() {
@@ -617,7 +621,15 @@ export function useTerminal(sessionId: string) {
         return
       }
       if (pending.length) flushPending() // 保序：先补攒下的，再写新块
-      term.write(msg.data, () => wsClient.queueAck(sessionId, msg.offset))
+      // kimi 等 TUI 在 resize/内容收缩时全量重绘并 \x1b[3J 清 scrollback（pi-mono 渲染器实锤，
+      // 2026-07-24 连滚报障）：3J 一落 xterm 视口即被钳到顶（"跳到会话开头"），此前靠结算窗
+      // 守卫 150ms 后拉回 = 肉眼可见的顶闪+拉扯。这里写完同帧拉回，把闪压缩到 ~1 帧内。
+      // \x1bc（RIS 全重置）同效，一并检测（Qwen3.8 复核建议：堵 claude/ink 系错误恢复路径）。
+      const wipe = msg.data.includes('\x1b[3J') || msg.data.includes('\x1bc')
+      term.write(msg.data, () => {
+        if (wipe) term?.scrollToBottom()
+        wsClient.queueAck(sessionId, msg.offset)
+      })
     }
   }
 
@@ -639,11 +651,15 @@ export function useTerminal(sessionId: string) {
   }
 
   function scheduleFit() {
-    if (fitTimer !== null) return
+    // 拖尾防抖 400ms（2026-07-24 连滚报障根治）：kimi 等 TUI 对每次 width/height 变化都做
+    // 全量重绘并 \x1b[3J 清 scrollback——iOS 键盘动画/工具栏收折/窗口拖拽会在一两秒内连发
+    // 一串尺寸步进，每步一次清屏+回底守卫拉回 = 视口来回拉扯（"到处滚"）。
+    // 拖尾合并成一次：手势/动画结束才 fit+上报，重绘只发生一回。
+    if (fitTimer !== null) clearTimeout(fitTimer)
     fitTimer = window.setTimeout(() => {
       fitTimer = null
       fitNow()
-    }, 150)
+    }, 400)
   }
 
   function setFontSize(size: number) {
