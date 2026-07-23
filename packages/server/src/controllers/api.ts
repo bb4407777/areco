@@ -12,7 +12,7 @@ import type { TemplateStore } from '../services/templates'
 import type { AppConfig, VoiceConfig } from '../config'
 import { DATA_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
-import { agentKindOf, locateClaudeTranscript, parseQclaw, readAgentAllMessages, readAgentTranscript } from '../services/agent-transcript'
+import { agentKindOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseQclaw, readAgentAllMessages, readAgentTranscript } from '../services/agent-transcript'
 import {
   defaultHistoryRoots,
   historyCwd,
@@ -278,6 +278,9 @@ export class ApiControllers {
       let filePath: string | null = null
       if (session.claudeSessionId) {
         filePath = transcriptPath(session)
+      } else if (session.transcriptDir) {
+        // claude 布局衍生 CLI（qoder 等，模板 transcriptDir 声明/自动探测）：时间窗定位 + claude 解析
+        filePath = locateClaudeLayoutTranscript(session, session.transcriptDir)
       } else {
         const kind = agentKindOf(session.command)
         if (kind) {

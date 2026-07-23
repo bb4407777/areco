@@ -2,7 +2,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { shellQuote, buildShellCommand, reorderTemplates } from './templates'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { shellQuote, buildShellCommand, effectiveTranscriptDir, probeTranscriptDir, reorderTemplates } from './templates'
 import type { Template } from '../../../shared/protocol'
 
 test('shellQuote 基本包裹', () => {
@@ -45,4 +48,27 @@ test('reorderTemplates 按 ids 重排且只认完整排列', () => {
   assert.throws(() => reorderTemplates(list, ['a', 'b', 'c', 'd']))
   assert.throws(() => reorderTemplates(list, ['a', 'a', 'b']))
   assert.throws(() => reorderTemplates(list, ['a', 'b', 'x']))
+})
+
+test('probeTranscriptDir 按约定目录自动探测（含去 cli/cn 后缀变体），探不到返回 null', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-probe-'))
+  // qoderclicn 形态：~/.qoder-cn/projects（靠去后缀变体命中）
+  fs.mkdirSync(path.join(home, '.qoder-cn', 'projects'), { recursive: true })
+  assert.equal(probeTranscriptDir('qoderclicn', home), path.join(home, '.qoder-cn', 'projects'))
+  // 直接形态：~/.foo/projects
+  fs.mkdirSync(path.join(home, '.foo', 'projects'), { recursive: true })
+  assert.equal(probeTranscriptDir('/usr/local/bin/foo', home), path.join(home, '.foo', 'projects'))
+  // -cn 直挂形态：~/.bar-cn/projects
+  fs.mkdirSync(path.join(home, '.bar-cn', 'projects'), { recursive: true })
+  assert.equal(probeTranscriptDir('bar', home), path.join(home, '.bar-cn', 'projects'))
+  // 探不到
+  assert.equal(probeTranscriptDir('nonexistent-cli', home), null)
+})
+
+test('effectiveTranscriptDir：显式 transcriptDir 优先；claude 系返回 null', () => {
+  const tpl = (over: Partial<Template>): Template =>
+    ({ id: 't', name: 't', command: 'x', args: [], cwd: '/', color: '#000', autoStart: false, enabled: true, ...over })
+  assert.equal(effectiveTranscriptDir(tpl({ transcriptDir: '/data/projects' })), '/data/projects')
+  assert.equal(effectiveTranscriptDir(tpl({ command: 'claude' })), null, '裸 claude 走 claudeHome 旧路')
+  assert.equal(effectiveTranscriptDir(tpl({ claudeHome: '/iso/home' })), null, 'claudeHome 包装器走旧路')
 })

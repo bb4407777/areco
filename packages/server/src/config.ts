@@ -115,6 +115,8 @@ function normalizeTemplate(raw: Partial<Template>, index: number): Template {
     // 白名单拷贝务必带上 claudeHome——漏掉它 = 重启剥字段 + 下次保存回写永久丢失
     // （2026-07-17 c5 模板 claudeHome 无声失效即此因）
     ...(typeof raw.claudeHome === 'string' && raw.claudeHome.trim() ? { claudeHome: raw.claudeHome.trim() } : {}),
+    // transcriptDir 同 claudeHome 口径：白名单拷贝必须带上，漏掉 = 重启剥字段 + 保存回写丢失
+    ...(typeof raw.transcriptDir === 'string' && raw.transcriptDir.trim() ? { transcriptDir: raw.transcriptDir.trim() } : {}),
   }
 }
 

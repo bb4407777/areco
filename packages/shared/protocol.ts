@@ -29,6 +29,13 @@ export interface Template {
    * command basename 为 claude 的模板不用设（默认服务进程 HOME）。
    */
   claudeHome?: string
+  /**
+   * claude 布局的 transcript projects 根目录（如 /Users/gao/.qoder-cn/projects）：
+   * 该模板会话的对话视图按 <transcriptDir>/<cwd-slug>/*.jsonl 以 claude 格式解析（时间窗定位）。
+   * 开源后给「claude 系衍生 CLI」（qoder 等）配对话模式的声明入口；
+   * 未配置时服务端按约定目录自动探测（~/.<cmd>/projects、去 cli/cn 后缀变体），探不到回退终端模式。
+   */
+  transcriptDir?: string
 }
 
 export interface SessionSummary {
@@ -57,6 +64,8 @@ export interface SessionSummary {
   rows: number
   claudeSessionId: string | null
   claudeHome: string | null // claude transcript 所在 HOME（null = 服务进程 HOME 或非 claude 系）
+  /** claude 布局 transcript 的 projects 根（模板声明或自动探测；null = 无对话视图） */
+  transcriptDir: string | null
   /** 非 claude agent 的原生会话 ID；首次确定性识别后持久化，后续禁止再按时间猜文件。 */
   agentSessionId: string | null
   /** 首条用户输入的规范化哈希，用于把新会话与 agent 原生日志精确绑定。 */

@@ -7,7 +7,7 @@ import type { TrafficState } from '../../../shared/traffic'
 import type { AppConfig } from '../config'
 import path from 'node:path'
 import { Session } from './session'
-import { TemplateStore, buildSpawnSpec, effectiveClaudeHome } from './templates'
+import { TemplateStore, buildSpawnSpec, effectiveClaudeHome, effectiveTranscriptDir } from './templates'
 import { Persistence } from './persistence'
 import {
   agentKindOf,
@@ -65,6 +65,9 @@ export class SessionManager extends EventEmitter {
 
   restore() {
     for (const persisted of this.persistence.loadSessions()) {
+      // 存量会话 transcriptDir 回填：功能上线前拉起的会话没存这个字段，按模板现解析
+      // （否则老会话永远进不了对话模式，2026-07-24 qoder 会话即此场景）
+      const tpl = this.templates.list().find((t) => t.id === persisted.templateId)
       const session = new Session({
         id: persisted.id,
         name: persisted.name,
@@ -75,6 +78,7 @@ export class SessionManager extends EventEmitter {
         color: persisted.color,
         claudeSessionId: persisted.claudeSessionId,
         claudeHome: persisted.claudeHome ?? null,
+        transcriptDir: persisted.transcriptDir ?? (tpl ? effectiveTranscriptDir(tpl) : null),
         createdAt: persisted.createdAt,
       })
       session.restoreFrom(persisted)
@@ -172,6 +176,7 @@ export class SessionManager extends EventEmitter {
       color: template.color,
       claudeSessionId: resumeId ?? (claudeHome !== null ? crypto.randomUUID() : null),
       claudeHome,
+      transcriptDir: effectiveTranscriptDir(template),
       roomId: opts.roomId ?? null,
     })
     this.wire(session)

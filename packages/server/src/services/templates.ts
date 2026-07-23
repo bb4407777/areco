@@ -40,6 +40,47 @@ export function effectiveClaudeHome(template: Template): string | null {
   return isClaudeTemplate(template) ? os.homedir() : null
 }
 
+/**
+ * 未知命令的 claude 布局 transcript 自动探测（开源后用户自建模板零配置进对话模式）：
+ * 按约定候选目录找「存在且含 jsonl」的 projects 根——
+ *   ~/.<cmd>/projects、~/.<cmd>-cn/projects、~/.<去cli/cn后缀>/projects、~/.<去后缀>-cn/projects
+ * （qoderclicn → ~/.qoder-cn/projects 即靠去后缀变体命中）。探不到返回 null。
+ */
+export function probeTranscriptDir(command: string, homeDir = os.homedir()): string | null {
+  const base = path.basename(command)
+  const stripped = base.replace(/cli(cn)?$/, '')
+  const names = [base, `${base}-cn`]
+  if (stripped && stripped !== base) names.push(stripped, `${stripped}-cn`)
+  for (const name of names) {
+    const dir = path.join(homeDir, `.${name}`, 'projects')
+    try {
+      // 目录存在即算命中（新装 CLI 可能尚无会话文件；空目录定位时会话视图报 exists:false 回退终端，无副作用）
+      if (fs.statSync(dir).isDirectory()) return dir
+    } catch {
+      /* 目录不存在/不可读：下一个候选 */
+    }
+  }
+  return null
+}
+
+const transcriptDirMemo = new Map<string, string | null>()
+
+/**
+ * 模板会话的 claude 布局 transcript projects 根：显式 transcriptDir 优先；
+ * claude 系（claudeHome 路径）与已在册 agent（kimi/codex 等）返回 null（各走各路）；
+ * 其余未知命令按约定自动探测（结果按模板 id 记忆，探测失败也记——CLI 装好后新会话再探）。
+ */
+export function effectiveTranscriptDir(template: Template): string | null {
+  const explicit = template.transcriptDir?.trim()
+  if (explicit) return explicit
+  if (effectiveClaudeHome(template) !== null) return null
+  if (transcriptDirMemo.has(template.id)) return transcriptDirMemo.get(template.id) ?? null
+  const found = probeTranscriptDir(template.command)
+  transcriptDirMemo.set(template.id, found)
+  if (found) log.info(`模板 ${template.id} 自动探测到 transcript 落盘：${found}`)
+  return found
+}
+
 const EXTRA_PATH_DIRS = [
   path.join(os.homedir(), '.npm-global', 'bin'),
   '/usr/local/bin',

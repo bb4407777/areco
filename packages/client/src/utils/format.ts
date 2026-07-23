@@ -128,10 +128,12 @@ export function sourceColor(
 const CHAT_CAPABLE_COMMANDS = new Set(['codex', 'codebuddy', 'reasonix', 'kimi'])
 
 export function chatCapable(
-  session: { claudeSessionId: string | null; command: string; templateId: string },
+  session: { claudeSessionId: string | null; transcriptDir?: string | null; command: string; templateId: string },
   templates?: Array<{ id: string; claudeHome?: string }>
 ): boolean {
   if (session.claudeSessionId) return true
+  // claude 布局衍生 CLI（qoder 等）：模板声明/服务端自动探测到的 transcript 落盘根
+  if (session.transcriptDir) return true
   const base = session.command.split('/').pop() ?? ''
   if (CHAT_CAPABLE_COMMANDS.has(base)) return true
   // claude 包装器会话缺 claudeSessionId（模板 claudeHome 曾丢失）：模板配了 claudeHome 即可走服务端窗口定位
@@ -144,7 +146,7 @@ export function chatCapable(
  */
 export function sessionEntryPath(
   id: string,
-  session: { claudeSessionId: string | null; command: string; templateId: string } | null | undefined,
+  session: { claudeSessionId: string | null; transcriptDir?: string | null; command: string; templateId: string } | null | undefined,
   templates: Array<{ id: string; claudeHome?: string }> | undefined,
   view: 'terminal' | 'chat'
 ): string {

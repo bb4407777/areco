@@ -40,6 +40,17 @@
       "color": "#7d8590",
       "autoStart": false,
       "enabled": true
+    },
+    {
+      "id": "qoder",
+      "name": "Qoder（claude 布局衍生 CLI 示例）",
+      "command": "qoderclicn",
+      "args": [],
+      "cwd": "",
+      "color": "#1677ff",
+      "autoStart": false,
+      "enabled": false,
+      "transcriptDir": "/home/you/.qoder-cn/projects"
     }
   ],
   "voice": {

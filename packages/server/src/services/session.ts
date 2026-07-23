@@ -43,6 +43,8 @@ export interface SessionInit {
   color: string
   claudeSessionId: string | null
   claudeHome?: string | null
+  /** claude 布局 transcript 的 projects 根（模板声明/自动探测解析结果；null = 无对话视图） */
+  transcriptDir?: string | null
   /** 项目归属（room id）：项目内 spawn 的专属会话；缺省/null = 游离会话 */
   roomId?: string | null
   createdAt?: number
@@ -66,6 +68,8 @@ export class Session extends EventEmitter {
   claudeSessionId: string | null
   // 可回填：claude 包装器无 id 的存量会话，原生恢复重启时按定位文件转正（见 manager.restart）
   claudeHome: string | null
+  /** claude 布局 transcript 的 projects 根（spawn 时从模板解析并钉死） */
+  transcriptDir: string | null
   agentSessionId: string | null
   agentBindingHash: string | null
   readonly createdAt: number
@@ -121,6 +125,7 @@ export class Session extends EventEmitter {
     this.color = init.color
     this.claudeSessionId = init.claudeSessionId
     this.claudeHome = init.claudeHome ?? null
+    this.transcriptDir = init.transcriptDir ?? null
     this.agentSessionId = null
     this.agentBindingHash = null
     this.roomId = init.roomId ?? null
@@ -617,6 +622,7 @@ export class Session extends EventEmitter {
       rows: this.rows,
       claudeSessionId: this.claudeSessionId,
       claudeHome: this.claudeHome,
+      transcriptDir: this.transcriptDir,
       agentSessionId: this.agentSessionId,
       agentBindingHash: this.agentBindingHash,
       promptCount: this.promptCount,

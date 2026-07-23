@@ -569,19 +569,27 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
  * 排除 agent-*.jsonl（子 agent transcript，不是会话主文件）。
  */
 export function locateClaudeTranscript(session: Session, home: string): string | null {
+  return locateClaudeLayoutTranscript(session, path.join(home, '.claude', 'projects'))
+}
+
+/**
+ * claude 布局通用定位（qoder 等衍生 CLI 的 transcriptDir 会话）：<projectsDir>/<cwd-slug>/ 下
+ * 按时间窗取最新 jsonl，语义同 locateClaudeTranscript。
+ */
+export function locateClaudeLayoutTranscript(session: Session, projectsDir: string): string | null {
   const hit = locateCache.get(session.id)
   if (hit) {
     const st = statSafe(hit.path)
     if (st && st.size > 0) return hit.path
   }
-  const dir = path.join(home, '.claude', 'projects', cwdToSlug(session.cwd))
+  const dir = path.join(projectsDir, cwdToSlug(session.cwd))
   const files = listFiles(dir, '.jsonl').filter((f) => !path.basename(f).startsWith('agent-'))
   // 候选按创建时间升序，取最后一个 = 最新创建——「续最后一次运行」语义，与 bindFromPools 取最近写入对齐
   const candidates = candidatesWithEpochFallback(files, session, session.isRunning ? null : session.exitedAt)
   const found = candidates[candidates.length - 1] ?? null
   if (found && found !== hit?.path) {
     locateCache.set(session.id, { path: found })
-    log.info(`定位 claude 会话文件 ${session.id.slice(0, 8)} → ${path.basename(found)}`)
+    log.info(`定位 claude 布局会话文件 ${session.id.slice(0, 8)} → ${path.basename(found)}`)
   }
   return found
 }
