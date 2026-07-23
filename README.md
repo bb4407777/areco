@@ -1,6 +1,6 @@
 # Areco
 
-> 原名 **agent-remote**，v2.2.0 起更名为 **areco**（Agent **Re**mote **Co**ckpit）。
+> 原名 **agent-remote**，v2.2.0 起更名为 **areco**（A **Re**mote **Co**worker）。
 
 CLI Agent 网页远程座舱 —— 在浏览器/手机上远程驾驶 Claude Code、Codex、Reasonix 等 CLI 编程智能体。
 
