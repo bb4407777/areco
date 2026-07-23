@@ -41,5 +41,9 @@
       "autoStart": false,
       "enabled": true
     }
-  ]
+  ],
+  "voice": {
+    "engine": "funasr",
+    "python": "python3"
+  }
 }

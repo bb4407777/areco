@@ -2,14 +2,15 @@
 // prompt 输入：自动增高 textarea（文本多了完整换行显示），Enter 发送/Shift+Enter 换行，IME isComposing 防误发，本地历史上翻
 // 附件：📎 选文件/整卡拖拽 → 上传落盘 Mac（data/uploads/<日期>/）→ 绝对路径回填输入框，agent 拿路径即可读
 // 拖文件夹不上传内容：服务端 Spotlight 按名定位源目录路径回填（见 useFileDrop）
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, computed } from 'vue'
 import { useMessage } from 'naive-ui'
 import { wsClient } from '../ws'
 import { useUiStore } from '../stores/ui'
 import { useFileDrop } from '../composables/useFileDrop'
+import { useVoiceInput } from '../composables/useVoiceInput'
 import FileDropOverlay from './FileDropOverlay.vue'
 
-const props = defineProps<{ sessionId: string; disabled?: boolean }>()
+const props = defineProps<{ sessionId: string; disabled?: boolean; placeholder?: string }>()
 
 const ui = useUiStore()
 const message = useMessage()
@@ -59,6 +60,17 @@ const { dragging, uploading, fileInputEl, pickFiles, onInputChange } = useFileDr
   afterFill: autoGrow,
 })
 
+// 语音输入（长按麦克说话→转写）：状态局部在 composable，engine/hotwords/fillMode 读 ui store
+const { recording, transcribing, pressStart, pressEnd } = useVoiceInput({
+  text,
+  inputEl: promptInput,
+  afterFill: autoGrow,
+  onSubmit: () => send(),
+  engine: computed(() => ui.voiceEngine),
+  hotwords: computed(() => ui.voiceHotwords),
+  fillMode: computed(() => ui.voiceFillMode),
+})
+
 function onKeydown(e: KeyboardEvent) {
   if (e.isComposing) return
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -85,6 +97,9 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
+  <div v-if="recording || transcribing" class="voice-bar">
+    {{ transcribing ? '⏳ 转写中…' : `🔴 正在录音，松开${ui.voiceFillMode === 'send' ? '转写并发送' : '转写填入'}` }}
+  </div>
   <div class="promptbar">
     <input ref="fileInputEl" type="file" multiple hidden @change="onInputChange" />
     <button
@@ -96,12 +111,23 @@ function onKeydown(e: KeyboardEvent) {
     >
       {{ uploading ? '⏳' : '📎' }}
     </button>
+    <button
+      class="mic-btn"
+      :class="{ recording, busy: transcribing }"
+      type="button"
+      :disabled="disabled || transcribing"
+      :title="ui.voiceFillMode === 'send' ? '按住说话，松开转写并发送' : '按住说话，松开转写填入输入框'"
+      @pointerdown="pressStart"
+      @pointerup="pressEnd"
+      @pointerleave="pressEnd"
+      @pointercancel="pressEnd"
+    >{{ transcribing ? '⏳' : recording ? '●' : '🎤' }}</button>
     <textarea
       ref="promptInput"
       v-model="text"
       class="prompt-input"
       rows="1"
-      :placeholder="disabled ? '会话未在运行' : ui.isMobile ? '输入内容，回车发送…' : '输入内容，回车发送（Shift+回车换行）…'"
+      :placeholder="placeholder ?? (disabled ? '会话未在运行' : ui.isMobile ? '输入内容，回车发送…' : '输入内容，回车发送（Shift+回车换行）…')"
       :disabled="disabled"
       autocomplete="off"
       autocapitalize="off"
@@ -138,6 +164,47 @@ function onKeydown(e: KeyboardEvent) {
 }
 .attach-btn:disabled {
   opacity: 0.5;
+}
+.mic-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--input-bg);
+  font-size: 16px;
+  cursor: pointer;
+  touch-action: none; /* 防触摸滚动/长按选中干扰按住说话 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mic-btn:disabled {
+  opacity: 0.5;
+}
+.mic-btn.recording {
+  background: #e5484d;
+  border-color: #e5484d;
+  color: #fff;
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.voice-bar {
+  padding: 6px 12px;
+  background: var(--bar);
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 13px;
+  text-align: center;
 }
 .prompt-input {
   flex: 1;

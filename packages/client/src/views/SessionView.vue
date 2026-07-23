@@ -5,7 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, NTag, useDialog, useMessage } from 'naive-ui'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
-import { EXIT_REASON_TEXT, STATUS_TEXT, chatCapable, trafficColor } from '../utils/format'
+import { EXIT_REASON_TEXT, chatCapable, statusTagText, trafficColor } from '../utils/format'
 import TerminalPane from '../components/TerminalPane.vue'
 import PromptBar from '../components/PromptBar.vue'
 import MobileKeyBar from '../components/MobileKeyBar.vue'
@@ -141,7 +141,7 @@ function onMenu(key: string) {
       <span class="dot" :style="{ background: lightColor, boxShadow: `0 0 0 3px ${lightColor}22` }" />
       <span class="session-name">{{ session?.name ?? '…' }}</span>
       <n-tag v-if="session" size="small" :bordered="false" class="status-tag">
-        {{ STATUS_TEXT[session.status] }}
+        {{ statusTagText(session) }}
       </n-tag>
       <span class="spacer" />
       <ViewModeSwitch v-if="session && chatCapable(session, store.templates)" mode="terminal" @switch="switchMode" />
@@ -163,7 +163,8 @@ function onMenu(key: string) {
     </div>
 
     <MobileKeyBar v-if="ui.isTouch && isLive" :session-id="sessionId" />
-    <PromptBar :session-id="sessionId" :disabled="!isLive" />
+    <!-- 死会话也可直接发：服务端自动 resume 拉起、就绪后注入（gateway sendline 自动恢复） -->
+    <PromptBar :session-id="sessionId" :placeholder="isLive ? undefined : '会话已退出，发送将自动恢复对话…'" />
   </div>
 </template>
 

@@ -203,6 +203,9 @@ export type TranscriptPart =
   | { kind: 'thinking'; text: string }
   | { kind: 'tool_use'; name: string; input: string }
   | { kind: 'tool_result'; text: string; isError: boolean }
+  // 系统注入正文（kimi 后台子 agent 回报/cron 触发等合成 user 消息）：展示归左侧，
+  // 不算用户指令、不参与标题/命名取词（各消费方只读 text 段，天然跳过）
+  | { kind: 'notice'; text: string }
 
 export interface TranscriptPage {
   exists: boolean

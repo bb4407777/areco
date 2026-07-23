@@ -5,7 +5,7 @@ import { computed } from 'vue'
 import { NButton, NDropdown, NTag } from 'naive-ui'
 import type { SessionSummary } from '../../../shared/protocol'
 import { useSessionsStore } from '../stores/sessions'
-import { EXIT_REASON_TEXT, STATUS_TEXT, chatCapable, fmtTime, fmtUptime, shortPath, templateColor, templateLabel, trafficColor } from '../utils/format'
+import { EXIT_REASON_TEXT, chatCapable, fmtTime, fmtUptime, shortPath, statusTagText, templateColor, templateLabel, trafficColor } from '../utils/format'
 
 const props = defineProps<{ session: SessionSummary; now: number }>()
 const emit = defineEmits<{
@@ -31,7 +31,7 @@ const uptime = computed(() => {
 const subtitle = computed(() => {
   const s = props.session
   if (s.status === 'exited' && s.exitReason) return EXIT_REASON_TEXT[s.exitReason]
-  return STATUS_TEXT[s.status]
+  return statusTagText(s)
 })
 
 const store = useSessionsStore()

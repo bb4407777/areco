@@ -1,4 +1,5 @@
 // /api/* 控制器：参数校验 + service 调用 + 统一 {ok,data|error} 响应
+import crypto from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -8,7 +9,7 @@ import type { Context } from 'koa'
 import type { ScreenTailPayload, StatsSummary, Template, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
-import type { AppConfig } from '../config'
+import type { AppConfig, VoiceConfig } from '../config'
 import { DATA_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
 import { agentKindOf, locateClaudeTranscript, parseQclaw, readAgentAllMessages, readAgentTranscript } from '../services/agent-transcript'
@@ -30,6 +31,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$|^-[A-Za-z0-9._-]+$/
 import { handoffPrompt, writeHandoffFile } from '../services/handoff'
 import { effectiveClaudeHome } from '../services/templates'
 import { FileService } from '../services/files'
+import { transcribe } from '../services/voice-asr'
 
 const execFileAsync = promisify(execFile)
 
@@ -107,6 +109,12 @@ export class ApiControllers {
       port: this.config.server.port,
       maxSessions: this.config.server.maxSessions,
       urls: getAccessUrls(this.config.server.port),
+      // 语音输入：只回 key 是否已配置，绝不回传明文（密钥只在服务端 config.json）
+      voice: {
+        engine: this.config.voice?.engine ?? 'funasr',
+        aliyunApiKeyConfigured: Boolean(this.config.voice?.aliyunApiKey?.trim()),
+        python: this.config.voice?.python ?? 'python3',
+      },
     })
   }
 
@@ -129,15 +137,48 @@ export class ApiControllers {
     }, 500)
   }
 
-  /** 更新运行参数（目前仅会话上限）：写回 config.json；同一 config 对象引用，SessionManager 即时生效，无需重启 */
+  /** 更新运行参数（会话上限 / 语音设置）：写回 config.json；同一 config 对象引用，SessionManager 即时生效，无需重启 */
   updateSettings = (ctx: Context) =>
     guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { maxSessions?: unknown }
-      const n = Number(body.maxSessions)
-      if (!Number.isInteger(n) || n < 0) throw new Error('会话上限须为 ≥0 的整数（0 = 无上限）')
-      this.config.server.maxSessions = n
+      const body = (ctx.request.body ?? {}) as {
+        maxSessions?: unknown
+        voice?: { engine?: unknown; aliyunApiKey?: unknown; python?: unknown } | null
+      }
+      const out: Record<string, unknown> = {}
+      if (body.maxSessions !== undefined) {
+        const n = Number(body.maxSessions)
+        if (!Number.isInteger(n) || n < 0) throw new Error('会话上限须为 ≥0 的整数（0 = 无上限）')
+        this.config.server.maxSessions = n
+        out.maxSessions = n
+      }
+      if (body.voice != null) {
+        const v = body.voice
+        const voice: VoiceConfig = this.config.voice ?? { engine: 'funasr', python: 'python3' }
+        if (v.engine !== undefined) {
+          const eng = String(v.engine)
+          if (!['funasr', 'sensevoice', 'aliyun', 'whisper'].includes(eng)) throw new Error('voice.engine 须为 funasr/sensevoice/aliyun/whisper')
+          voice.engine = eng as VoiceConfig['engine']
+        }
+        if (v.aliyunApiKey !== undefined) {
+          const key = String(v.aliyunApiKey ?? '').trim()
+          if (key && !/^sk-[A-Za-z0-9_\-.]{20,}$/.test(key)) throw new Error('阿里云 Key 须 sk- 开头')
+          if (key) voice.aliyunApiKey = key
+          else delete voice.aliyunApiKey // 空串 = 清空
+        }
+        if (v.python !== undefined) {
+          const py = String(v.python).trim()
+          if (py) voice.python = py
+        }
+        this.config.voice = voice
+        out.voice = {
+          engine: voice.engine,
+          aliyunApiKeyConfigured: Boolean(voice.aliyunApiKey?.trim()),
+          python: voice.python ?? 'python3',
+        }
+      }
+      if (Object.keys(out).length === 0) throw new Error('未提供可更新字段（maxSessions / voice）')
       saveConfig(this.config)
-      ok(ctx, { maxSessions: n })
+      ok(ctx, out)
     })
 
   // ---- templates ----
@@ -570,6 +611,53 @@ export class ApiControllers {
       ctx.req.on('error', reject)
     })
     ok(ctx, { path: target, size })
+  }
+
+  /**
+   * 语音转写：前端长按说话录的 16kHz 单声道 PCM wav（raw body，同 fileUpload）→
+   * 落 data/voice/<日期>/ → 按引擎转写 → {text, engine}。
+   * engine 默认 config.voice.engine，前端可在 query 覆盖；funasr/sensevoice/whisper 走本地
+   * python（scripts/voice-transcribe.py），aliyun 走云端 dashscope。转写完即删临时录音。
+   */
+  voiceTranscribe = async (ctx: Context) => {
+    let wavPath = ''
+    try {
+      const engine = (typeof ctx.query.engine === 'string' ? ctx.query.engine : '').trim() || this.config.voice?.engine || 'funasr'
+      const hotwords = typeof ctx.query.hotwords === 'string' ? ctx.query.hotwords : ''
+      const day = new Date()
+      const dayDir = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
+      const dir = path.join(DATA_DIR, 'voice', dayDir)
+      fs.mkdirSync(dir, { recursive: true })
+      wavPath = path.join(dir, `${crypto.randomUUID()}.wav`)
+      const MAX = 20 * 1024 * 1024 // 20MB ≈ 16k 单声道 10 分钟，足够一段语音指令
+      let size = 0
+      await new Promise<void>((resolve, reject) => {
+        const out = fs.createWriteStream(wavPath)
+        ctx.req.on('data', (chunk: Buffer) => {
+          size += chunk.length
+          if (size > MAX) {
+            ctx.req.destroy()
+            out.destroy()
+            reject(new Error('录音超过 20MB 上限'))
+          }
+        })
+        ctx.req.pipe(out)
+        out.on('finish', resolve)
+        out.on('error', reject)
+        ctx.req.on('error', reject)
+      })
+      const result = await transcribe(engine, wavPath, {
+        hotwords,
+        python: this.config.voice?.python,
+        aliyunApiKey: this.config.voice?.aliyunApiKey,
+      })
+      ok(ctx, result)
+    } catch (err) {
+      fail(ctx, 400, 'bad_request', err instanceof Error ? err.message : String(err))
+    } finally {
+      // 第一版不做录音回放/纠错：转写完即清自己生成的临时录音（非用户文件）
+      if (wavPath) fs.rm(wavPath, { force: true }, () => {})
+    }
   }
 
   /**

@@ -43,6 +43,9 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.post('/files/upload', c.fileUpload)
   router.post('/files/locate-dir', c.fileLocateDir)
 
+  // 语音输入（长按说话→转写）：raw 16kHz wav → 文字。前端 PromptBar 长按录音后 POST
+  router.post('/voice/transcribe', c.voiceTranscribe)
+
   // 项目协作（Phase 6：项目 = 人 + 活会话，@mention 投递终端，消息 SoT 在项目消息库）
   router.get('/rooms', rc.list)
   router.post('/rooms', rc.create)

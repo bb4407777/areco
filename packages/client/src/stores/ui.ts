@@ -7,6 +7,7 @@ const LEGACY_LS_KEY = 'agent-remote-ui'
 
 export type ThemeMode = 'dark' | 'light'
 export type SessionViewMode = 'terminal' | 'chat'
+export type VoiceEngine = 'funasr' | 'sensevoice' | 'aliyun' | 'whisper'
 
 interface UiPrefs {
   fontSize: number
@@ -23,9 +24,15 @@ interface UiPrefs {
   showToolUse: boolean
   /** 对话模式：显示工具结果 tool_result（默认关，勾选才显示） */
   showToolResult: boolean
+  /** 语音输入 ASR 引擎：funasr(本地 Paraformer,默认)/sensevoice(粤语方言)/aliyun(云)/whisper(兜底) */
+  voiceEngine: VoiceEngine
+  /** 语音松开后：send=直接发送（默认），fill=仅填入输入框 */
+  voiceFillMode: 'send' | 'fill'
+  /** 语音热词，空格分隔（仅 paraformer 引擎用，提升专有词识别） */
+  voiceHotwords: string
 }
 
-const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', newSessionView: 'terminal', showThinking: false, showToolUse: false, showToolResult: false }
+const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', newSessionView: 'terminal', showThinking: false, showToolUse: false, showToolResult: false, voiceEngine: 'funasr', voiceFillMode: 'send', voiceHotwords: '' }
 
 function load(): UiPrefs {
   try {
@@ -51,8 +58,8 @@ export const useUiStore = defineStore('ui', {
   },
   actions: {
     persist() {
-      const { fontSize, recentCwds, promptHistory, theme, sessionView, newSessionView, showThinking, showToolUse, showToolResult } = this
-      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, newSessionView, showThinking, showToolUse, showToolResult }))
+      const { fontSize, recentCwds, promptHistory, theme, sessionView, newSessionView, showThinking, showToolUse, showToolResult, voiceEngine, voiceFillMode, voiceHotwords } = this
+      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, newSessionView, showThinking, showToolUse, showToolResult, voiceEngine, voiceFillMode, voiceHotwords }))
     },
     setSessionView(mode: SessionViewMode) {
       this.sessionView = mode
@@ -72,6 +79,18 @@ export const useUiStore = defineStore('ui', {
     },
     setShowToolResult(v: boolean) {
       this.showToolResult = v
+      this.persist()
+    },
+    setVoiceEngine(v: VoiceEngine) {
+      this.voiceEngine = v
+      this.persist()
+    },
+    setVoiceFillMode(m: 'send' | 'fill') {
+      this.voiceFillMode = m
+      this.persist()
+    },
+    setVoiceHotwords(s: string) {
+      this.voiceHotwords = s
       this.persist()
     },
     /** 应用主题到文档（CSS 变量作用域 + iOS 状态栏色） */

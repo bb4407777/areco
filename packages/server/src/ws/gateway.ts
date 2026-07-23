@@ -157,10 +157,30 @@ export class Gateway {
         break
       }
       case 'sendline': {
-        const session = this.manager.get(msg.sessionId)
-        if (!session.isRunning) break // 竞态：会话刚退出/停止中，静默丢弃，不报错
+        let session = this.manager.get(msg.sessionId)
         this.controllers.set(msg.sessionId, conn)
         const att = conn.attached.get(msg.sessionId)
+        if (!session.isRunning) {
+          // 死会话发消息 = 想继续聊：自动 resume 拉起（无恢复凭据退化为全新重启，见 manager.restart），
+          // onceQuiet 等首屏画完再注入——与 room-relay 离线成员投递同口径，客户端无感续聊
+          try {
+            this.manager.restart(session.id, true)
+            session = this.manager.get(msg.sessionId)
+          } catch (err) {
+            this.sendError(conn, 'revive_failed', err instanceof Error ? err.message : String(err), msg.sessionId)
+            break
+          }
+          const revived = session
+          log.info(`sendline 触发自动恢复 ${revived.id.slice(0, 8)}，就绪后注入`)
+          revived.onceQuiet(() => {
+            try {
+              revived.sendline(msg.text)
+            } catch {
+              /* 注入前进程又退了，丢弃 */
+            }
+          })
+          break
+        }
         if (att) session.resize(att.cols, att.rows)
         session.sendline(msg.text)
         break
