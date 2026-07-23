@@ -20,7 +20,19 @@
     "areco": "dist/server/index.cjs"
   },
   "type": "module",
-  "description": "CLI Agent 网页远程座舱 —— 在浏览器/手机上远程驾驶 Claude Code、Codex、Reasonix 等 CLI 编程智能体",
+  "description": "Remote cockpit for CLI coding agents (Claude Code / Codex / Reasonix) — drive them from your browser or phone. CLI Agent 网页远程座舱",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "remote-control",
+    "terminal",
+    "pty",
+    "web-ui",
+    "agent-orchestration",
+    "llm",
+    "coding-agent"
+  ],
   "engines": {
     "node": ">=24"
   },

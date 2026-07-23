@@ -4,6 +4,24 @@
 
 CLI Agent 网页远程座舱 —— 在浏览器/手机上远程驾驶 Claude Code、Codex、Reasonix 等 CLI 编程智能体。
 
+## English
+
+**Areco is a remote cockpit for CLI coding agents** — drive Claude Code, Codex, Reasonix and other terminal-based AI agents from your browser or phone, like a chat app for your agents.
+
+- **Multi-agent, multi-session**: spawn sessions from templates (claude / codex / reasonix / shell / custom), each with its own working directory
+- **Server-side pty**: start a task on your phone, lock the screen, come back hours later — the session resumes pixel-perfect (shadow-terminal snapshots + offset streaming, alt-screen TUIs included)
+- **Device handoff**: open the same live session from any browser, pick up exactly where you left off
+- **Chat transcript view**: read agent conversations as clean chat bubbles (Markdown + code highlighting) parsed from each agent's own session files — far more readable on a phone than a raw TUI
+- **Project rooms**: group sessions into rooms with @mention routing and shared context, like a group chat of agents
+- **Zero cloud**: self-hosted single binary, your agents and data stay on your machine
+
+```bash
+npm i -g areco && areco   # then open http://127.0.0.1:8790
+```
+
+Apache-2.0 · [GitHub](https://github.com/bb4407777/areco) · 中文文档见下文
+
+
 ## 能干什么
 
 - **多 agent 多会话**：模板（claude / codex / reasonix / shell / 自定义）→ 随开随关多个会话，各带独立 cwd
