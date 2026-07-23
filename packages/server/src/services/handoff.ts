@@ -2,13 +2,9 @@
 // 与原生 resume 的分工：resume 无损（同 agent 内部状态全保留），接续有损但通用——
 // 只带走对话内容；干活的真实状态在文件与 git 里，交接档案负责把"讲到哪了"说清楚。
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { DATA_DIR } from '../config'
 import type { TranscriptMessage } from '../../../shared/protocol'
-
-// agmsg（跨 agent 消息，~/Code/agmsg）装机检测：装了就在档案头部告诉接手方可以联系在线同伴
-const agmsgInstalled = () => fs.existsSync(path.join(os.homedir(), '.agents/skills/agmsg'))
 
 const HANDOFF_DIR = path.join(DATA_DIR, 'handoff')
 // 交接档案正文上限：超长取尾部并在头部注明（模型自己读文件，不受一次输入限制，但没必要无限大）
@@ -66,9 +62,6 @@ export function writeHandoffFile(meta: HandoffMeta, messages: TranscriptMessage[
     '> 这是另一个 agent 会话的历史记录。请通读后接着记录末尾正在进行的任务继续工作；',
     '> 工具行只是当时的摘要（🔧 调用 / ↩️ 结果，均有截断），',
     '> 若记录里的结论与当前文件/代码状态冲突，一律以当前工作区实测为准。',
-    ...(agmsgInstalled()
-      ? ['> 本机装有 agmsg（跨 agent 消息）：若任务需要与其他在线 agent 协作，可用 /agmsg（或 $agmsg）联系队友。']
-      : []),
     '',
   ].join('\n')
 
