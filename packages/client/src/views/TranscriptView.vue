@@ -3,7 +3,7 @@
 // 增量轮询 2.5s 追新（仅页面可见时），底部 PromptBar 可直接续问。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDropdown, NEmpty, NSpin, NTag, useDialog, useMessage } from 'naive-ui'
+import { NButton, NDropdown, NSpin, NTag, useDialog, useMessage } from 'naive-ui'
 import type { ScreenTailPayload, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
@@ -14,6 +14,7 @@ import ChatMessage from '../components/ChatMessage.vue'
 import FilePreview from '../components/FilePreview.vue'
 import MobileKeyBar from '../components/MobileKeyBar.vue'
 import PromptBar from '../components/PromptBar.vue'
+import TypingIndicator from '../components/TypingIndicator.vue'
 import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
 
@@ -185,6 +186,15 @@ watch(showScreen, (open) => {
 const awaitingChoice = computed(() => {
   return session.value?.trafficState === 'needs-user'
 })
+// agent 正在干活：对话流尾部挂「正在输入中…」动效（对话模式没有终端滚屏的活感）
+const working = computed(() => session.value?.status === 'running' && session.value?.trafficState === 'working')
+watch(working, async (w) => {
+  // 指示气泡刚出现时若本就贴底，跟滚一下让它入镜；用户在上翻则不打扰
+  if (w) {
+    await nextTick()
+    if (!showJump.value) scrollToBottom()
+  }
+})
 const lightColor = computed(() =>
   session.value
     ? trafficColor(session.value.trafficState, session.value.status)
@@ -314,12 +324,13 @@ onBeforeUnmount(() => {
     <div class="stream-wrap">
       <div ref="scroller" class="stream" @scroll.passive="onScroll">
         <n-spin v-if="loading" class="center" />
-        <n-empty v-else-if="!exists" description="还没有找到这个会话的对话记录（agent 可能尚未落盘）" class="center" />
-        <n-empty v-else-if="!messages.length" description="还没有对话内容" class="center" />
         <template v-else>
+          <!-- .more 固定高度常驻：空态/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
           <div class="more">
-            <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
-            <span v-else class="done">已到最早</span>
+            <template v-if="exists && messages.length">
+              <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
+              <span v-else class="done">已到最早</span>
+            </template>
           </div>
           <ChatMessage
             v-for="(msg, i) in messages"
@@ -327,8 +338,9 @@ onBeforeUnmount(() => {
             :message="msg"
             @preview="previewPath = $event"
           />
-          <div class="stream-tail" />
+          <div v-if="messages.length" class="stream-tail" />
         </template>
+        <TypingIndicator v-if="working && !loading" class="stream-typing" label="正在输入中…" />
       </div>
       <Transition name="jump">
         <button v-if="showJump" type="button" class="jump-latest" @click="jumpToLatest">↓ 回到最新</button>
@@ -481,6 +493,9 @@ onBeforeUnmount(() => {
 .more {
   display: flex;
   justify-content: center;
+  align-items: center;
+  box-sizing: border-box;
+  height: 32px; /* tiny 按钮 22px + padding 10px：「加载更早」/「已到最早」/空态同高不塌缩 */
   padding: 2px 0 8px;
 }
 .done {
@@ -489,6 +504,9 @@ onBeforeUnmount(() => {
 }
 .stream-tail {
   height: 8px;
+}
+.stream-typing {
+  margin: 0 12px 8px;
 }
 .center {
   margin-top: 18vh;

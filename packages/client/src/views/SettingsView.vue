@@ -38,6 +38,11 @@ interface SystemInfo {
 
 const store = useSessionsStore()
 const ui = useUiStore()
+
+/** 设置项「新建会话默认进入对话模式」：true=对话，false=终端 */
+function setNewSessionDefault(v: boolean) {
+  ui.setNewSessionView(v ? 'chat' : 'terminal')
+}
 const message = useMessage()
 const dialog = useDialog()
 
@@ -353,7 +358,7 @@ function clearLog() {
           <template #trigger>
             <n-button size="small" secondary type="error" :loading="restarting" style="margin-left: 12px">一键重启</n-button>
           </template>
-          确定重启服务？将中断全部运行中的会话（看板元数据保留），服务恢复后页面自动刷新。
+          确定重启？运行中的会话会中断，恢复后自动刷新。
         </n-popconfirm>
         <!-- 认证未启用时退出登录 = 跳登录页又弹回首页（原地转圈），不显示 -->
         <n-button v-if="system?.authEnabled" size="small" secondary style="margin-left: 12px" @click="logout">退出登录</n-button>
@@ -390,6 +395,13 @@ function clearLog() {
 
     <n-card size="small" class="block">
       <template #header>对话模式</template>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">新建会话默认进入对话模式</div>
+          <div class="pref-hint">默认关闭（新建先进终端看启动画面）；shell 等无落盘会话始终进终端</div>
+        </div>
+        <n-switch :value="ui.newSessionView === 'chat'" @update:value="setNewSessionDefault" />
+      </div>
       <div class="pref-row">
         <div>
           <div class="pref-label">显示思考过程</div>

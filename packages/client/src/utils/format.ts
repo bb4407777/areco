@@ -113,3 +113,17 @@ export function chatCapable(
   // claude 包装器会话缺 claudeSessionId（模板 claudeHome 曾丢失）：模板配了 claudeHome 即可走服务端窗口定位
   return Boolean(templates?.find((t) => t.id === session.templateId)?.claudeHome)
 }
+
+/**
+ * 按显示偏好算会话落点路由：view 为 chat 且会话有落盘 transcript 可读 → /chat，否则终端页。
+ * 看板/侧栏点卡片（sessionView）与新建会话（newSessionView）共用这一份判断，别在调用处复制
+ */
+export function sessionEntryPath(
+  id: string,
+  session: { claudeSessionId: string | null; command: string; templateId: string } | null | undefined,
+  templates: Array<{ id: string; claudeHome?: string }> | undefined,
+  view: 'terminal' | 'chat'
+): string {
+  const chat = view === 'chat' && !!session && chatCapable(session, templates)
+  return chat ? `/session/${id}/chat` : `/session/${id}`
+}

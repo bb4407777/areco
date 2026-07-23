@@ -7,7 +7,7 @@ import { useRoomsStore } from '../stores/rooms'
 import { useUiStore } from '../stores/ui'
 import { useRenameDialog } from '../composables/useRenameDialog'
 import type { SessionSummary } from '../../../shared/protocol'
-import { chatCapable, templateColor, templateLabel, trafficColor, STATUS_TEXT } from '../utils/format'
+import { chatCapable, sessionEntryPath, templateColor, templateLabel, trafficColor, STATUS_TEXT } from '../utils/format'
 import { groupSessionsByRoom } from '../utils/sessionGroups'
 
 const store = useSessionsStore()
@@ -47,9 +47,7 @@ function toggleGroup(id: string) {
 }
 
 function open(id: string) {
-  const s = store.byId(id)
-  const chat = ui.sessionView === 'chat' && s && chatCapable(s, store.templates)
-  router.push(chat ? `/session/${id}/chat` : `/session/${id}`)
+  router.push(sessionEntryPath(id, store.byId(id), store.templates, ui.sessionView))
 }
 
 function dotColor(s: SessionSummary): string {

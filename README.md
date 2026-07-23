@@ -27,7 +27,7 @@ Apache-2.0 · [GitHub](https://github.com/bb4407777/areco) · 中文文档见下
 - **多 agent 多会话**：模板（claude / codex / reasonix / shell / 自定义）→ 随开随关多个会话，各带独立 cwd
 - **pty 活在服务端**：手机上开个任务、锁屏关浏览器，晚点回来画面无缝接上（影子终端快照 + offset 续流，alt-screen TUI 也不花屏）
 - **换设备接管**：手机开的会话，电脑浏览器打开就是同一现场
-- **Transcript 对话视图**：座舱头部「⌨️ 终端 / 💬 对话」分段切换——对话模式直读 agent 自己的会话落盘重建聊天气泡（markdown + 代码高亮，手机上比 TUI 可读得多）：claude 系读 `~/.claude/projects/**.jsonl`（字节游标尾载分页）；codex / workbuddy(codebuddy) / reasonix / kimi 直读各自落盘（`~/.codex/sessions` rollout、`~/.workbuddy/projects` jsonl、`~/.reasonix/sessions` replace 帧、`~/.kimi-code/sessions` wire.jsonl，消息级游标，文件按 cwd(-slug) + 启动时刻自动关联——不解析终端流，去 agent 数据层拿结构化对话）。尾部先载 + 「加载更早」向前翻页，2.5s 增量追新，底部可直接续问；默认对话模式、切换偏好记忆在本机，看板点卡片按偏好进入（shell 等无落盘会话始终进终端；新建会话固定先进终端看启动画面）
+- **Transcript 对话视图**：座舱头部「⌨️ 终端 / 💬 对话」分段切换——对话模式直读 agent 自己的会话落盘重建聊天气泡（markdown + 代码高亮，手机上比 TUI 可读得多）：claude 系读 `~/.claude/projects/**.jsonl`（字节游标尾载分页）；codex / workbuddy(codebuddy) / reasonix / kimi 直读各自落盘（`~/.codex/sessions` rollout、`~/.workbuddy/projects` jsonl、`~/.reasonix/sessions` replace 帧、`~/.kimi-code/sessions` wire.jsonl，消息级游标，文件按 cwd(-slug) + 启动时刻自动关联——不解析终端流，去 agent 数据层拿结构化对话）。尾部先载 + 「加载更早」向前翻页，2.5s 增量追新，底部可直接续问；默认对话模式、切换偏好记忆在本机，看板点卡片按偏好进入（shell 等无落盘会话始终进终端；新建会话落点可在设置页「对话模式」里选，默认先进终端看启动画面）
 - **历史对话浏览**（顶栏「历史」）：翻本机全部落盘会话，双层数据源——
   ① 原生层：`~/.claude/projects` + 各隔离 HOME 分身（`~/.homes/*/.claude/projects`，如 c5/fable）自动发现，
   另有 kimi（`~/.kimi-code/sessions/<wd>/<session_*>/agents/main/wire.jsonl`，元信息读 state.json）与 qclaw；

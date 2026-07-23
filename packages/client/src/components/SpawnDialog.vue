@@ -2,11 +2,13 @@
 // 新建会话：模板 + cwd（最近目录快捷选）。不命名——首条消息自动成为会话名（同历史对话）。移动端呈现为底部抽屉。
 import { computed, ref, watch } from 'vue'
 import { NButton, NDrawer, NDrawerContent, NInput, NModal, NSelect, NTag, useMessage } from 'naive-ui'
+import type { SessionSummary } from '../../../shared/protocol'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 
 const props = defineProps<{ show: boolean }>()
-const emit = defineEmits<{ 'update:show': [value: boolean]; spawned: [id: string] }>()
+// spawned 带完整会话对象：store 靠 ws 推送，spawn 返回瞬间 byId 还查不到，落点判断要用它
+const emit = defineEmits<{ 'update:show': [value: boolean]; spawned: [session: SessionSummary] }>()
 
 const store = useSessionsStore()
 const ui = useUiStore()
@@ -44,7 +46,7 @@ async function submit() {
     })
     ui.rememberCwd(session.cwd)
     emit('update:show', false)
-    emit('spawned', session.id)
+    emit('spawned', session)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {

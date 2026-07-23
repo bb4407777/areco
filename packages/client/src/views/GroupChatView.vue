@@ -16,6 +16,7 @@ import FileDropOverlay from '../components/FileDropOverlay.vue'
 import FilePreview from '../components/FilePreview.vue'
 import ProjectArtifactsBar from '../components/ProjectArtifactsBar.vue'
 import ProjectFilesPanel from '../components/ProjectFilesPanel.vue'
+import TypingIndicator from '../components/TypingIndicator.vue'
 
 const HUMAN_FALLBACK = 'Owner'
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
@@ -78,6 +79,8 @@ function memberWorking(m: RoomMember): boolean {
   const s = memberSession(m)
   return Boolean(s && s.status === 'running' && s.trafficState === 'working')
 }
+// 正在干活的 agent 成员：消息流尾部各挂一条「正在输入中…」动效（对话页没有终端滚屏的活感）
+const workingMembers = computed(() => (room.value?.members ?? []).filter((m) => m.kind === 'session' && memberWorking(m)))
 
 const SHELL_FREE = (cmd: string) => !SHELLS.has(cmd.split('/').pop() ?? '')
 // 加成员只有一组：新建 agent 进项目（按模板现场拉起，roomId 强归属、专职专用）。
@@ -764,6 +767,12 @@ onMounted(async () => {
               </div>
               <div class="bubble">{{ m.body }}</div>
             </div>
+            <TypingIndicator
+              v-for="m in workingMembers"
+              :key="`typing-${m.name}`"
+              :style="{ '--sender': memberColor(m) }"
+              :label="`${m.name} 正在输入中…`"
+            />
           </template>
         </div>
 

@@ -4,10 +4,11 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NEmpty, useDialog, useMessage } from 'naive-ui'
+import type { SessionSummary } from '../../../shared/protocol'
 import { useSessionsStore } from '../stores/sessions'
 import { useRoomsStore } from '../stores/rooms'
 import { useUiStore } from '../stores/ui'
-import { chatCapable } from '../utils/format'
+import { sessionEntryPath } from '../utils/format'
 import { groupSessionsByRoom } from '../utils/sessionGroups'
 import SessionCard from '../components/SessionCard.vue'
 import SpawnDialog from '../components/SpawnDialog.vue'
@@ -39,8 +40,10 @@ function toggleGroup(id: string) {
   expandedGroups.value = next
 }
 
-function openTerminal(id: string) {
-  router.push(`/session/${id}`)
+// 新建会话落点按设置页「新建会话默认显示模式」偏好（无落盘的 shell 类仍进终端）；
+// 直接用 spawn 返回的会话对象——store 靠 ws 推送，此刻 byId 还查不到
+function openSpawned(s: SessionSummary) {
+  router.push(sessionEntryPath(s.id, store.byId(s.id) ?? s, store.templates, ui.newSessionView))
 }
 
 onMounted(() => {
@@ -55,9 +58,7 @@ onBeforeUnmount(() => {
 
 // 点卡片按偏好进入
 function open(id: string) {
-  const s = store.byId(id)
-  const chat = ui.sessionView === 'chat' && s && chatCapable(s, store.templates)
-  router.push(chat ? `/session/${id}/chat` : `/session/${id}`)
+  router.push(sessionEntryPath(id, store.byId(id), store.templates, ui.sessionView))
 }
 
 async function run(action: () => Promise<unknown>) {
@@ -202,7 +203,7 @@ function handoff(id: string, templateId: string) {
       </section>
     </template>
 
-    <SpawnDialog v-model:show="showSpawn" @spawned="openTerminal" />
+    <SpawnDialog v-model:show="showSpawn" @spawned="openSpawned" />
   </div>
 </template>
 

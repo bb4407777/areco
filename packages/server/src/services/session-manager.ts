@@ -401,27 +401,33 @@ export class SessionManager extends EventEmitter {
   private pendingRemove = new Set<string>()
   /** 运行中归档标记：archive 时先 stop，exit 事件命中此集合再落 archived（与 pendingRemove 同链路） */
   private pendingArchive = new Set<string>()
-  private static readonly TRUST_PROMPT = /Trust folder only|Enter to confirm • Esc to exit/
+  /** 各 CLI 的「信任目录」确认页特征文本（按 command basename 匹配；默认选项均为信任，回车即过页） */
+  private static readonly TRUST_PROMPTS: Record<string, RegExp> = {
+    codebuddy: /Trust folder only|Enter to confirm • Esc to exit/,
+    qoderclicn: /Do you trust the files in this folder\?/,
+  }
   private static readonly TRUST_WINDOW_MS = 120_000
 
   /**
-   * codebuddy 每个新进程都弹「信任目录」确认页（cwd=HOME 时尤甚），会吞掉注入的首条输入。
-   * 从 pty 输出检测到确认页即自动回车（默认选中 Trust folder only）——确定性过页，
+   * codebuddy/qoderclicn 每个新进程都弹「信任目录」确认页（cwd=HOME 时尤甚），会吞掉注入的首条输入。
+   * 从 pty 输出检测到确认页即自动回车（默认选中信任项）——确定性过页，
    * 不赌启动时序；只在进程启动后 2 分钟内生效且每 epoch 一次，防对话正文同款文字误触发。
    */
   private maybeConfirmTrustPage(session: Session, data: string, epoch: number) {
-    if (path.basename(session.command) !== 'codebuddy') return
+    const cmd = path.basename(session.command)
+    const prompt = SessionManager.TRUST_PROMPTS[cmd]
+    if (!prompt) return
     if (this.trustConfirmed.get(session.id) === epoch) return
     if (!session.isRunning || !session.startedAt) return
     if (Date.now() - session.startedAt > SessionManager.TRUST_WINDOW_MS) return
     // TUI 渲染的 ANSI 转义可能插在文字中间，先剥掉再匹配（仅启动窗口内有此开销）
     // eslint-disable-next-line no-control-regex
     const plain = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
-    if (!SessionManager.TRUST_PROMPT.test(plain)) return
+    if (!prompt.test(plain)) return
     this.trustConfirmed.set(session.id, epoch)
     try {
       session.write('\r', { markWorking: false })
-      log.info(`codebuddy trust 确认页自动回车 ${session.id.slice(0, 8)}（epoch ${epoch}）`)
+      log.info(`${cmd} trust 确认页自动回车 ${session.id.slice(0, 8)}（epoch ${epoch}）`)
     } catch {
       /* 会话可能恰好退出 */
     }

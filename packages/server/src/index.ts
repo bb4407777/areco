@@ -190,6 +190,18 @@ async function main() {
   process.on('SIGTERM', () => shutdown('SIGTERM'))
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('unhandledRejection', (reason) => log.error('unhandledRejection', reason))
+  // EPIPE: 子进程管道断开时触发（如"一键刷新"杀会话后仍有输出写入）
+  // 不防护会导致 Node 默认抛 uncaughtException → 进程崩溃
+  process.on('EPIPE', () => log.warn('EPIPE（子进程管道已断开，忽略）'))
+  // 兜底：未捕获异常记日志但不杀进程（launchd KeepAlive 才不会反复重启）
+  process.on('uncaughtException', (err) => {
+    log.error('uncaughtException', err)
+    // EPIPE 类不退出，其他致命错误仍优雅退出
+    if ((err as NodeJS.ErrnoException).code !== 'EPIPE') {
+      log.error('致命错误，3 秒后退出')
+      setTimeout(() => process.exit(1), 3000)
+    }
+  })
 }
 
 void main()

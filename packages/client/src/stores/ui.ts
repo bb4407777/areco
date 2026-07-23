@@ -15,6 +15,8 @@ interface UiPrefs {
   theme: ThemeMode
   /** 座舱默认显示模式：看板点卡片时 claude 系会话按此进入（终端/对话）。默认对话 */
   sessionView: SessionViewMode
+  /** 新建会话成功后的默认显示模式（终端/对话）。默认终端——先看启动画面 */
+  newSessionView: SessionViewMode
   /** 对话模式：显示 agent 思考过程（默认关，勾选才显示） */
   showThinking: boolean
   /** 对话模式：显示工具调用 tool_use（默认关，勾选才显示） */
@@ -23,7 +25,7 @@ interface UiPrefs {
   showToolResult: boolean
 }
 
-const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false }
+const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', newSessionView: 'terminal', showThinking: false, showToolUse: false, showToolResult: false }
 
 function load(): UiPrefs {
   try {
@@ -49,11 +51,15 @@ export const useUiStore = defineStore('ui', {
   },
   actions: {
     persist() {
-      const { fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult } = this
-      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult }))
+      const { fontSize, recentCwds, promptHistory, theme, sessionView, newSessionView, showThinking, showToolUse, showToolResult } = this
+      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, newSessionView, showThinking, showToolUse, showToolResult }))
     },
     setSessionView(mode: SessionViewMode) {
       this.sessionView = mode
+      this.persist()
+    },
+    setNewSessionView(mode: SessionViewMode) {
+      this.newSessionView = mode
       this.persist()
     },
     setShowThinking(v: boolean) {

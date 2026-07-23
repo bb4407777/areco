@@ -155,19 +155,24 @@ function onContinue(key: string) {
 
     <div ref="scroller" class="stream">
       <n-spin v-if="loading" class="center" />
-      <n-empty v-else-if="!messages.length" description="这份日志里没有可展示的对话" class="center" />
       <template v-else>
+        <!-- .more 固定高度常驻：空态/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
         <div class="more">
-          <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
-          <span v-else class="done">已到最早</span>
+          <template v-if="messages.length">
+            <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
+            <span v-else class="done">已到最早</span>
+          </template>
         </div>
-        <ChatMessage
-          v-for="(msg, i) in messages"
-          :key="firstIndex + i"
-          :message="msg"
-          @preview="previewPath = $event"
-        />
-        <div class="stream-tail" />
+        <n-empty v-if="!messages.length" description="这份日志里没有可展示的对话" class="center" />
+        <template v-else>
+          <ChatMessage
+            v-for="(msg, i) in messages"
+            :key="firstIndex + i"
+            :message="msg"
+            @preview="previewPath = $event"
+          />
+          <div class="stream-tail" />
+        </template>
       </template>
     </div>
     <FilePreview :path="previewPath" @close="previewPath = null" />
@@ -210,6 +215,9 @@ function onContinue(key: string) {
 .more {
   display: flex;
   justify-content: center;
+  align-items: center;
+  box-sizing: border-box;
+  height: 32px; /* tiny 按钮 22px + padding 10px：「加载更早」/「已到最早」/空态同高不塌缩 */
   padding: 2px 0 8px;
 }
 .done {
