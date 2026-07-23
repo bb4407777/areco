@@ -24,11 +24,58 @@ function clip(text: string): string {
   return t.length > MAX_TITLE ? `${t.slice(0, MAX_TITLE - 1)}…` : t
 }
 
-/** 单条用户输入 → prompt 演化名；交接档案注入（「先读 …/完整记录（来自 X）」）取档案标题，取不到不改名 */
+/** 短确认/客套永不当会话名——「好」「ok」会把有意义的名字洗掉（2026-07-24 高律师定） */
+const STOP_WORDS = new Set([
+  '好', '好的', '好哒', '好啊', '好吧', '好嘞', 'ok', 'okay', '嗯', '嗯嗯', '嗯呐',
+  '行', '行吧', '可以', '可以了', '对', '对的', '没错', '是', '是的', '继续', '接着来',
+  'go', '干吧', '做吧', '改吧', '来吧', '开始', '动手吧', '就这样', '谢谢', '多谢',
+  '收到', '明白', '了解了', '知道了', '提交吧',
+])
+
+/** 命名有效字符：字母/数字/各国文字；标点、emoji、空白不算 */
+function meaningfulChars(text: string): string {
+  return text.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase()
+}
+
+/**
+ * 用户输入是否够格当会话名：去标点空白后 ≥4 个有效字符、非停用词。
+ * 首句命名（session.ts）与 prompt 演化（本文件 promptCandidate）共用同一道门槛
+ */
+export function isNameWorthy(text: string): boolean {
+  const core = meaningfulChars(text)
+  if (core.length < 4) return false
+  return !STOP_WORDS.has(core)
+}
+
+function bigrams(s: string): Set<string> {
+  const out = new Set<string>()
+  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2))
+  return out
+}
+
+/**
+ * 话题延续判断：新候选与当前名子串相含、或字符 bigram 重合度（Dice）≥0.5 → 不换名。
+ * 同一话题的补充命令不应把会话名越换越碎；明显新话题才换（ChatGPT 式语义命名的无 LLM 近似）
+ */
+export function isTopicContinuation(currentName: string, candidate: string): boolean {
+  const a = meaningfulChars(currentName)
+  const b = meaningfulChars(candidate)
+  if (!a || !b) return false
+  if (a.includes(b) || b.includes(a)) return true
+  if (a.length < 2 || b.length < 2) return false
+  const sa = bigrams(a)
+  const sb = bigrams(b)
+  let inter = 0
+  for (const g of sa) if (sb.has(g)) inter++
+  return (2 * inter) / (sa.size + sb.size) >= 0.5
+}
+
+/** 单条用户输入 → prompt 演化名；交接档案注入（「先读 …/完整记录（来自 X）」）取档案标题，取不到不改名；无意义输入（好/ok/继续）不当候选 */
 function promptCandidate(text: string): string {
   const t = text.trim()
   if (!t) return ''
   if (t.startsWith('先读 ') || t.includes('完整记录（来自')) return handoffTitleFromPrompt(t)
+  if (!isNameWorthy(t)) return ''
   return clip(t)
 }
 

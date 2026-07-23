@@ -8,7 +8,7 @@ import type { ScreenTailPayload, TranscriptMessage, TranscriptPage } from '../..
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore, type SessionViewMode } from '../stores/ui'
-import { STATUS_TEXT, chatCapable, templateLabel, trafficColor } from '../utils/format'
+import { chatCapable, statusTagText, templateLabel, trafficColor } from '../utils/format'
 import ArtifactsBar from '../components/ArtifactsBar.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import FilePreview from '../components/FilePreview.vue'
@@ -189,11 +189,12 @@ const awaitingChoice = computed(() => {
 // agent 正在干活：对话流尾部挂「正在输入中…」动效（对话模式没有终端滚屏的活感）
 const working = computed(() => session.value?.status === 'running' && session.value?.trafficState === 'working')
 watch(working, async (w) => {
-  // 指示气泡刚出现时若本就贴底，跟滚一下让它入镜；用户在上翻则不打扰
-  if (w) {
-    await nextTick()
-    if (!showJump.value) scrollToBottom()
-  }
+  // 指示气泡刚出现时若本就贴底，跟滚一下让它入镜；用户在上翻则不打扰。
+  // 贴底判定必须现场量（showJump 靠 scroll 事件对账，内容变长不触发事件，可能是旧值）
+  if (!w) return
+  await nextTick()
+  const el = scroller.value
+  if (el && el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX) scrollToBottom()
 })
 const lightColor = computed(() =>
   session.value
@@ -218,11 +219,11 @@ async function poll() {
     const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?cursor=${requestCursor}`)
     if (gen !== sessionGen) return // 会话已切换，丢弃过期响应
     exists.value = page.exists
-    // 带 start 的是尾页：首载，或 agent 会话（cursor=消息条数）流式解析期条数瞬时收缩触发
-    // total<cursor 的重置——两种都要整页替换（reasonix replace 语义）。但滚动区别对待：
+    // 带 start 的是尾页：首载，或 agent 会话（cursor=消息条数）条数收缩触发 total<cursor 的
+    // 重置——两种都要整页替换（reasonix replace 语义；kimi 等追加型的小抖动服务端已容差，
+    // 到这里的重置都是真收缩）。但滚动区别对待：
     // 只有首载或用户本就贴底才滚到底，否则条数一波动就把正在上翻的用户拽回底部
-    //（2026-07-23 维护者报障"发送后跳回会话开头"——kimi 会话流式写 transcript 时条数抖动，
-    //  claude 走字节游标无此问题，故只 kimi/codex/reasonix 中招）。与增量分支「不自动跟滚」同口径。
+    //（2026-07-23 维护者报障"发送后跳回会话开头"）。与增量分支「不自动跟滚」同口径。
     const isTailPage = page.start !== undefined
     cursor = page.cursor
     if (isTailPage) {
@@ -313,7 +314,7 @@ onBeforeUnmount(() => {
       <n-button v-if="!ui.isDesktop" quaternary size="small" @click="router.push('/')">←</n-button>
       <span class="dot" :style="{ background: lightColor, boxShadow: `0 0 0 3px ${lightColor}22` }" />
       <span class="name">{{ session?.name ?? '…' }}</span>
-      <n-tag v-if="session" size="small" :bordered="false" class="status-tag">{{ STATUS_TEXT[session.status] }}</n-tag>
+      <n-tag v-if="session" size="small" :bordered="false" class="status-tag">{{ statusTagText(session) }}</n-tag>
       <span class="spacer" />
       <ViewModeSwitch mode="chat" @switch="switchMode" />
       <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
@@ -331,11 +332,13 @@ onBeforeUnmount(() => {
               <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
               <span v-else class="done">已到最早</span>
             </template>
+            <span v-else class="done">没有会话</span>
           </div>
           <ChatMessage
             v-for="(msg, i) in messages"
             :key="firstIndex + i"
             :message="msg"
+            :agent-label="artifactAgent"
             @preview="previewPath = $event"
           />
           <div v-if="messages.length" class="stream-tail" />
@@ -368,7 +371,8 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <PromptBar :session-id="sessionId" :disabled="!isLive" />
+    <!-- 死会话也可直接发：服务端自动 resume 拉起、就绪后注入（gateway sendline 自动恢复） -->
+    <PromptBar :session-id="sessionId" :placeholder="isLive ? undefined : '会话已退出，发送将自动恢复对话…'" />
     <FilePreview :path="previewPath" @close="previewPath = null" />
   </div>
 </template>

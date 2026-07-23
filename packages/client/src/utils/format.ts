@@ -21,6 +21,16 @@ export const STATUS_TEXT: Record<SessionStatus, string> = {
   error: '错误',
 }
 
+/**
+ * 状态 tag 文案：进程活着但信号灯是绿（空闲/已出结论、在等输入）时示「等待中」，
+ * 与圆点同口径——红=运行中、绿=等待中，避免「绿灯 + 运行中」自相矛盾（2026-07-23 维护者定）。
+ */
+export function statusTagText(s: { status: SessionStatus; trafficState: TrafficState }): string {
+  if (s.status === 'running' && s.trafficState === 'needs-user') return '有选项'
+  if (s.status === 'running' && (s.trafficState === 'idle' || s.trafficState === 'conclusion')) return '等待中'
+  return STATUS_TEXT[s.status]
+}
+
 export const EXIT_REASON_TEXT: Record<Exclude<ExitReason, null>, string> = {
   'user-stop': '手动停止',
   'user-kill': '强制终止',
@@ -71,6 +81,20 @@ export function templateLabel(
 ): string {
   const tpl = templates?.find((t) => t.id === session.templateId)
   return tpl?.name ?? session.command.split('/').pop() ?? ''
+}
+
+/** 完整时间戳：消息泡泡右下角统一用（对话模式与项目消息同一格式） */
+export function fmtFullTime(ts: number | string): string {
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return String(ts)
+  return d.toLocaleString('zh-CN', {
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 /** 会话所属模板的颜色（本源 template.color，改模板即全变）；模板已删退回中性灰 */

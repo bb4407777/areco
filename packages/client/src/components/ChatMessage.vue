@@ -7,9 +7,10 @@ import hljs from 'highlight.js/lib/common'
 import type { TranscriptMessage } from '../../../shared/protocol'
 import { copyPlainText } from '../utils/clipboard'
 import { extractFileLinks, iconFor, type FileLink } from '../utils/filelinks'
+import { fmtFullTime } from '../utils/format'
 import { useUiStore } from '../stores/ui'
 
-const props = defineProps<{ message: TranscriptMessage }>()
+const props = defineProps<{ message: TranscriptMessage; agentLabel?: string }>()
 const emit = defineEmits<{ preview: [path: string] }>()
 const ui = useUiStore()
 
@@ -19,7 +20,7 @@ let copyTimer: number | null = null
 
 const copyText = computed(() =>
   visibleParts.value
-    .filter((p) => p.kind === 'text')
+    .filter((p) => p.kind === 'text' || p.kind === 'notice')
     .map((p) => p.text)
     .join('\n\n')
     .trim(),
@@ -47,10 +48,12 @@ const visibleParts = computed(() =>
   }),
 )
 
+// 右侧只放真人指令：role=user 且带 text 段才算用户泡泡；tool_result/notice（子 agent 回报、
+// cron 触发等合成 user 消息）一律归左侧（2026-07-23 维护者定：只有用户命令消息放用户侧）
 const displayRole = computed(() =>
-  props.message.parts.length > 0 && props.message.parts.every((part) => part.kind === 'tool_result')
-    ? 'assistant'
-    : props.message.role
+  props.message.role === 'user' && props.message.parts.some((part) => part.kind === 'text')
+    ? 'user'
+    : 'assistant'
 )
 
 // 把整条消息（所有 text 段 + tool_result 段）里的文件路径汇总去重成 chip
@@ -84,11 +87,7 @@ const md = new MarkdownIt({
   },
 })
 
-const time = computed(() => {
-  if (!props.message.timestamp) return ''
-  const d = new Date(props.message.timestamp)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-})
+const time = computed(() => (props.message.timestamp ? fmtFullTime(props.message.timestamp) : ''))
 
 function render(text: string): string {
   return md.render(text)
@@ -97,36 +96,44 @@ function render(text: string): string {
 
 <template>
   <div v-if="visibleParts.length" class="msg" :class="displayRole">
-    <div class="bubble">
-      <template v-for="(part, i) in visibleParts" :key="i">
-        <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
-        <div v-if="part.kind === 'text'" class="md" v-html="render(part.text)" />
-        <details v-else-if="part.kind === 'thinking'" class="fold thinking">
-          <summary>思考过程</summary>
-          <pre>{{ part.text }}</pre>
-        </details>
-        <details v-else-if="part.kind === 'tool_use'" class="fold tool">
-          <summary>🔧 {{ part.name }}</summary>
-          <pre>{{ part.input }}</pre>
-        </details>
-        <details v-else-if="part.kind === 'tool_result'" class="fold" :class="part.isError ? 'err' : 'result'">
-          <summary>{{ part.isError ? '⚠️ 工具报错' : '↩︎ 工具结果' }}</summary>
-          <pre>{{ part.text }}</pre>
-        </details>
-      </template>
-      <div v-if="fileLinks.length" class="files">
-        <button
-          v-for="link in fileLinks"
-          :key="link.path"
-          type="button"
-          class="file-chip"
-          @click="emit('preview', link.path)"
-        >
-          <span class="fi">{{ iconFor(link.ext) }}</span>
-          <span class="fn">{{ link.name }}</span>
-        </button>
+    <div class="msg-col">
+      <!-- 统一版式（与项目消息一致）：发送者名在泡泡上方；复制在泡泡下方左侧；完整时间在右下角 -->
+      <div v-if="agentLabel && displayRole === 'assistant'" class="msg-meta">
+        <span class="from">{{ agentLabel }}</span>
       </div>
-      <div class="meta">
+      <div class="bubble">
+        <template v-for="(part, i) in visibleParts" :key="i">
+          <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
+          <div v-if="part.kind === 'text'" class="md" v-html="render(part.text)" />
+          <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
+          <div v-else-if="part.kind === 'notice'" class="md notice" v-html="render(part.text)" />
+          <details v-else-if="part.kind === 'thinking'" class="fold thinking">
+            <summary>思考过程</summary>
+            <pre>{{ part.text }}</pre>
+          </details>
+          <details v-else-if="part.kind === 'tool_use'" class="fold tool">
+            <summary>🔧 {{ part.name }}</summary>
+            <pre>{{ part.input }}</pre>
+          </details>
+          <details v-else-if="part.kind === 'tool_result'" class="fold" :class="part.isError ? 'err' : 'result'">
+            <summary>{{ part.isError ? '⚠️ 工具报错' : '↩︎ 工具结果' }}</summary>
+            <pre>{{ part.text }}</pre>
+          </details>
+        </template>
+        <div v-if="fileLinks.length" class="files">
+          <button
+            v-for="link in fileLinks"
+            :key="link.path"
+            type="button"
+            class="file-chip"
+            @click="emit('preview', link.path)"
+          >
+            <span class="fi">{{ iconFor(link.ext) }}</span>
+            <span class="fn">{{ link.name }}</span>
+          </button>
+        </div>
+      </div>
+      <div class="msg-foot">
         <button
           v-if="copyText"
           type="button"
@@ -150,8 +157,20 @@ function render(text: string): string {
 .msg.user {
   justify-content: flex-end;
 }
-.bubble {
+.msg-col {
   max-width: 92%;
+  display: flex;
+  flex-direction: column;
+}
+.msg-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.msg-meta .from {
+  font-weight: 600;
+}
+.bubble {
   border-radius: 12px;
   padding: 8px 12px;
   font-size: 14px;
@@ -273,7 +292,7 @@ function render(text: string): string {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.meta {
+.msg-foot {
   display: flex;
   align-items: center;
   margin-top: 3px;

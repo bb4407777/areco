@@ -575,6 +575,14 @@ export function useTerminal(sessionId: string) {
       return
     }
     if (msg.type === 'snapshot' && msg.sessionId === sessionId) {
+      // 纯重连快照与本地已渲染流完全一致（同 epoch 同 offset、无攒压未写的输出）：
+      // 跳过硬重置——reset 会把视口砸到顶部，守卫拉回底也是肉眼可见的一跳
+      //（2026-07-23 手机端"终端模式跳到会话开头"报障：会话闲置断线，点输入栏触发重连即中招）。
+      // 本地画面本来就是最新，直接 ack。pending 非空不能跳：appliedOffset 含未落屏的攒压块。
+      if (msg.epoch === currentEpoch && msg.offset === appliedOffset && pending.length === 0) {
+        wsClient.queueAck(sessionId, msg.offset)
+        return
+      }
       // 快照全量覆盖到 msg.offset，攒着的旧输出作废
       pending = []
       pendingBytes = 0

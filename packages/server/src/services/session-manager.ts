@@ -20,7 +20,7 @@ import {
   readAgentTrafficState,
   registerOccupancyProvider,
 } from './agent-transcript'
-import { NameTracker, nameCandidateOf } from './session-namer'
+import { isTopicContinuation, NameTracker, nameCandidateOf } from './session-namer'
 import { createLogger } from '../logger'
 import { transcriptPath } from './transcript'
 import { readClaudeTrafficState, transcriptFingerprint } from './traffic-monitor'
@@ -484,13 +484,35 @@ export class SessionManager extends EventEmitter {
           if (!source && session.trafficState === 'working' && Date.now() - session.lastOutputAt > 15_000) {
             session.setTrafficState('idle')
           }
+          this.applyScreenChoiceOverride(session, source)
           continue
         }
         session.setTrafficState(this.readTrafficState(session, source))
         this.trafficFingerprints.set(session.id, source.fingerprint)
+        this.applyScreenChoiceOverride(session, source)
       } catch (err) {
         log.warn(`红绿灯判定失败 ${session.id.slice(0, 8)}`, err)
       }
+    }
+  }
+
+  /**
+   * 终端内选择/权限对话框的黄灯兜底：claude 权限框、信任页等只画在 TUI 里，transcript 照不到
+   * （尾消息停在 tool_use → 一直 working 不变黄；对话框开着 transcript 也不再长，指纹不变，
+   * 所以必须每轮都看尾屏，不能只在指纹变化时判——2026-07-24 areco-voice 报障）。
+   * 对话框消失且 transcript 也不认为在等用户时落回 transcript 判定（不抢 transcript 自己的 needs-user）。
+   */
+  private applyScreenChoiceOverride(
+    session: Session,
+    source: { path: string; kind: ReturnType<typeof agentKindOf>; fingerprint: string } | null
+  ) {
+    if (session.trafficState === 'working' && session.hasPendingChoiceOnScreen()) {
+      session.setTrafficState('needs-user')
+      return
+    }
+    if (session.trafficState === 'needs-user' && !session.hasPendingChoiceOnScreen()) {
+      const fromTranscript = source ? this.readTrafficState(session, source) : 'idle'
+      if (fromTranscript !== 'needs-user') session.setTrafficState(fromTranscript)
     }
   }
 
@@ -537,7 +559,8 @@ export class SessionManager extends EventEmitter {
           source.kind === 'kimi'
             ? kimiTitleOf(source.path) || nameCandidateOf(entry.tracker, source.kind)
             : nameCandidateOf(entry.tracker, source.kind ?? 'claude')
-        if (candidate && session.evolveName(candidate)) {
+        // 话题延续不换名（与当前名高度重合的补充命令别把名字越换越碎）；明显新话题才演化
+        if (candidate && !isTopicContinuation(session.name, candidate) && session.evolveName(candidate)) {
           log.info(`会话 ${session.id.slice(0, 8)} 演化改名 → ${candidate}`)
         }
       } catch (err) {

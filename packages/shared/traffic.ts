@@ -16,6 +16,21 @@ export function terminalInputStartsTask(data: string): boolean {
   return data.includes('\r') || data.includes('\n')
 }
 
+/**
+ * claude 权限框/信任页等终端内对话框的特征文本（这些 UI 只画在 TUI 里、不落 transcript）。
+ * 注意不收「bypass permissions」——bypass 模式的状态栏常驻该行（shift+tab 可切换），
+ * 收了它所有 bypass 会话常年黄灯（2026-07-24 误报）；权限框靠标题行/「don't ask again」选项行识别已足够
+ */
+const PENDING_CHOICE_RE = /do you want to|don'?t ask again|do you trust the files/i
+
+/**
+ * 尾屏是否停在选择/确认对话框：transcript 照不到的终端内 UI（权限框、信任页），
+ * 红绿灯的黄灯只能靠影子终端尾屏检出（2026-07-24 areco-voice 权限框不变黄灯报障）
+ */
+export function screenHasPendingChoice(lines: string[]): boolean {
+  return PENDING_CHOICE_RE.test(lines.join('\n'))
+}
+
 export function trafficStateFromMessages(messages: TranscriptMessage[]): Exclude<TrafficState, 'exited'> {
   const last = messages.at(-1)
   if (!last) return 'idle'

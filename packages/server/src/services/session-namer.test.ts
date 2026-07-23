@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { NameTracker, nameCandidateOf } from './session-namer'
+import { isNameWorthy, isTopicContinuation, NameTracker, nameCandidateOf } from './session-namer'
 
 function feed(tracker: NameTracker, source: Parameters<NameTracker['feed']>[1], lines: string[]) {
   tracker.feed(Buffer.from(lines.join('\n') + '\n', 'utf8'), source)
@@ -133,4 +133,47 @@ test('resetIfShrunk：文件被替换截断后从头重扫', () => {
   assert.equal(t.cursor, 0)
   t.resetIfShrunk(cursor + 100)
   assert.equal(t.cursor, 0) // 已归零后 size 仍 >= 0，不再变化
+})
+
+test('无意义输入不当候选名：好/ok/继续/短输入不覆盖有意义的名字', () => {
+  const t = new NameTracker()
+  feed(t, 'kimi', [
+    JSON.stringify({ type: 'turn.prompt', time: 1, input: [{ type: 'text', text: '整理麦晓娴案还款流水' }] }),
+    JSON.stringify({ type: 'turn.prompt', time: 2, input: [{ type: 'text', text: '好' }] }),
+    JSON.stringify({ type: 'turn.prompt', time: 3, input: [{ type: 'text', text: 'ok' }] }),
+    JSON.stringify({ type: 'turn.prompt', time: 4, input: [{ type: 'text', text: '继续' }] }),
+    JSON.stringify({ type: 'turn.prompt', time: 5, input: [{ type: 'text', text: '嗯嗯' }] }),
+    JSON.stringify({ type: 'turn.prompt', time: 6, input: [{ type: 'text', text: '！！！' }] }),
+    JSON.stringify({ type: 'turn.prompt', time: 7, input: [{ type: 'text', text: '看' }] }),
+  ])
+  assert.equal(nameCandidateOf(t, 'kimi'), '整理麦晓娴案还款流水')
+  // 新主题（够格）照常演化
+  feed(t, 'kimi', [JSON.stringify({ type: 'turn.prompt', time: 8, input: [{ type: 'text', text: '接下来起草起诉状' }] })])
+  assert.equal(nameCandidateOf(t, 'kimi'), '接下来起草起诉状')
+})
+
+test('isNameWorthy：≥4 有效字符且非停用词才够格；大小写/标点不干扰判定', () => {
+  assert.equal(isNameWorthy('好'), false)
+  assert.equal(isNameWorthy('好的'), false)
+  assert.equal(isNameWorthy('OK'), false)
+  assert.equal(isNameWorthy('ok。'), false) // 标点剥掉后还是 ok
+  assert.equal(isNameWorthy('继续'), false)
+  assert.equal(isNameWorthy('收到'), false)
+  assert.equal(isNameWorthy('👍👍👍👍'), false) // 无有效字符
+  assert.equal(isNameWorthy('看下账'), false) // 3 字不够
+  assert.equal(isNameWorthy('看看台账'), true)
+  assert.equal(isNameWorthy('整理麦晓娴案还款流水'), true)
+})
+
+test('isTopicContinuation：子串相含或高度重合 → 延续不换名；新话题 → 换', () => {
+  // 子串：当前名是候选的截断版
+  assert.equal(isTopicContinuation('整理麦晓娴案还款流水PDF', '整理麦晓娴案还款流水'), true)
+  // 高重合：同话题换说法
+  assert.equal(isTopicContinuation('还款流水整理', '整理还款流水'), true)
+  // 新话题
+  assert.equal(isTopicContinuation('整理麦晓娴案还款流水', '接下来起草起诉状'), false)
+  // 占位名 vs 首个真实标题：不重合，放行
+  assert.equal(isTopicContinuation('Kimi K3 #7', '整理麦晓娴案还款流水'), false)
+  // 空串/纯标点不误判
+  assert.equal(isTopicContinuation('！！！', '整理麦晓娴案还款流水'), false)
 })

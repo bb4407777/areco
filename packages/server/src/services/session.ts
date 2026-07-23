@@ -7,9 +7,10 @@ import { spawn as ptySpawn } from 'node-pty'
 import { Terminal } from '@xterm/headless'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import type { ExitReason, SessionStatus, SessionSummary } from '../../../shared/protocol'
-import { terminalInputStartsTask, type TrafficState } from '../../../shared/traffic'
+import { terminalInputStartsTask, screenHasPendingChoice, type TrafficState } from '../../../shared/traffic'
 import type { SpawnSpec } from './templates'
 import { promptLabel } from './history'
+import { isNameWorthy } from './session-namer'
 import { createLogger } from '../logger'
 
 const log = createLogger('session')
@@ -283,11 +284,11 @@ export class Session extends EventEmitter {
     this.promptCount += 1
     if (!this.agentSessionId) this.setAgentBindingPrompt(text)
     // 占位名会话：第一句话即会话名（与历史对话标题同口径）。程序化注入（交接档案提示等）传 autoName:false 跳过。
-    // 只在首条 prompt 命名；autoNamed 保持 true——之后由 session-namer 跟随 agent 原生标题/最新 prompt 演化，
-    // 用户手动 rename 才把 autoNamed 转 false 永久锁定
+    // 只在首条「有意义」prompt 命名（好/ok/继续 等确认词不够格，占位名等下一条）；autoNamed 保持 true——
+    // 之后由 session-namer 跟随 agent 原生标题/最新 prompt 演化，用户手动 rename 才把 autoNamed 转 false 永久锁定
     if (this.autoNamed && !this.firstPromptNamed && opts?.autoName !== false) {
       const label = promptLabel(text)
-      if (label) {
+      if (label && isNameWorthy(label)) {
         this.firstPromptNamed = true
         this.name = label
         this.emitUpdate()
@@ -515,6 +516,11 @@ export class Session extends EventEmitter {
       lines.unshift(line)
     }
     return lines
+  }
+
+  /** 尾屏是否停在选择/确认对话框（claude 权限框/信任页只画在 TUI 里、不进 transcript）：黄灯兜底用 */
+  hasPendingChoiceOnScreen(): boolean {
+    return screenHasPendingChoice(this.screenTail(10))
   }
 
   /** 从影子终端 buffer 自底向上取第一个非空行（alt-screen 感知，替代 raw 流剥 ANSI） */

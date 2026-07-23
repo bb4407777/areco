@@ -834,7 +834,18 @@ export function parseKimi(raw: string): TranscriptMessage[] {
       for (const block of (obj.input as Array<Record<string, unknown>>) ?? []) {
         if (block?.type === 'text') text += String(block.text ?? '')
       }
-      if (text.trim()) out.push(msgOf('user', [textPart(text)], ts))
+      if (!text.trim()) continue
+      // 真假用户输入两层辨（2026-07-23 维护者报障：子 agent 回报跑到右侧）：
+      // 1) origin.kind：background_task/cron_job 等合成消息直接算 notice；无 origin 旧格式按用户兜底
+      // 2) 文本信封：剥掉 system-reminder 块后，剩余为空（纯提醒）或以 <task-notification>/
+      //    <notification>/<cron-fire> 开头（运行时合成 turn 常标 origin:user，单靠 origin 漏网）
+      // notice 段归左侧，不冒充用户指令；role 仍记 user：traffic 只看 text 段，通知到达后保持 working。
+      const origin = obj.origin as Record<string, unknown> | undefined
+      const stripped = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+      const synthetic =
+        stripped === '' || /^<(task-notification|notification[\s>]|cron-fire[\s>])/.test(stripped)
+      if ((!origin || origin.kind === 'user') && !synthetic) out.push(msgOf('user', [textPart(text)], ts))
+      else out.push(msgOf('user', [{ kind: 'notice', text: text.slice(0, MAX_PART_TEXT) }], ts))
       continue
     }
     if (obj.type !== 'context.append_loop_event') continue
@@ -983,6 +994,36 @@ export function dropAgentTranscriptCache(sessionId: string) {
   locateCache.delete(sessionId)
 }
 
+/**
+ * 分页决策（纯函数，便于单测）：before 向前翻页 / 首载尾页 / 真收缩重置 / 抖动容差 / 增量。
+ * 抖动容差（2026-07-23 手机端"跳到顶上又被拉下来"报障）：追加型 JSONL（kimi/codex/qclaw/
+ * workbuddy）流式写入有半行窗口，解析条数瞬时少一两条——小亏空不重置（重置=整页替换→
+ * 内容骤减、浏览器把视口钳到顶、再被拉回底，iOS 上肉眼可见），不动游标空答一轮等恢复；
+ * 大亏空（真截断/文件轮换）才回尾页。reasonix replace 帧是真收缩，不在此列。
+ */
+const APPEND_ONLY_KINDS: ReadonlySet<AgentKind> = new Set(['kimi', 'codex', 'qclaw', 'workbuddy'])
+const JITTER_TOLERANCE = 4
+
+export function paginateMessages(
+  messages: TranscriptMessage[],
+  kind: AgentKind,
+  opts: { cursor: number; before?: number }
+): TranscriptPage {
+  const total = messages.length
+  if (opts.before !== undefined) {
+    const end = Math.max(0, Math.min(opts.before, total))
+    const start = Math.max(0, end - PAGE_MESSAGES)
+    return { exists: true, messages: messages.slice(start, end), cursor: end, start, hasMore: start > 0 }
+  }
+  const jitter = APPEND_ONLY_KINDS.has(kind) && total < opts.cursor && opts.cursor - total <= JITTER_TOLERANCE
+  if (opts.cursor === 0 || (total < opts.cursor && !jitter)) {
+    const start = Math.max(0, total - PAGE_MESSAGES)
+    return { exists: true, messages: messages.slice(start), cursor: total, start, hasMore: start > 0 }
+  }
+  if (total < opts.cursor) return { exists: true, messages: [], cursor: opts.cursor } // 抖动：游标不动，空答等恢复
+  return { exists: true, messages: messages.slice(opts.cursor), cursor: total }
+}
+
 export function readAgentTranscript(
   session: Session,
   kind: AgentKind,
@@ -991,19 +1032,7 @@ export function readAgentTranscript(
   const filePath = locate(session, kind)
   if (!filePath) return { exists: false, messages: [], cursor: 0 }
   const messages = loadMessages(session.id, filePath, kind)
-  const total = messages.length
-
-  if (opts.before !== undefined) {
-    const end = Math.max(0, Math.min(opts.before, total))
-    const start = Math.max(0, end - PAGE_MESSAGES)
-    return { exists: true, messages: messages.slice(start, end), cursor: end, start, hasMore: start > 0 }
-  }
-  // 尾页：首载，或（reasonix replace 收缩后）total < cursor 的重置——带 start，客户端整页替换
-  if (opts.cursor === 0 || total < opts.cursor) {
-    const start = Math.max(0, total - PAGE_MESSAGES)
-    return { exists: true, messages: messages.slice(start), cursor: total, start, hasMore: start > 0 }
-  }
-  return { exists: true, messages: messages.slice(opts.cursor), cursor: total }
+  return paginateMessages(messages, kind, opts)
 }
 
 /**

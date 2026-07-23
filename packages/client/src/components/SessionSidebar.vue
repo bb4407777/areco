@@ -7,7 +7,7 @@ import { useRoomsStore } from '../stores/rooms'
 import { useUiStore } from '../stores/ui'
 import { useRenameDialog } from '../composables/useRenameDialog'
 import type { SessionSummary } from '../../../shared/protocol'
-import { chatCapable, sessionEntryPath, templateColor, templateLabel, trafficColor, STATUS_TEXT } from '../utils/format'
+import { chatCapable, sessionEntryPath, statusTagText, templateColor, templateLabel, trafficColor } from '../utils/format'
 import { groupSessionsByRoom } from '../utils/sessionGroups'
 
 const store = useSessionsStore()
@@ -147,7 +147,7 @@ function onMenu(key: string, s: SessionSummary) {
           <!-- 终端 lastLine 对空闲会话恒为状态栏噪音（context %/bypass permissions），改示 agent/模型 -->
           <span class="item-preview" :style="{ color: templateColor(s, store.templates) }">{{ templateLabel(s, store.templates) }}</span>
         </div>
-        <span class="item-status">{{ STATUS_TEXT[s.status] }}</span>
+        <span class="item-status">{{ statusTagText(s) }}</span>
         <n-dropdown trigger="click" :options="menuFor(s)" @select="(k: string) => onMenu(k, s)">
           <n-button size="tiny" quaternary circle class="item-menu" @click.stop>⋯</n-button>
         </n-dropdown>
@@ -171,7 +171,7 @@ function onMenu(key: string, s: SessionSummary) {
               <span class="item-name">{{ s.name }}</span>
               <span class="item-preview" :style="{ color: templateColor(s, store.templates) }">{{ templateLabel(s, store.templates) }}</span>
             </div>
-            <span class="item-status">{{ STATUS_TEXT[s.status] }}</span>
+            <span class="item-status">{{ statusTagText(s) }}</span>
             <n-dropdown trigger="click" :options="menuFor(s)" @select="(k: string) => onMenu(k, s)">
               <n-button size="tiny" quaternary circle class="item-menu" @click.stop>⋯</n-button>
             </n-dropdown>

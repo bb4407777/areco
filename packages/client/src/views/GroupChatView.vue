@@ -9,7 +9,7 @@ import { useRoomsStore } from '../stores/rooms'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 import { copyPlainText } from '../utils/clipboard'
-import { templateColor, trafficColor } from '../utils/format'
+import { fmtFullTime, templateColor, trafficColor } from '../utils/format'
 import { api } from '../api'
 import { useFileDrop } from '../composables/useFileDrop'
 import FileDropOverlay from '../components/FileDropOverlay.vue'
@@ -757,15 +757,18 @@ onMounted(async () => {
             <button v-if="hasMore" class="load-more" @click="loadMore">加载更早的消息</button>
             <NEmpty v-if="!msgs.length" description="还没有消息。@agent 的名字就会投递到它的终端" class="center" />
             <div v-for="m in msgs" :key="m.id" class="msg" :class="{ self: m.from === human }" :style="senderStyle(m)">
+              <!-- 统一版式（与对话模式一致）：发送者名在泡泡上方；复制在泡泡下方左侧；完整时间在右下角 -->
               <div class="msg-meta">
                 <span class="from">{{ m.from === human ? `${m.from}（我）` : m.from }}</span>
                 <span v-if="m.humanRelay" class="relay-tag" title="白名单 agent 转述人类成员原话，按人类语义投递">转述</span>
-                <button type="button" class="copy-btn" :title="copiedMsgId === m.id ? '已复制' : '复制正文'" @click="copyMsg(m)">
-                  {{ copiedMsgId === m.id ? '✓' : '📋' }}
-                </button>
-                <span class="time">{{ fmtTs(m.createdAt) }}</span>
               </div>
               <div class="bubble">{{ m.body }}</div>
+              <div class="msg-foot">
+                <button type="button" class="copy-btn" :title="copiedMsgId === m.id ? '已复制' : '复制正文'" @click="copyMsg(m)">
+                  {{ copiedMsgId === m.id ? '✓ 已复制' : '📋 复制' }}
+                </button>
+                <span class="time">{{ fmtFullTime(m.createdAt) }}</span>
+              </div>
             </div>
             <TypingIndicator
               v-for="m in workingMembers"
@@ -1317,20 +1320,42 @@ onMounted(async () => {
   background: var(--chip-bg);
   color: var(--muted);
 }
-.msg-meta .copy-btn {
+.msg-foot {
+  display: flex;
+  align-items: center;
+  margin-top: 3px;
+}
+.msg.self .msg-foot {
+  /* 自己消息泡泡靠右：复制与时间一并收到右下（复制在时间左侧） */
+  justify-content: flex-end;
+}
+.msg.self .msg-foot .time {
+  margin-left: 0;
+}
+.msg-foot .time {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.msg-foot .copy-btn {
   border: 0;
   background: none;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 10.5px;
   line-height: 1;
-  padding: 2px 4px;
+  padding: 3px 5px;
+  margin-left: -5px;
   border-radius: 5px;
   cursor: pointer;
   touch-action: manipulation;
 }
-.msg-meta .copy-btn:hover {
+.msg-foot .copy-btn:hover {
   color: var(--text);
   background: var(--chip-bg);
+}
+.msg.self .msg-foot .copy-btn {
+  margin-left: 0;
+  margin-right: -5px;
 }
 .msg.self .msg-meta {
   justify-content: flex-end;

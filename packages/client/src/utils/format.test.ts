@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { TranscriptMessage } from '../../../shared/protocol'
 import { terminalInputStartsTask, trafficStateFromMessages } from '../../../shared/traffic'
-import { trafficColor } from './format'
+import { statusTagText, trafficColor } from './format'
 
 function message(
   role: TranscriptMessage['role'],
@@ -76,4 +76,12 @@ test('traffic light is yellow when qclaw ask_user_question needs input', () => {
     message('assistant', [{ kind: 'tool_use', name: 'ask_user_question', input: '{}' }]),
   ])
   assert.equal(signal, 'needs-user')
+})
+
+test('statusTagText：黄灯（needs-user）显示「有选项」，其余口径不变', () => {
+  assert.equal(statusTagText({ status: 'running', trafficState: 'needs-user' }), '有选项')
+  assert.equal(statusTagText({ status: 'running', trafficState: 'idle' }), '等待中')
+  assert.equal(statusTagText({ status: 'running', trafficState: 'conclusion' }), '等待中')
+  assert.equal(statusTagText({ status: 'running', trafficState: 'working' }), '运行中')
+  assert.equal(statusTagText({ status: 'exited', trafficState: 'exited' }), '已退出')
 })
