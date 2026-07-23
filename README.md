@@ -4,6 +4,9 @@
 
 CLI Agent 网页远程座舱 —— 在浏览器/手机上远程驾驶 Claude Code、Codex、Reasonix 等 CLI 编程智能体。
 
+> **A chat-shaped cockpit for CLI agents — as familiar as WeChat, as powerful as a terminal.**
+> 微信一样熟悉的聊天界面，终端一样强的驾驶能力。
+
 ## 能干什么
 
 - **多 agent 多会话**：模板（claude / codex / reasonix / shell / 自定义）→ 随开随关多个会话，各带独立 cwd
