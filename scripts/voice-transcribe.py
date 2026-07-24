@@ -56,7 +56,13 @@ def ensure_wav16k(audio_path):
     return wav, True
 
 
-def transcribe_funasr(wav, engine, hotwords):
+_MODELS = {}
+
+
+def get_funasr_model(engine):
+    """按引擎缓存模型实例（serve 模式下复用，避免每次请求重新加载）。"""
+    if engine in _MODELS:
+        return _MODELS[engine]
     from funasr import AutoModel
     if engine == "sensevoice":
         model = AutoModel(
@@ -65,6 +71,22 @@ def transcribe_funasr(wav, engine, hotwords):
             vad_kwargs={"max_single_segment_time": 30000},
             disable_update=True,
         )
+    else:
+        # paraformer（默认）：带 ct-punc 标点，无说话人分离
+        model = AutoModel(
+            model="paraformer-zh",
+            vad_model="fsmn-vad",
+            punc_model="ct-punc",
+            vad_kwargs={"max_single_segment_time": 15000},
+            disable_update=True,
+        )
+    _MODELS[engine] = model
+    return model
+
+
+def transcribe_funasr(wav, engine, hotwords):
+    model = get_funasr_model(engine)
+    if engine == "sensevoice":
         res = model.generate(
             input=wav, language="auto", use_itn=True,
             batch_size_s=300, merge_vad=True, merge_length_s=15,
@@ -72,42 +94,30 @@ def transcribe_funasr(wav, engine, hotwords):
         raw = res[0]["text"] if res else ""
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
         return rich_transcription_postprocess(raw).strip()
-    # paraformer（默认）：带 ct-punc 标点，无说话人分离
-    model = AutoModel(
-        model="paraformer-zh",
-        vad_model="fsmn-vad",
-        punc_model="ct-punc",
-        vad_kwargs={"max_single_segment_time": 15000},
-        disable_update=True,
-    )
     res = model.generate(input=wav, batch_size_s=300, hotword=hotwords)
     return ((res[0]["text"] if res else "") or "").strip()
 
 
 def transcribe_whisper(wav):
-    import whisper
-    model = whisper.load_model("medium")
-    return (model.transcribe(wav, language="zh")["text"] or "").strip()
+    if "whisper" not in _MODELS:
+        import whisper
+        _MODELS["whisper"] = whisper.load_model("medium")
+    return (_MODELS["whisper"].transcribe(wav, language="zh")["text"] or "").strip()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", choices=["paraformer", "sensevoice", "whisper"], default="paraformer")
-    ap.add_argument("--audio", required=True)
-    ap.add_argument("--hotwords", default="")
-    args = ap.parse_args()
-
-    if not os.path.isfile(args.audio):
-        emit({"text": "", "engine": args.engine, "error": f"音频文件不存在: {args.audio}"})
+def run_one(engine, audio, hotwords):
+    """转写单个音频文件，emit 结果行。返回退出码（0 成功）。"""
+    if not os.path.isfile(audio):
+        emit({"text": "", "engine": engine, "error": f"音频文件不存在: {audio}"})
         return 2
 
-    wav, is_temp = ensure_wav16k(args.audio)
+    wav, is_temp = ensure_wav16k(audio)
     try:
-        if args.engine == "whisper":
+        if engine == "whisper":
             text = transcribe_whisper(wav)
         else:
-            text = transcribe_funasr(wav, args.engine, args.hotwords)
-        emit({"text": text, "engine": args.engine})
+            text = transcribe_funasr(wav, engine, hotwords)
+        emit({"text": text, "engine": engine})
         return 0
     finally:
         if is_temp:
@@ -115,6 +125,47 @@ def main():
                 os.remove(wav)
             except OSError:
                 pass
+
+
+def serve():
+    """常驻模式：stdin 每行一个 JSON 请求 {"audio","engine","hotwords"}，
+    stdout 每行回一个 JSON 结果。模型按引擎懒加载并常驻内存——
+    供 areco server 长驻 worker 用，省去每次请求 5-10s 的模型加载。"""
+    emit({"ready": True})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            emit({"text": "", "engine": "", "error": "请求不是合法 JSON"})
+            continue
+        engine = req.get("engine") or "paraformer"
+        if engine not in ("paraformer", "sensevoice", "whisper"):
+            emit({"text": "", "engine": engine, "error": f"未知引擎: {engine}"})
+            continue
+        try:
+            run_one(engine, req.get("audio") or "", req.get("hotwords") or "")
+        except Exception as e:  # noqa: BLE001 - 单请求失败不拖垮常驻进程
+            emit({"text": "", "engine": engine, "error": f"{type(e).__name__}: {e}"})
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--serve", action="store_true", help="常驻模式：stdin/stdout 行 JSON 循环")
+    ap.add_argument("--engine", choices=["paraformer", "sensevoice", "whisper"], default="paraformer")
+    ap.add_argument("--audio")
+    ap.add_argument("--hotwords", default="")
+    args = ap.parse_args()
+
+    if args.serve:
+        serve()
+        return 0
+    if not args.audio:
+        emit({"text": "", "engine": args.engine, "error": "缺少 --audio（或用 --serve 常驻模式）"})
+        return 2
+    return run_one(args.engine, args.audio, args.hotwords)
 
 
 if __name__ == "__main__":

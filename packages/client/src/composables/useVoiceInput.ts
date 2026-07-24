@@ -35,6 +35,12 @@ export function useVoiceInput(opts: VoiceOptions) {
 
   async function pressStart() {
     if (recording.value || transcribing.value || starting) return
+    if (!navigator.mediaDevices?.getUserMedia) {
+      // 非安全上下文（http://IP 访问）时浏览器根本不挂 mediaDevices——带上当前地址，方便自查是不是开错了地址
+      error.value = `当前地址 ${location.origin} 不支持麦克风：浏览器只在 HTTPS 或 localhost 下开放麦克风。请改用 https 地址访问（如 Tailscale serve 的 https://<主机>.ts.net 地址）`
+      message.error(error.value)
+      return
+    }
     starting = true
     pendingStop = false
     error.value = ''

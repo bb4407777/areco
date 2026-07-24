@@ -1,5 +1,6 @@
 // 语音转写服务：把一段 16kHz wav 转成文字。
-//   - funasr / sensevoice / whisper → spawn scripts/voice-transcribe.py（本地推理）
+//   - funasr / sensevoice / whisper → 常驻 python worker（scripts/voice-transcribe.py --serve，
+//     模型只加载一次，行 JSON 协议；崩溃自动重建，空闲 15 分钟回收）
 //   - aliyun → Node 直连阿里云 dashscope paraformer-realtime-v2（搬白龙马 cloud-asr.js 协议）
 //
 // 由 controllers/api.ts 的 POST /api/voice/transcribe 调用：它把前端送上来的 wav 落临时盘，
@@ -19,78 +20,134 @@ export interface TranscribeResult {
 }
 
 const PYTHON_ENGINES = new Set(['paraformer', 'sensevoice', 'whisper'])
-const TIMEOUT_MS = 45_000 // funasr 首次加载模型 + 推理，给足
+const TIMEOUT_MS = 45_000 // aliyun 用
+const WORKER_TIMEOUT_MS = 60_000 // 单请求上限（含该引擎首次冷加载模型）
+const WORKER_IDLE_MS = 15 * 60_000 // 空闲回收：释放模型占的内存
 
-/**
- * spawn python 脚本转写。stdout 最后一行 JSON = {text, engine, error?}。
- * 脚本即便异常也会吐 JSON（带 error），这里按 error 字段判成败，拿不到 JSON 才兜底用 stderr。
- */
-export function spawnPythonTranscribe(
-  engine: 'paraformer' | 'sensevoice' | 'whisper',
-  wavPath: string,
-  hotwords: string,
-  python = 'python3',
-): Promise<TranscribeResult> {
-  return new Promise((resolve, reject) => {
+// ─── 常驻 python worker（脚本 --serve 模式，stdin/stdout 行 JSON）───
+// 模型在 worker 内只加载一次，后续请求秒回；FIFO 串行（python 单循环天然串行）；
+// 崩溃/超时杀进程，下个请求自动重建（代价是一次冷加载）；空闲 15 分钟自动回收。
+
+interface PendingReq {
+  engine: string
+  resolve: (r: TranscribeResult) => void
+  reject: (e: Error) => void
+  timer: NodeJS.Timeout
+}
+
+class VoiceWorker {
+  private child: ReturnType<typeof spawn> | null = null
+  private buf = ''
+  private queue: PendingReq[] = []
+  private idleTimer: NodeJS.Timeout | null = null
+
+  constructor(private python: string) {}
+
+  request(engine: string, wavPath: string, hotwords: string): Promise<TranscribeResult> {
+    this.ensureSpawned()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        log.warn(`请求超时（${WORKER_TIMEOUT_MS / 1000}s），杀 worker 待下请求重建`)
+        this.kill(new Error(`语音转写超时（${WORKER_TIMEOUT_MS / 1000}s）——模型冷加载较慢，重试一次通常即好`))
+      }, WORKER_TIMEOUT_MS)
+      this.queue.push({ engine, resolve, reject, timer })
+      this.touch()
+      try {
+        this.child!.stdin!.write(JSON.stringify({ audio: wavPath, engine, hotwords }) + '\n')
+      } catch (err) {
+        this.kill(new Error(`语音转写进程不可写：${err instanceof Error ? err.message : String(err)}`))
+      }
+    })
+  }
+
+  dispose() {
+    this.kill(null)
+  }
+
+  private ensureSpawned() {
+    if (this.child) return
     if (!VOICE_SCRIPT_PATH || !fs.existsSync(VOICE_SCRIPT_PATH)) {
-      reject(new Error(`语音转写脚本不存在：${VOICE_SCRIPT_PATH}（areco 包内缺失 scripts/voice-transcribe.py）`))
-      return
+      throw new Error(`语音转写脚本不存在：${VOICE_SCRIPT_PATH}（areco 包内缺失 scripts/voice-transcribe.py）`)
     }
-    // 路径/热词全走 argv，不拼 shell 字符串（同 worktree.ts 防注入口径）
-    const args = [VOICE_SCRIPT_PATH, '--engine', engine, '--audio', wavPath]
-    if (hotwords) args.push('--hotwords', hotwords)
-    log.info(`spawn ${python} voice-transcribe --engine ${engine}`)
-    const child = spawn(python, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    log.info(`spawn 常驻 worker：${this.python} voice-transcribe --serve`)
+    const child = spawn(this.python, [VOICE_SCRIPT_PATH, '--serve'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    this.child = child
+    child.stdout!.on('data', (d: Buffer) => this.onData(d))
+    child.stderr!.on('data', (d: Buffer) => log.debug(`[py] ${d.toString().trimEnd()}`))
+    child.on('error', (err) => {
+      this.kill(new Error(`无法启动 python（${this.python}）：${err.message}。可在 config.json voice.python 指定装了 funasr 的解释器`))
+    })
+    child.on('exit', (code) => {
+      if (this.child !== child) return // kill() 已处理
+      this.kill(new Error(`语音转写进程意外退出（码 ${code}）`))
+    })
+  }
 
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
+  private onData(d: Buffer) {
+    this.buf += d.toString()
+    let idx: number
+    while ((idx = this.buf.indexOf('\n')) >= 0) {
+      const line = this.buf.slice(0, idx).trim()
+      this.buf = this.buf.slice(idx + 1)
+      if (!line.startsWith('{')) continue // funasr 进度条等杂行
+      if (line.includes('"ready"')) continue // 启动就绪行，不对应任何请求（必须在 shift 前判）
+      const req = this.queue.shift()
+      if (!req) continue
+      clearTimeout(req.timer)
+      this.touch()
+      try {
+        const parsed = JSON.parse(line) as { text?: unknown; engine?: unknown; error?: unknown }
+        if (parsed.error) req.reject(new Error(String(parsed.error)))
+        else req.resolve({ text: String(parsed.text ?? '').trim(), engine: String(parsed.engine ?? req.engine) })
+      } catch {
+        req.reject(new Error(`语音转写进程返回了无法解析的内容：${line.slice(-200)}`))
+      }
+    }
+  }
+
+  private touch() {
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = setTimeout(() => {
+      log.info(`空闲 ${WORKER_IDLE_MS / 60000} 分钟，回收 worker（释放模型内存）`)
+      this.kill(null)
+    }, WORKER_IDLE_MS)
+    this.idleTimer.unref()
+  }
+
+  private kill(err: Error | null) {
+    const child = this.child
+    this.child = null
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer)
+      this.idleTimer = null
+    }
+    if (child) {
       try {
         child.kill('SIGTERM')
       } catch {
         /* ignore */
       }
-      reject(new Error(`语音转写超时（${TIMEOUT_MS / 1000}s）——首次加载模型较慢，重试一次通常即好`))
-    }, TIMEOUT_MS)
+    }
+    for (const req of this.queue.splice(0)) {
+      clearTimeout(req.timer)
+      req.reject(err ?? new Error('语音转写进程已回收，请重试'))
+    }
+  }
+}
 
-    child.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString()
-    })
-    child.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString()
-    })
-    child.on('error', (err) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      reject(new Error(`无法启动 python（${python}）：${err.message}。可在 config.json voice.python 指定装了 funasr 的解释器`))
-    })
-    child.on('exit', (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      // 取 stdout 最后一行非空 JSON（脚本保证最后吐一行结果）
-      const lines = stdout.split(/\r?\n/).filter((l) => l.trim().startsWith('{'))
-      const last = lines[lines.length - 1]
-      if (last) {
-        try {
-          const parsed = JSON.parse(last) as { text?: unknown; engine?: unknown; error?: unknown }
-          if (parsed.error) {
-            reject(new Error(String(parsed.error)))
-            return
-          }
-          resolve({ text: String(parsed.text ?? '').trim(), engine: String(parsed.engine ?? engine) })
-          return
-        } catch {
-          /* JSON 解析失败，落到下面 stderr 兜底 */
-        }
-      }
-      reject(new Error(`语音转写失败（退出码 ${code}）：${(stderr || stdout).slice(-300) || '无输出'}`))
-    })
-  })
+let worker: VoiceWorker | null = null
+let workerPython = ''
+
+function getWorker(python: string): VoiceWorker {
+  if (worker && workerPython !== python) {
+    worker.dispose() // python 配置变了，旧 worker 作废重建
+    worker = null
+  }
+  if (!worker) {
+    worker = new VoiceWorker(python)
+    workerPython = python
+  }
+  return worker
 }
 
 /** 读 wav → 抽取 PCM data chunk（16kHz 16bit 单声道，areco 前端 AudioWorklet 产的即此格式）。 */
@@ -223,5 +280,5 @@ export async function transcribe(
   if (!PYTHON_ENGINES.has(pyEngine)) {
     throw new Error(`未知语音引擎：${engine}`)
   }
-  return spawnPythonTranscribe(pyEngine as 'paraformer' | 'sensevoice' | 'whisper', wavPath, opts.hotwords ?? '', opts.python)
+  return getWorker(opts.python ?? 'python3').request(pyEngine, wavPath, opts.hotwords ?? '')
 }
