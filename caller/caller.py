@@ -1351,11 +1351,21 @@ class Caller:
         stand_session_id: str | None = None,
         after_id: int = 0,
         *,
+        stand_name: str = "",
         task_id: str = "",
         role: str = "",
         template: str = "",
     ) -> dict:
         """轮询 Stand 执行结果（Caller 主动拉，不依赖 Stand 自汇报 cc-send）
+
+        ⚠️ after_id / stand_name 不是可选装饰，是正确性前提（2026-07-26 审计）：
+        本方法「按排除法」认 Stand（非 Caller 非用户即 Stand），且 after_id 默认 0 =
+        从房间第 1 条消息读起。两者叠加会在两种场景下立刻返回**别人的旧话**当本次结果：
+            · 复用房间（run --room-id / _bg_worker 的 spec.room_id）→ 秒回三天前的老答案
+            · 同房间多 Stand（两段式共享房）→ Worker 的 poll 秒回 Thinker 的计划
+        所以调用方必须把 dispatch() 返回的 message_id / stand_name 传进来：
+            after_id=d["message_id"]  → 只看「我这条任务消息之后」的
+            stand_name=d["stand_name"] → 只认「我派的那个 Stand」说的
 
         参数:
             room_id:  房间短 ID（REST 兜底/日志用；可为 None）
@@ -1363,7 +1373,9 @@ class Caller:
             timeout:  最大等待秒数（默认 600）；<=0 表示无限等待，直到 Stand 完成/失联
             poll_interval: 轮询间隔
             stand_session_id: Stand 的 areco session ID（可选，检测 Stand 提前退出）
-            after_id: 只看 id>此值的消息（续跑场景）
+            after_id: 只看 id>此值的消息。**传 dispatch() 的 message_id**；0 = 从头读（危险，见上）
+            stand_name: 只认这个发件人的回复。**传 dispatch() 的 stand_name**；
+                        空 = 退回排除法（兼容老调用方，但同房多 Stand 会串台）
             task_id/role/template: 仅用于审计日志（log_audit），由上层 dispatch 结果透传；
                 缺省空串——审计仍写，只是 task_id 一列留空。
 
@@ -1389,6 +1401,22 @@ class Caller:
         stand_replies: list[dict] = []
         last_status_check = 0.0
 
+        def _is_my_stand(sender: str) -> bool:
+            """这条消息算不算「我派的那个 Stand 的回复」"""
+            if not sender or sender in NON_STAND_SENDERS:
+                return False
+            # stand_name 给了就精确认人；没给退回排除法（老调用方兼容）
+            return (sender == stand_name) if stand_name else True
+
+        if not stand_name or not after_id:
+            logger.warning(
+                "poll_result 未收到 %s —— 复用房间/同房多 Stand 时可能把别人的旧消息当本次结果"
+                "（session=%s）",
+                " 和 ".join(x for x in (["stand_name"] if not stand_name else [])
+                            + (["after_id"] if not after_id else [])),
+                session_id,
+            )
+
         logger.info(
             "开始轮询 session=%s room=%s timeout=%ds",
             session_id, room_id, timeout,
@@ -1405,9 +1433,7 @@ class Caller:
 
             for msg in messages:
                 last_id = max(last_id, msg.get("id", 0))
-                sender = msg.get("from_agent", "")
-                # 非 Caller、非用户 = Stand 的回复
-                if sender and sender not in NON_STAND_SENDERS:
+                if _is_my_stand(msg.get("from_agent", "")):
                     stand_replies.append(msg)
 
             if stand_replies:
@@ -1417,8 +1443,7 @@ class Caller:
                     tail = self.get_messages(session_id, after_id=last_id)
                     for msg in tail:
                         last_id = max(last_id, msg.get("id", 0))
-                        sender = msg.get("from_agent", "")
-                        if sender and sender not in NON_STAND_SENDERS:
+                        if _is_my_stand(msg.get("from_agent", "")):
                             stand_replies.append(msg)
                 except Exception:
                     pass
@@ -1626,6 +1651,8 @@ class Caller:
             poll = self.poll_result(
                 session_id=dispatch_result["session_id"],
                 stand_session_id=dispatch_result.get("stand_session_id"),
+                after_id=dispatch_result.get("message_id", 0) or 0,
+                stand_name=dispatch_result.get("stand_name", ""),
                 timeout=timeout,
                 task_id=dispatch_result.get("task_id", ""),
                 role=dispatch_result.get("role", ""),
@@ -1817,6 +1844,8 @@ class Caller:
             room_id=dispatch_result["room_id"],
             session_id=dispatch_result["session_id"],
             stand_session_id=dispatch_result.get("stand_session_id"),
+            after_id=dispatch_result.get("message_id", 0) or 0,
+            stand_name=dispatch_result.get("stand_name", ""),
             timeout=poll_timeout,
             task_id=dispatch_result.get("task_id", ""),
             role=dispatch_result.get("role", ""),
@@ -1901,6 +1930,8 @@ class Caller:
             room_id=plan_dispatch["room_id"],
             session_id=plan_dispatch["session_id"],
             stand_session_id=plan_dispatch.get("stand_session_id"),
+            after_id=plan_dispatch.get("message_id", 0) or 0,
+            stand_name=plan_dispatch.get("stand_name", ""),
             timeout=poll_timeout,
             task_id=plan_dispatch.get("task_id", ""),
             role=plan_dispatch.get("role", ""),
@@ -1952,6 +1983,8 @@ class Caller:
             room_id=exec_dispatch["room_id"],
             session_id=exec_dispatch["session_id"],
             stand_session_id=exec_dispatch.get("stand_session_id"),
+            after_id=exec_dispatch.get("message_id", 0) or 0,
+            stand_name=exec_dispatch.get("stand_name", ""),
             timeout=poll_timeout,
             task_id=exec_dispatch.get("task_id", ""),
             role=exec_dispatch.get("role", ""),
@@ -2201,6 +2234,8 @@ class Caller:
             room_id=exec_dispatch["room_id"],
             session_id=exec_dispatch["session_id"],
             stand_session_id=exec_dispatch.get("stand_session_id"),
+            after_id=exec_dispatch.get("message_id", 0) or 0,
+            stand_name=exec_dispatch.get("stand_name", ""),
             timeout=poll_timeout,
             task_id=exec_dispatch.get("task_id", ""),
             role=exec_dispatch.get("role", ""),
@@ -2358,6 +2393,8 @@ class Caller:
                     room_id=d.get("room_id"),
                     session_id=d["session_id"],
                     stand_session_id=d.get("stand_session_id"),
+                    after_id=d.get("message_id", 0) or 0,
+                    stand_name=d.get("stand_name", ""),
                     timeout=poll_timeout,
                     poll_interval=poll_interval,
                     task_id=d.get("task_id", ""),
