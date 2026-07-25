@@ -27,8 +27,10 @@ const showArchived = ref(false)
 /**
  * 项目分组（规则集中在 utils/sessionGroups，与手机看板共用）：
  * 组内与零散区都跟随 boardSessions 的「运行优先 + 最后活动倒序」。
+ * 活动置顶（2026-07-25）：运行中会话（含分组内的）由 grouping.active 统一抽出渲染在最顶。
  */
 const grouping = computed(() => groupSessionsByRoom(roomsStore.rooms, store.boardSessions))
+const activeSessions = computed(() => grouping.value.active)
 const projectGroups = computed(() => grouping.value.groups)
 const looseSessions = computed(() => grouping.value.loose)
 
@@ -141,6 +143,29 @@ function onMenu(key: string, s: SessionSummary) {
       <n-button size="tiny" type="primary" @click="emit('new')">＋ 新建</n-button>
     </div>
     <div class="sidebar-list">
+      <!-- 活动中：运行中的会话置顶（含项目分组内的，退出后自动回落原位） -->
+      <div v-if="activeSessions.length" class="active-section">
+        <div class="active-head">活动中（{{ activeSessions.length }}）</div>
+        <div
+          v-for="e in activeSessions"
+          :key="e.session.id"
+          :class="['sidebar-item', { active: e.session.id === activeId }]"
+          @click="open(e.session.id)"
+        >
+          <span class="item-dot" :style="{ background: dotColor(e.session) }" />
+          <div class="item-body">
+            <span class="item-name">{{ e.session.name }}</span>
+            <span class="item-preview" :style="{ color: templateColor(e.session, store.templates) }">
+              {{ e.roomName ? `${e.roomName} · ` : '' }}{{ templateLabel(e.session, store.templates) }}
+            </span>
+          </div>
+          <span class="item-status">{{ statusTagText(e.session) }}</span>
+          <n-dropdown trigger="click" :options="menuFor(e.session)" @select="(k: string) => onMenu(k, e.session)">
+            <n-button size="tiny" quaternary circle class="item-menu" @click.stop>⋯</n-button>
+          </n-dropdown>
+        </div>
+      </div>
+
       <!-- 零散会话（未归入任何项目分组） -->
       <div
         v-for="s in looseSessions"
@@ -307,6 +332,17 @@ function onMenu(key: string, s: SessionSummary) {
   text-align: center;
   font-size: 13px;
   color: var(--faint);
+}
+.active-section {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+}
+.active-head {
+  padding: 8px 14px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
 }
 .archived-section {
   border-top: 1px solid var(--border);

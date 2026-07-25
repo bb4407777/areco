@@ -136,6 +136,28 @@ function handoff(id: string, templateId: string) {
     </n-empty>
 
     <template v-else>
+      <!-- 活动中：运行中的会话置顶（含项目分组内的，退出后自动回落原位；规则同桌面侧栏） -->
+      <section v-if="grouping.active.length" class="active-section">
+        <div class="active-head">活动中（{{ grouping.active.length }}）</div>
+        <TransitionGroup tag="div" name="cards" class="grid">
+          <SessionCard
+            v-for="e in grouping.active"
+            :key="e.session.id"
+            :session="e.session"
+            :now="now"
+            @open="open(e.session.id)"
+            @stop="run(() => store.stop(e.session.id))"
+            @kill="run(() => store.kill(e.session.id))"
+            @restart="(resume) => run(() => store.restart(e.session.id, resume))"
+            @rename="openRename(e.session.id, e.session.name)"
+            @pin="(pinned) => run(() => store.pin(e.session.id, pinned))"
+            @archive="archive(e.session.id)"
+            @remove="confirmRemove(e.session.id, e.session.name)"
+            @handoff="(templateId) => handoff(e.session.id, templateId)"
+          />
+        </TransitionGroup>
+      </section>
+
       <!-- 零散会话（未归入任何项目分组） -->
       <TransitionGroup v-if="grouping.loose.length" tag="div" name="cards" class="grid">
         <SessionCard
