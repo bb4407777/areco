@@ -1,0 +1,70 @@
+{
+  "version": "0.2.0",
+  "default_template": "claude",
+  "default_thinker": "claude",
+  "default_worker": "reasonix",
+  "templates": [
+    {
+      "id": "claude",
+      "name": "GLM-5.2",
+      "role": "thinker",
+      "description": "Claude Code CLI 配置为 GLM-5.2；Thinker 默认，规划/分析/判断/路由",
+      "task_types": [
+        "general",
+        "search",
+        "coding",
+        "writing",
+        "analysis",
+        "complex"
+      ],
+      "default_timeout": 600
+    },
+    {
+      "id": "reasonix",
+      "name": "Reasonix QClaw DeepSeek-v4-flash",
+      "role": "worker",
+      "description": "Reasonix 走 QClaw shim 调用 DeepSeek-v4-flash；Worker 默认，执行型（代码/搜索/文书/下载/总结）",
+      "task_types": [
+        "general",
+        "coding",
+        "writing",
+        "analysis"
+      ],
+      "default_timeout": 600
+    },
+    {
+      "id": "workbuddy-deepseek",
+      "name": "WorkBuddy DeepSeek",
+      "role": "worker",
+      "description": "WorkBuddy 走 DeepSeek v4 flash；执行型 Stand，文书/通用",
+      "task_types": [
+        "general",
+        "coding",
+        "writing"
+      ],
+      "default_timeout": 600
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi K3",
+      "role": "worker",
+      "description": "Kimi K3，执行型（搜索/分析）；仅用户明确指定时使用（额度紧张）",
+      "task_types": [
+        "general",
+        "coding",
+        "analysis"
+      ],
+      "default_timeout": 600
+    },
+    {
+      "id": "codex",
+      "name": "gpt-5.6-sol",
+      "role": "worker",
+      "description": "Codex / OpenAI 模型；执行型 Stand，编程开发",
+      "task_types": [
+        "coding"
+      ],
+      "default_timeout": 600
+    }
+  ]
+}

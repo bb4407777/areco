@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "comment": "Harness 层：运行框架，只定义怎么启动 agent，不绑定模型",
+  "harnesses": {
+    "openclaw": {
+      "command": "/Applications/QClaw.app/Contents/Resources/node/node",
+      "args": [
+        "/Users/gao/Library/Application Support/QClaw/openclaw/node_modules/openclaw/openclaw.mjs",
+        "agent"
+      ],
+      "env": {
+        "HOME": "/Users/gao",
+        "OPENCLAW_STATE_DIR": "/Users/gao/.qclaw",
+        "OPENCLAW_CONFIG_PATH": "/Users/gao/.qclaw/openclaw.json"
+      },
+      "cwd": "/Users/gao",
+      "description": "QClaw/openclaw 原生 agent"
+    },
+    "reasonix": {
+      "command": "reasonix",
+      "args": [
+        "--yolo"
+      ],
+      "env": {},
+      "cwd": "/Users/gao",
+      "description": "Reasonix 多模型编码 agent"
+    },
+    "zcode": {
+      "command": "/Applications/ZCode.app/Contents/MacOS/ZCode",
+      "args": [],
+      "env": {},
+      "cwd": "/Users/gao",
+      "description": "ZCode 编辑器内置 agent（CLI 待确认）"
+    },
+    "workbuddy": {
+      "command": "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+      "args": [
+        "--dangerously-skip-permissions"
+      ],
+      "env": {},
+      "cwd": "/Users/gao",
+      "description": "WorkBuddy codebuddy CLI"
+    }
+  }
+}

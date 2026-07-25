@@ -1,0 +1,34 @@
+{
+  "version": "1.0.0",
+  "comment": "Stand 层：可运行实例 = harness + model + preset",
+  "defaults": {
+    "thinker": "thinker-default",
+    "worker": "worker-default"
+  },
+  "stands": {
+    "thinker-default": {
+      "harness": "openclaw",
+      "model": "deepseek-v4-pro",
+      "preset": "thinker",
+      "description": "默认 Thinker：openclaw + DeepSeek-v4-pro + thinker 预设"
+    },
+    "worker-default": {
+      "harness": "openclaw",
+      "model": "glm-5.2",
+      "preset": "worker",
+      "description": "默认 Worker：openclaw + GLM-5.2 + worker 预设"
+    },
+    "worker-fast": {
+      "harness": "openclaw",
+      "model": "deepseek-v4-flash",
+      "preset": "worker",
+      "description": "快速 Worker：openclaw + DeepSeek-v4-flash"
+    },
+    "thinker-workbuddy": {
+      "harness": "workbuddy",
+      "model": "workbuddy-deepseek-pro",
+      "preset": "thinker",
+      "description": "Thinker via WorkBuddy DeepSeek-v4-pro"
+    }
+  }
+}
