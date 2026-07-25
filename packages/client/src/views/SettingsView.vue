@@ -56,7 +56,10 @@ const isCreate = ref(false)
 const busy = ref(false)
 
 function emptyTemplate(): Template {
-  return { id: '', name: '', command: '', args: [], cwd: '', color: '#7d8590', autoStart: false, enabled: true }
+  return {
+    id: '', name: '', command: '', args: [], cwd: '', color: '#7d8590', autoStart: false, enabled: true,
+    harness: '', model: '', preset: '',
+  }
 }
 
 // 模板列表圆点：直接复用会话红绿灯——取该模板下会话里最值得关注的状态（无会话=灰）
@@ -110,8 +113,14 @@ function openEdit(template: Template) {
 async function save() {
   busy.value = true
   try {
-    if (isCreate.value) await store.createTemplate(editing.value)
-    else await store.updateTemplate(editing.value.id, editing.value)
+    // StandCode 分层三字段：空串不落 config（standcode-resolver 按 falsy 跳过，但别存噪音键）
+    const payload = { ...editing.value }
+    for (const k of ['harness', 'model', 'preset'] as const) {
+      if (!payload[k]?.trim()) delete payload[k]
+      else payload[k] = payload[k]!.trim()
+    }
+    if (isCreate.value) await store.createTemplate(payload)
+    else await store.updateTemplate(payload.id, payload)
     showEdit.value = false
     message.success('已保存')
   } catch (err) {
@@ -387,7 +396,10 @@ function clearLog() {
               <n-tag v-if="!template.enabled" size="small" :bordered="false" class="off-tag">停用</n-tag>
               <n-tag v-if="template.autoStart" size="small" :bordered="false" type="info">自启</n-tag>
             </div>
-            <div class="template-cmd mono">{{ template.command }} {{ template.args.join(' ') }}</div>
+            <div class="template-cmd mono">
+              <template v-if="template.harness">⚙ {{ template.harness }}{{ template.model ? ` · ${template.model}` : '' }}{{ template.preset ? ` · ${template.preset}` : '' }}</template>
+              <template v-else>{{ template.command }} {{ template.args.join(' ') }}</template>
+            </div>
           </div>
           <n-button size="tiny" quaternary @click="openEdit(template)">编辑</n-button>
           <n-button size="tiny" quaternary type="error" @click="confirmRemove(template)">删</n-button>
@@ -445,9 +457,20 @@ function clearLog() {
           <n-input v-model:value="editing.id" :disabled="!isCreate" placeholder="字母数字-_" />
         </n-form-item>
         <n-form-item label="名称"><n-input v-model:value="editing.name" /></n-form-item>
-        <n-form-item label="命令"><n-input v-model:value="editing.command" placeholder="claude / codex / …" /></n-form-item>
+        <n-form-item label="命令"><n-input v-model:value="editing.command" placeholder="claude / codex / …（填了 harness 可留空）" /></n-form-item>
         <n-form-item label="参数">
           <n-dynamic-input v-model:value="editing.args" placeholder="单个参数" :min="0" />
+        </n-form-item>
+        <!-- StandCode 分层（可选）：三字段按名引用 StandCode/config 配件字典，spawn 时服务端
+             standcode-resolver 现场解析成 command/args/env；留空 = 普通模板，用上方命令/参数 -->
+        <n-form-item label="harness">
+          <n-input v-model:value="editing.harness" placeholder="可选：openclaw / workbuddy / reasonix" />
+        </n-form-item>
+        <n-form-item label="model">
+          <n-input v-model:value="editing.model" placeholder="可选：glm-5.2 / deepseek-v4-pro / …（StandCode models.json 键名）" />
+        </n-form-item>
+        <n-form-item label="preset">
+          <n-input v-model:value="editing.preset" placeholder="可选：thinker / worker" />
         </n-form-item>
         <n-form-item label="默认目录"><n-input v-model:value="editing.cwd" placeholder="留空 = 服务端 HOME" /></n-form-item>
         <n-form-item label="颜色"><n-color-picker v-model:value="editing.color" :show-alpha="false" /></n-form-item>
