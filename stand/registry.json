@@ -30,6 +30,11 @@
       "id": "stand-worker-fast",
       "name": "快速 Worker（openclaw + DeepSeek-v4-flash）",
       "role": "worker"
+    },
+    {
+      "id": "zcode",
+      "name": "ZCode",
+      "role": "worker"
     }
   ]
 }
