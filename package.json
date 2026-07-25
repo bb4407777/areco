@@ -12,7 +12,6 @@
   "author": "bb4407777",
   "files": [
     "dist",
-    "scripts/voice-transcribe.py",
     "scripts/areco-msg.mjs",
     "config.example.json",
     "NOTICE"

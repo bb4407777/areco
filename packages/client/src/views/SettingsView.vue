@@ -11,7 +11,6 @@ import {
   NInput,
   NInputNumber,
   NModal,
-  NSelect,
   NSwitch,
   NTag,
   useDialog,
@@ -20,7 +19,7 @@ import {
 import type { StatsSummary, Template } from '../../../shared/protocol'
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
-import { useUiStore, type VoiceEngine } from '../stores/ui'
+import { useUiStore } from '../stores/ui'
 import { fmtUptime, trafficColor } from '../utils/format'
 import type { TrafficState } from '../../../shared/traffic'
 import { clearInputLog, getInputLog, type InputLogEntry } from '../utils/inputLog'
@@ -34,7 +33,6 @@ interface SystemInfo {
   port: number
   maxSessions: number
   urls: { lan: string[]; tailscale: string[] }
-  voice?: { engine: string; aliyunApiKeyConfigured: boolean; python: string }
 }
 
 const store = useSessionsStore()
@@ -94,48 +92,6 @@ async function saveMaxSessions() {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
     savingMaxSessions.value = false
-  }
-}
-
-// 语音输入设置：engine/fillMode/hotwords 存客户端 localStorage（即时生效）；aliyunKey 存服务端 config
-const aliyunKeyInput = ref('')
-const savingVoice = ref(false)
-function onEngineChange(v: string | number) {
-  ui.setVoiceEngine(String(v) as VoiceEngine)
-}
-function onFillModeChange(v: string | number) {
-  ui.setVoiceFillMode(String(v) as 'send' | 'fill')
-}
-const voiceEngineOptions = [
-  { label: 'FunASR（本地·推荐）', value: 'funasr' },
-  { label: 'SenseVoice（粤语方言）', value: 'sensevoice' },
-  { label: '阿里云（云端）', value: 'aliyun' },
-  { label: 'Whisper（兜底）', value: 'whisper' },
-]
-const voiceFillOptions = [
-  { label: '直接发送', value: 'send' },
-  { label: '填入输入框', value: 'fill' },
-]
-async function saveAliyunKey() {
-  const key = aliyunKeyInput.value.trim()
-  savingVoice.value = true
-  try {
-    const r = await api.put<{ voice?: { aliyunApiKeyConfigured: boolean } }>('/api/settings', {
-      voice: { aliyunApiKey: key },
-    })
-    if (system.value) {
-      system.value.voice = {
-        engine: system.value.voice?.engine ?? 'funasr',
-        python: system.value.voice?.python ?? 'python3',
-        aliyunApiKeyConfigured: r.voice?.aliyunApiKeyConfigured ?? Boolean(key),
-      }
-    }
-    aliyunKeyInput.value = ''
-    message.success(key ? '阿里云 Key 已保存' : '阿里云 Key 已清空')
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  } finally {
-    savingVoice.value = false
   }
 }
 
@@ -468,66 +424,6 @@ function clearLog() {
           <div class="pref-hint">默认关闭，勾选后才展示工具返回结果</div>
         </div>
         <n-switch :value="ui.showToolResult" @update:value="ui.setShowToolResult" />
-      </div>
-    </n-card>
-
-    <n-card size="small" class="block">
-      <template #header>语音输入</template>
-      <div class="pref-row">
-        <div>
-          <div class="pref-label">识别引擎</div>
-          <div class="pref-hint">FunASR=本地 Paraformer（默认·免费·带热词）；SenseVoice=粤语/方言；阿里云=云端（需配下方 Key）；Whisper=兜底</div>
-        </div>
-        <n-select
-          :value="ui.voiceEngine"
-          :options="voiceEngineOptions"
-          size="small"
-          style="width: 210px"
-          @update:value="onEngineChange"
-        />
-      </div>
-      <div class="pref-row">
-        <div>
-          <div class="pref-label">松开后</div>
-          <div class="pref-hint">直接发送=微信式（默认）；填入输入框=可改字加附件再发</div>
-        </div>
-        <n-select
-          :value="ui.voiceFillMode"
-          :options="voiceFillOptions"
-          size="small"
-          style="width: 150px"
-          @update:value="onFillModeChange"
-        />
-      </div>
-      <div class="pref-row">
-        <div>
-          <div class="pref-label">热词（仅 FunASR）</div>
-          <div class="pref-hint">空格分隔，提升人名/术语识别准确率</div>
-        </div>
-        <n-input
-          :value="ui.voiceHotwords"
-          placeholder="如 高律师 立案 判决"
-          size="small"
-          style="width: 240px"
-          @update:value="(v: string) => ui.setVoiceHotwords(v)"
-        />
-      </div>
-      <div class="pref-row">
-        <div>
-          <div class="pref-label">阿里云 API Key</div>
-          <div class="pref-hint">
-            仅「阿里云」引擎用，sk- 开头；存服务端不回显明文<span v-if="system?.voice?.aliyunApiKeyConfigured">（已配置）</span>
-          </div>
-        </div>
-        <n-input
-          v-model:value="aliyunKeyInput"
-          type="password"
-          show-password-on="click"
-          :placeholder="system?.voice?.aliyunApiKeyConfigured ? '留空保存=清除已配置的 Key' : 'sk-...'"
-          size="small"
-          style="width: 260px"
-        />
-        <n-button size="small" type="primary" :loading="savingVoice" @click="saveAliyunKey">保存</n-button>
       </div>
     </n-card>
 

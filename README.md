@@ -44,7 +44,6 @@ Apache-2.0 · [GitHub](https://github.com/bb4407777/areco) · 中文文档见下
 - **TUI 注入可靠性**（PromptBar / 历史接续 / 恢复重启共用）：`sendline` 文本与回车拆帧发送，提交回车等 pty 输出安静一拍（120ms、上限 2s）再补——同帧「文本+回车」会被 codebuddy/kimi 等 TUI 按粘贴处理、回车沦为换行不提交（表现为要按两次发送或 enter 变换行）；codebuddy 每个新进程弹的「信任目录」确认页由服务端从 pty 输出检测（剥 ANSI 匹配文案）自动回车过页，新建/重启/恢复全生效，每次启动只答一次且限启动后 2 分钟内（防对话正文同款文字误触发）
 - **归档 vs 删除**：卡片菜单「归档」把已停止会话移出看板（看板底部「已归档」折叠区可查看/恢复，重启即自动回看板），元数据、终端快照、agent 对话日志全保留；「删除」清掉卡片与终端快照——但 agent 自身的对话日志（`~/.claude/projects` / chatlog 层）本就不归看板管，删除后仍在「历史」页
 - **移动端**：底部快捷键条（Esc/Tab/方向/^C…）、单行 prompt 输入、PWA 添加到主屏幕
-- **语音输入**：输入框旁长按 🎤 说话、松手转写并直接发送（可在设置页改为「填入输入框」）。前端 AudioWorklet 采 16kHz PCM 拼 wav 整段上传；服务端常驻 python worker 调本地 FunASR 转写（模型只加载一次，热请求秒回，空闲 15 分钟自动回收）。引擎四选一（设置页可切）：funasr（默认，paraformer + 标点 + 热词）/ sensevoice（更快，支持粤语方言）/ whisper / aliyun（云端 dashscope，Key 存服务端 config 不回显）。**注意：浏览器只在 HTTPS 或 localhost 下开放麦克风**——局域网 IP 直连（http://IP:8790）无法录音，远程使用请套一层 HTTPS（如 `tailscale serve --bg --https=8443 http://127.0.0.1:8790`）。本地引擎依赖系统 python 装 `funasr`（whisper 引擎另需 `openai-whisper`）、可选 `ffmpeg`（非 16k wav 输入转码兜底），解释器路径用 config `voice.python` 指定
 - **项目协作**（顶栏「项目」）：一个项目拉多个 agent 进群协作，详见下方「项目协作」一节
 
 ## 快速开始
@@ -158,12 +157,7 @@ packages/client  (Vue3+Naive) Dashboard / Session 座舱 / Transcript 聊天 / H
     "allowedHosts": [],        // 额外放行的访问域名/IP
     "maxSessions": 0           // 同时运行会话上限，0 = 无上限（默认）；也可在「设置」页在线改，即时生效
   },
-  "templates": [ { "id", "name", "command", "args", "cwd", "color", "autoStart", "enabled" } ],
-  "voice": {                   // 语音输入（可整段省略，默认如下）
-    "engine": "funasr",        // funasr / sensevoice / whisper / aliyun；前端设置页也可切（存浏览器本地）
-    "python": "python3",       // 本地引擎用的解释器：必须装了 funasr（PATH 里 python3 不对就写绝对路径）
-    "aliyunApiKey": ""         // aliyun 引擎专用：dashscope Key（sk- 开头），只存服务端、不回显前端
-  }
+  "templates": [ { "id", "name", "command", "args", "cwd", "color", "autoStart", "enabled" } ]
 }
 ```
 

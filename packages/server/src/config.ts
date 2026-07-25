@@ -25,16 +25,6 @@ export interface ServerConfig {
   fileRootsUnrestricted: boolean
 }
 
-export interface VoiceConfig {
-  /** 默认 ASR 引擎：funasr(本地 Paraformer,默认)/sensevoice(粤语方言)/aliyun(云 dashscope)/whisper(兜底)。
-   *  前端设置页可逐次覆盖（存 localStorage 随请求带）；此处是服务端兜底默认 */
-  engine?: 'funasr' | 'sensevoice' | 'aliyun' | 'whisper'
-  /** 阿里云 dashscope API Key（sk- 开头），仅 aliyun 引擎用。存服务端 config，绝不回传前端明文 */
-  aliyunApiKey?: string
-  /** python 解释器路径（须已装 funasr / openai-whisper），默认 'python3' */
-  python?: string
-}
-
 export interface AppConfig {
   server: ServerConfig
   templates: Template[]
@@ -43,8 +33,6 @@ export interface AppConfig {
   /** 允许「转述人类原话」的 agent 白名单（如微信通道 Hermes）：其带 human_relay 标记的
    *  项目消息按人类语义投递（清零链深+默认投全体）。缺省空=功能关闭。 */
   humanRelayAgents?: string[]
-  /** 语音输入（长按说话→转写）：ASR 引擎默认值 + 阿里云凭证 + python 解释器 */
-  voice?: VoiceConfig
 }
 
 const HOME = process.env.HOME || '/'
@@ -99,9 +87,6 @@ export const MSG_CLI_PATH = nearEntry('scripts', 'areco-msg.mjs')
 /** 前端构建产物目录（npm 安装时在包内，不在数据根） */
 export const CLIENT_DIR = nearEntry('dist', 'client')
 
-/** 语音转写 python 脚本（scripts/voice-transcribe.py）的绝对路径 */
-export const VOICE_SCRIPT_PATH = nearEntry('scripts', 'voice-transcribe.py')
-
 function normalizeTemplate(raw: Partial<Template>, index: number): Template {
   return {
     id: String(raw.id || `tpl-${index}`),
@@ -118,21 +103,6 @@ function normalizeTemplate(raw: Partial<Template>, index: number): Template {
     // transcriptDir 同 claudeHome 口径：白名单拷贝必须带上，漏掉 = 重启剥字段 + 保存回写丢失
     ...(typeof raw.transcriptDir === 'string' && raw.transcriptDir.trim() ? { transcriptDir: raw.transcriptDir.trim() } : {}),
   }
-}
-
-const DEFAULT_VOICE: VoiceConfig = { engine: 'funasr', python: 'python3' }
-const VOICE_ENGINES = ['funasr', 'sensevoice', 'aliyun', 'whisper'] as const
-
-function normalizeVoice(raw: Partial<VoiceConfig> | undefined): VoiceConfig {
-  const voice: VoiceConfig = { ...DEFAULT_VOICE }
-  if (!raw) return voice
-  if (typeof raw.engine === 'string' && (VOICE_ENGINES as readonly string[]).includes(raw.engine)) {
-    voice.engine = raw.engine as VoiceConfig['engine']
-  }
-  if (typeof raw.python === 'string' && raw.python.trim()) voice.python = raw.python.trim()
-  // 空串不写——"清空 key" 即不出现该字段
-  if (typeof raw.aliyunApiKey === 'string' && raw.aliyunApiKey.trim()) voice.aliyunApiKey = raw.aliyunApiKey.trim()
-  return voice
 }
 
 export function loadConfig(): AppConfig {
@@ -172,7 +142,6 @@ export function loadConfig(): AppConfig {
     ...(Array.isArray(raw.humanRelayAgents)
       ? { humanRelayAgents: raw.humanRelayAgents.map(String).filter((s) => s.trim()) }
       : {}),
-    voice: normalizeVoice(raw.voice),
   }
   if (!fs.existsSync(CONFIG_PATH)) saveConfig(config)
   return config
