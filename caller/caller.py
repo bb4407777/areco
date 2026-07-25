@@ -43,6 +43,49 @@ CC_SEND_BIN = os.environ.get("CC_SEND_BIN") or _LOCAL_CONF.get("cc_send_bin") or
 WECHAT_TARGET = os.environ.get("WECHAT_TARGET") or _LOCAL_CONF.get("wechat_target") or ""
 HOME_DIR = os.environ.get("STANDCODE_HOME") or _LOCAL_CONF.get("home_dir") or str(Path.home())
 
+# ── 房间来源标记 / 台账 / 自动归档 ──────────────────────────────────
+# 2026-07-25 用户报障：房间名换成任务语义后（_room_label），派发房与人手建的案件房
+# 在 areco「任务」列表里长得一模一样，积压无从辨认。三件套分层解决：
+#   ROOM_MARK    人眼层：房间名首字符标记。必须放最前——边栏截断保留前缀，
+#                原有的尾部 `·W1a2b` 正好被截掉，等于没有标记。
+#   ROOMS_LEDGER 机器层：append-only jsonl 台账（room_id → 派发元信息）。名字会被用户
+#                改、标记可被关，台账不会；追加写而非读改写，dispatch_parallel
+#                并发派发不会互相覆盖。
+#   AUTO_ARCHIVE 消积压：成功收口即归档。areco 归档房间会连带归档房内会话
+#                （controllers/rooms.ts setMemberSessionsArchived），看板一并清干净；
+#                失败/超时的房间**不**归档，留在看板上等人看。
+#                注意：归档运行中会话 = 先 stop 再落 archived（session-manager
+#                pendingArchive 链路），即会停掉 Stand 进程。结果已收完才归档，
+#                需要续聊就在 UI 点「恢复任务」→ 重启即回看板。
+ROOM_MARK = os.environ.get("STANDCODE_ROOM_MARK") or _LOCAL_CONF.get("room_mark") or "⚙"
+ROOMS_LEDGER_PATH = Path(
+    os.environ.get("STANDCODE_ROOMS_LEDGER")
+    or _LOCAL_CONF.get("rooms_ledger")
+    or (Path(HOME_DIR) / ".standcode" / "rooms.jsonl")
+)
+
+
+def _conf_bool(env_key: str, conf_key: str, default: bool) -> bool:
+    """env > config/local.json > 默认 的三层布尔配置（与 CC_SEND_BIN 等同口径）"""
+    raw = os.environ.get(env_key)
+    if raw is None:
+        raw = _LOCAL_CONF.get(conf_key)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+AUTO_ARCHIVE = _conf_bool("STANDCODE_AUTO_ARCHIVE", "auto_archive", True)
+# 清扫判定的空闲门槛（分钟）：房间最后一条消息距今超过它才算「静了」，防止把
+# 用户正在里面追问的房间扫掉。
+SWEEP_IDLE_MIN = float(
+    os.environ.get("STANDCODE_SWEEP_IDLE_MIN")
+    or _LOCAL_CONF.get("sweep_idle_min")
+    or 30
+)
+
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
 # STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
@@ -385,15 +428,87 @@ def check_should_dispatch(task_description: str) -> dict:
 # task_id 是 Caller 内部生成、Stand 侧无从得知，作心跳键会让「Stand 写、Caller 读」
 # 永远对不上。任务原文写 {task_id}.hb，这里改成 {session_id}.hb 才能闭环。
 def _room_label(request: str, summary: str | None, role: str) -> str:
-    """新建房间名：任务摘要前置 + 角色单字母 + 4 位 hex。
+    """新建房间名：来源标记 + 任务摘要 + 角色单字母 + 4 位 hex。
 
-    2026-07-25 用户报障：areco 项目边栏清一色 Stand-worker-general-xxx，截断后零识别度。
+    2026-07-25 用户报障（一）：areco 项目边栏清一色 Stand-worker-general-xxx，截断后零识别度。
     边栏截断保留的是前缀，所以摘要必须放最前；summary 缺省时取 request 前 16 字兜底。
+    2026-07-25 用户报障（二）：只剩任务语义后，派发房与人手建的案件房无从分辨。
+    补一个单字符 ROOM_MARK 打头——占 1 字宽、扛得住截断，语义仍在后面完整可读：
+        ⚙房源纠纷调研…·W1a2b
+    机器侧不靠名字认（用户随时能改名），认 ROOMS_LEDGER 台账；名字只服务人眼。
     """
     text = " ".join((summary or request or "").split())
     label = text[:16] + ("…" if len(text) > 16 else "")
     tag = "T" if role == "thinker" else "W"
-    return f"{label or 'Stand'}·{tag}{uuid.uuid4().hex[:4]}"
+    return f"{ROOM_MARK}{label or 'Stand'}·{tag}{uuid.uuid4().hex[:4]}"
+
+
+# ── 房间台账（append-only jsonl）─────────────────────────────────────
+# 一行一事件：{"ts", "event", "room_id", ...}。读取时按 room_id 折叠、后写覆盖前写，
+# 所以并发派发只追加、永不丢更新。event 取值：
+#   created  = StandCode 新建了这个房间
+#   adopted  = 历史房间被 `rooms --adopt` 认领进台账（补台账，不改房间本身）
+#   archived = 已归档（自动收口或 sweep）
+#   kept     = 收口时决定留在看板（失败/超时/复用房间/开关关闭），带 reason
+_LEGACY_ROOM_RE = re.compile(r"^Stand-(worker|thinker)-")
+_ROOM_TAIL_RE = re.compile(r"·[TW][0-9a-f]{4}$")
+
+
+def ledger_append(event: str, room_id: str, **fields) -> None:
+    """追加一条房间台账。台账是辅助设施，写失败只告警不影响主链。"""
+    if not room_id:
+        return
+    rec = {"ts": _now_iso(), "event": event, "room_id": room_id, **fields}
+    try:
+        ROOMS_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ROOMS_LEDGER_PATH.open("a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except OSError as e:
+        logger.warning("房间台账写入失败 %s: %s", ROOMS_LEDGER_PATH, e)
+
+
+def ledger_load() -> dict:
+    """读台账并按 room_id 折叠成 {room_id: 合并后的记录}（后写覆盖前写）"""
+    merged: dict[str, dict] = {}
+    if not ROOMS_LEDGER_PATH.exists():
+        return merged
+    try:
+        lines = ROOMS_LEDGER_PATH.read_text().splitlines()
+    except OSError as e:
+        logger.warning("房间台账读取失败 %s: %s", ROOMS_LEDGER_PATH, e)
+        return merged
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # 半行/脏行跳过：append-only 下最多损失最后一条
+        rid = rec.get("room_id")
+        if not rid:
+            continue
+        cur = merged.setdefault(rid, {"room_id": rid})
+        cur.update({k: v for k, v in rec.items() if v is not None})
+        cur["event"] = rec.get("event", cur.get("event"))
+    return merged
+
+
+def is_standcode_room(room: dict, ledger: dict | None = None) -> bool:
+    """这个 areco 房间是不是 StandCode 派发出来的。
+
+    判定顺序 = 可信度顺序：台账（机器写、用户改不到）> 名字标记 > 历史命名模式。
+    名字类判据只是为了认领台账上线之前的存量房间（rooms --adopt），不作为长期依据。
+    """
+    rid = room.get("id") or ""
+    if ledger is None:
+        ledger = ledger_load()
+    if rid in ledger:
+        return True
+    name = room.get("name") or ""
+    if ROOM_MARK and name.startswith(ROOM_MARK):
+        return True
+    return bool(_LEGACY_ROOM_RE.match(name) or _ROOM_TAIL_RE.search(name))
 
 
 def heartbeat_path(session_id: str) -> Path:
@@ -626,9 +741,13 @@ class Caller:
     # ── 房间管理 ────────────────────────────────────────────────
 
     def list_rooms(self, include_archived: bool = False) -> list[dict]:
-        """列出所有房间"""
-        rooms = self._api_get("/rooms")
-        return rooms.get("rooms", [])
+        """列出房间。默认只给未归档的——归档房间不可投递（room-relay 整体跳过），
+        当成可用房间返给调用方是误导；要看全量传 include_archived=True。
+        """
+        rooms = self._api_get("/rooms").get("rooms", [])
+        if include_archived:
+            return rooms
+        return [r for r in rooms if r.get("archivedAt") is None]
 
     def create_room(self, name: str = None) -> dict:
         """创建一个新的调度房间，返回房间信息"""
@@ -643,6 +762,64 @@ class Caller:
         result = self._api_delete(f"/rooms/{room_id}")
         logger.info("删除房间: id=%s", room_id)
         return result
+
+    def archive_room(self, room_id: str) -> dict:
+        """归档房间（可逆：UI 点「恢复任务」或 unarchive_room 还原）
+
+        areco 侧连带把房内成员会话一并归档，看板同步清干净；房间内消息、成员快照
+        全部保留。运行中的 Stand 会话会先被 stop 再落 archived——所以只在结果已经
+        收完之后才调用。
+        """
+        result = self._api_post(f"/rooms/{room_id}/archive")
+        logger.info("归档房间: id=%s", room_id)
+        return result
+
+    def unarchive_room(self, room_id: str) -> dict:
+        """取消归档（房间与房内会话一并回看板）"""
+        result = self._api_post(f"/rooms/{room_id}/unarchive")
+        logger.info("取消归档房间: id=%s", room_id)
+        return result
+
+    def list_sessions(self) -> list[dict]:
+        """列出所有会话（清扫判定要看房内成员是否还在跑）"""
+        data = self._api_get("/sessions")
+        if isinstance(data, dict):
+            return data.get("sessions", [])
+        return data or []
+
+    def finish_room(self, dispatch_result: dict, status: str) -> dict:
+        """一次派发的收口：成功即归档自建房间，其余情况留在看板。
+
+        只归档「StandCode 自己新建」的房间（dispatch_result["room_created"]）——
+        用户传 room_id 复用的房间是人家的地盘，收口时一律不动。
+        归档失败只告警：房间没清掉是脏数据，把整条任务链带崩才是事故。
+
+        返回 {"archived": bool, "room_id": str|None, "reason": str}
+        """
+        room_id = dispatch_result.get("room_id")
+        if not room_id:
+            return {"archived": False, "room_id": None, "reason": "no_room"}
+        task_id = dispatch_result.get("task_id", "")
+        if not dispatch_result.get("room_created", False):
+            ledger_append("kept", room_id, task_id=task_id, status=status, reason="reused_room")
+            return {"archived": False, "room_id": room_id, "reason": "reused_room"}
+        if not AUTO_ARCHIVE:
+            ledger_append("kept", room_id, task_id=task_id, status=status, reason="auto_archive_off")
+            return {"archived": False, "room_id": room_id, "reason": "auto_archive_off"}
+        if status != "completed":
+            # 失败/超时/失联：留在看板才看得见，别把现场归档掉
+            ledger_append("kept", room_id, task_id=task_id, status=status, reason="not_completed")
+            return {"archived": False, "room_id": room_id, "reason": "not_completed"}
+        try:
+            self.archive_room(room_id)
+        except Exception as e:
+            logger.warning("自动归档失败 room=%s: %s", room_id, e)
+            ledger_append("kept", room_id, task_id=task_id, status=status,
+                          reason="archive_failed", error=str(e))
+            return {"archived": False, "room_id": room_id, "reason": f"archive_failed: {e}"}
+        ledger_append("archived", room_id, task_id=task_id, status=status, by="auto")
+        log_audit("room_archived", {"task_id": task_id, "room_id": room_id, "by": "auto"})
+        return {"archived": True, "room_id": room_id, "reason": "completed"}
 
     def get_room(self, room_id: str) -> dict:
         """获取单个房间详情"""
@@ -850,6 +1027,10 @@ class Caller:
         )
 
         # 2. 创建或使用已有房间
+        # room_created 决定收口时能不能归档：只有自己新建的房间才归得，用户传进来的
+        # 房间（复用/人手建的案件房）一律不碰，也不进台账——台账即「StandCode 的地盘」，
+        # 混进别人的房间会让 rooms --sweep 误扫。
+        room_created = not bool(room_id)
         if room_id:
             room = self.get_room(room_id)
         else:
@@ -876,6 +1057,7 @@ class Caller:
             "session_id": team,
             "room_id": rid,
             "room_name": room.get("name", ""),
+            "room_created": room_created,
             "stand_name": stand_name,
             "stand_session_id": stand_session_id,
             "message_id": msg_id,
@@ -885,6 +1067,14 @@ class Caller:
             "workspace": (workspace_info or {}).get("path"),
             "workspace_cwd": bool((workspace_info or {}).get("applied", False)),
         }
+        if room_created:
+            ledger_append(
+                "created", rid,
+                task_id=task_id, room_name=room.get("name", ""), team=team,
+                role=effective_role, template_id=tid, task_type=effective_task_type,
+                stand_name=stand_name, stand_session_id=stand_session_id,
+                request_preview=(request or "")[:120], pid=os.getpid(),
+            )
         log_audit("dispatch", {
             "task_id": task_id,
             "role": effective_role,
@@ -1442,12 +1632,16 @@ class Caller:
             )
             relayed = wechat.get("ok", False)
 
+        # 收口：结果已收完（且已代发/已落 inbox），成功就把自建房间归档，别在看板堆着
+        archive = self.finish_room(dispatch_result, status)
+
         return {
             **dispatch_result,
             **poll,
             "relay_summary": request_summary,
             "wechat": wechat,
             "relayed": relayed,
+            "archive": archive,
         }
 
     # ── Caller 两段式：Thinker 出计划 → Worker 执行 ─────────────
@@ -1497,6 +1691,8 @@ class Caller:
         plan_text = plan_poll.get("result_text", "")
         if not plan_text:
             logger.warning("Thinker 未产出计划，跳过执行阶段")
+            # 计划阶段就挂了：房间留在看板（现场比整洁重要），只在台账记一笔
+            self.finish_room(plan_dispatch, "plan_failed")
             return {
                 "stage": "plan_failed",
                 "plan": {**plan_dispatch, **plan_poll},
@@ -1512,6 +1708,7 @@ class Caller:
         plan = self._parse_plan(plan_text)
         if not plan["valid"]:
             logger.warning("Thinker 计划未通过结构化校验（缺步骤段）: %s", plan)
+            self.finish_room(plan_dispatch, "plan_failed")
             return {
                 "stage": "plan_failed",
                 "plan": {**plan_dispatch, **plan_poll},
@@ -1555,6 +1752,14 @@ class Caller:
             )
             relayed = wechat.get("ok", False)
 
+        # 收口：两段式开了两个房间（Thinker 一个、Worker 一个），成败按「整条链」算——
+        # 执行段没成时连计划房一起留着，排查要看的是完整链路，不是半截。
+        exec_status = exec_poll.get("status")
+        archive = {
+            "plan": self.finish_room(plan_dispatch, exec_status),
+            "execute": self.finish_room(exec_dispatch, exec_status),
+        }
+
         return {
             "stage": "execute",
             "plan": {**plan_dispatch, **plan_poll},
@@ -1564,6 +1769,7 @@ class Caller:
             "result_text": result_text,
             "wechat": wechat,
             "relayed": relayed,
+            "archive": archive,
         }
 
     # ── 严格分工辅助：门控 / plan 解析 / 自动选路 ─────────────────
@@ -1839,6 +2045,8 @@ class Caller:
                     role=d.get("role", ""),
                     template=d.get("template_id", ""),
                 )
+                # 各项自己收口：谁先完成谁先归档，不必等整批（失败项照旧留看板）
+                d["archive"] = self.finish_room(d, poll.get("status"))
                 return idx, d, summary, poll
             except Exception as e:
                 logger.warning("dispatch_parallel 第 %d 项失败: %s", idx, e)
@@ -1871,6 +2079,7 @@ class Caller:
                 "summary": summary,
                 "error": poll.get("error"),
                 "elapsed": poll.get("elapsed"),
+                "archived": bool((d.get("archive") or {}).get("archived")),
             })
 
         merged_summary = self._merge_parallel_summary(tasks)
@@ -2694,6 +2903,145 @@ def _cmd_aggregate(args) -> int:
     return 0
 
 
+def _room_idle_min(room: dict) -> float | None:
+    """房间静置分钟数：优先 lastMessageAt（ISO Z），无消息时退回 createdAt（ms epoch）"""
+    ts = room.get("lastMessageAt")
+    if ts:
+        try:
+            dt = datetime.strptime(str(ts), "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            return (time.time() - dt.timestamp()) / 60
+        except ValueError:
+            pass
+    created = room.get("createdAt")
+    if isinstance(created, (int, float)):
+        return (time.time() - created / 1000) / 60
+    return None
+
+
+def _room_view(room: dict, ledger: dict, sessions: dict) -> dict:
+    """把 areco 房间 + 台账 + 会话状态拼成一行可判断的视图"""
+    rid = room.get("id", "")
+    rec = ledger.get(rid, {})
+    members = [m for m in room.get("members", []) if m.get("sessionId")]
+    running = sum(
+        1 for m in members if (sessions.get(m["sessionId"], {}) or {}).get("status") == "running"
+    )
+    name = room.get("name") or ""
+    if rid in ledger:
+        source = "台账"
+    elif ROOM_MARK and name.startswith(ROOM_MARK):
+        source = "标记"
+    elif _LEGACY_ROOM_RE.match(name) or _ROOM_TAIL_RE.search(name):
+        source = "旧命名"
+    else:
+        source = "外部"
+    return {
+        "room_id": rid,
+        "name": name,
+        "archived": room.get("archivedAt") is not None,
+        "members": len(members),
+        "running": running,
+        "idle_min": _room_idle_min(room),
+        "source": source,
+        "standcode": source != "外部",
+        "task_id": rec.get("task_id"),
+        "role": rec.get("role"),
+        "template_id": rec.get("template_id"),
+        "ledger_event": rec.get("event"),
+    }
+
+
+def _cmd_rooms(args) -> int:
+    """房间台账 × areco 现状：列出 / 认领存量 / 清扫积压。
+
+    清扫只归档、永不删除——归档可逆（UI「恢复任务」），删除不可逆，按章程不由 agent 代做。
+    """
+    caller = Caller()
+    ledger = ledger_load()
+    rooms = caller.list_rooms(include_archived=True)
+    sessions = {s.get("id"): s for s in caller.list_sessions()}
+    views = [_room_view(r, ledger, sessions) for r in rooms]
+
+    # 认领：台账上线前建的房间（Stand-* / ·W1a2b 尾巴）补录，之后清扫才认得它们
+    if args.adopt:
+        adopted = [
+            v for v in views
+            if v["standcode"] and v["source"] != "台账"
+        ]
+        for v in adopted:
+            ledger_append(
+                "adopted", v["room_id"], room_name=v["name"],
+                archived=v["archived"], by="rooms --adopt",
+            )
+        print(f"已认领 {len(adopted)} 个存量房间进台账（{ROOMS_LEDGER_PATH}）")
+        for v in adopted:
+            print(f"  · {v['room_id']}  {v['name']}")
+        if not adopted:
+            print("  （无待认领房间：要么已在台账，要么不是 StandCode 派发的）")
+        ledger = ledger_load()
+        views = [_room_view(r, ledger, sessions) for r in rooms]
+
+    scope = views if args.all else [v for v in views if v["standcode"]]
+
+    # 清扫：静了、没人在跑、还没归档的自家房间
+    if args.sweep:
+        cand = [
+            v for v in scope
+            if v["standcode"] and not v["archived"] and v["running"] == 0
+            and (v["idle_min"] is None or v["idle_min"] >= args.idle)
+        ]
+        if not cand:
+            print(f"无可清扫房间（门槛：静置 ≥ {args.idle:g} 分钟且房内无运行中会话）")
+            return 0
+        print(f"{'干跑' if not args.yes else '执行'}：{len(cand)} 个房间可归档"
+              f"（静置 ≥ {args.idle:g} 分钟、无运行中会话）")
+        for v in cand:
+            idle = f"{v['idle_min']:.0f}m" if v["idle_min"] is not None else "?"
+            print(f"  · {v['room_id']}  静置{idle:>6}  {v['name']}")
+        if not args.yes:
+            print("\n以上仅列出未执行。确认后加 --yes 真归档（可逆：UI 点「恢复任务」还原）。")
+            return 0
+        okc = 0
+        for v in cand:
+            try:
+                caller.archive_room(v["room_id"])
+                ledger_append("archived", v["room_id"], room_name=v["name"], by="sweep")
+                okc += 1
+            except Exception as e:
+                print(f"  ⚠️ 归档失败 {v['room_id']}: {e}")
+        log_audit("room_sweep", {"candidates": len(cand), "archived": okc})
+        print(f"\n已归档 {okc}/{len(cand)} 个房间（会话随房间一并归档，看板已清）")
+        return 0
+
+    if args.json:
+        print(json.dumps(scope, ensure_ascii=False, indent=2))
+        return 0
+
+    if not scope:
+        print("（没有 StandCode 房间；台账 %s）" % ROOMS_LEDGER_PATH)
+        return 0
+    print(f"{'room':<10} {'状态':<8} {'来源':<7} {'成员':<5} {'在跑':<5} {'静置':<8} 名字")
+    for v in sorted(scope, key=lambda x: (x["archived"], x["idle_min"] or 0)):
+        idle = f"{v['idle_min']:.0f}m" if v["idle_min"] is not None else "?"
+        state = "已归档" if v["archived"] else "在看板"
+        print(
+            f"{v['room_id']:<10} {state:<8} {v['source']:<7} {v['members']:<5} "
+            f"{v['running']:<5} {idle:<8} {v['name']}"
+        )
+    live = [v for v in scope if not v["archived"]]
+    gone = [rid for rid in ledger if rid not in {r.get("id") for r in rooms}]
+    print(
+        f"\n合计 {len(scope)} 个（在看板 {len(live)} / 已归档 {len(scope) - len(live)}）"
+        f"；台账已消失房间 {len(gone)} 个；自动归档开关 auto_archive="
+        f"{'on' if AUTO_ARCHIVE else 'off'}"
+    )
+    if live:
+        print("清扫积压：caller.py rooms --sweep（干跑）→ 加 --yes 执行")
+    return 0
+
+
 def _build_parser():
     import argparse
 
@@ -2742,6 +3090,21 @@ def _build_parser():
 
     pl = sub.add_parser("list", help="列出所有后台任务")
     pl.set_defaults(func=_cmd_list)
+
+    pm = sub.add_parser(
+        "rooms",
+        help="房间台账 × areco 现状：列出 / 认领存量 / 清扫积压（只归档，永不删除）",
+    )
+    pm.add_argument("--all", action="store_true", help="连非 StandCode 房间一起列（默认只列自家派发房）")
+    pm.add_argument("--json", action="store_true", help="输出结构化 json")
+    pm.add_argument(
+        "--idle", type=float, default=SWEEP_IDLE_MIN,
+        help=f"清扫的静置门槛分钟数（默认 {SWEEP_IDLE_MIN:g}，防止扫掉正在追问的房间）",
+    )
+    pm.add_argument("--adopt", action="store_true", help="把台账上线前的存量派发房间补录进台账")
+    pm.add_argument("--sweep", action="store_true", help="清扫：列出可归档房间（默认干跑）")
+    pm.add_argument("--yes", action="store_true", help="配合 --sweep 真执行归档（可逆，UI 可恢复）")
+    pm.set_defaults(func=_cmd_rooms)
 
     pa = sub.add_parser("aggregate", help="把多个后台任务结果汇总成一条微信消息（aggregate_results）")
     pa.add_argument("task_ids", nargs="+", help="一个或多个 task_id")
