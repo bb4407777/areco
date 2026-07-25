@@ -46,12 +46,12 @@
 
 | 组件            | 路径                                              | 说明                      |
 | --------------- | ------------------------------------------------- | ------------------------- |
-| Caller 核心     | `/Users/gao/Code/StandCode/caller/caller.py`      | 调度引擎（dispatch/poll/relay/plan） |
-| Registry        | `/Users/gao/Code/StandCode/stand/registry.json`   | 7 模板 + 5 类任务映射      |
-| API 文档        | `/Users/gao/Code/StandCode/docs/api.md`           | v0.4 完整协议              |
-| StandCode SKILL | `/Users/gao/skills/standcode/SKILL.md`            | Hermes Caller 行为手册     |
-| Areco 模板      | `/Users/gao/Code/areco/config.json`               | 14 个模板含 StandCode 4 个 |
-| Inbox 目录      | `/Users/gao/Code/StandCode/data/inbox/`           | 异步回调结果存储            |
+| Caller 核心     | `$STANDCODE_ROOT/caller/caller.py`      | 调度引擎（dispatch/poll/relay/plan） |
+| Registry        | `$STANDCODE_ROOT/stand/registry.json`   | 7 模板 + 5 类任务映射      |
+| API 文档        | `$STANDCODE_ROOT/docs/api.md`           | v0.4 完整协议              |
+| StandCode SKILL | `~/skills/standcode/SKILL.md`            | Hermes Caller 行为手册     |
+| Areco 模板      | `$ARECO_ROOT/config.json`               | 14 个模板含 StandCode 4 个 |
+| Inbox 目录      | `$STANDCODE_ROOT/data/inbox/`           | 异步回调结果存储            |
 
 ---
 

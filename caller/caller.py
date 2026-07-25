@@ -58,7 +58,7 @@ WORKSPACE_DIR = Path(os.environ.get("STANDCODE_WORKSPACE_DIR", "/tmp/standcode-w
 HEARTBEAT_STALE_SEC = float(os.environ.get("STANDCODE_HEARTBEAT_STALE", "15"))
 HEARTBEAT_TICK_SEC = float(os.environ.get("STANDCODE_HEARTBEAT_TICK", "5"))
 # 自动重派发默认关闭：会外部 spawn 新房间 + 新 Stand 会话（消耗额度、产生持久状态、
-# 不可逆）。须高律师显式开 max_retries>0 才生效，对齐「对外不可逆动作事前确认」。
+# 不可逆）。须用户显式开 max_retries>0 才生效，对齐「对外不可逆动作事前确认」。
 DEFAULT_MAX_REDISPATCH = 0
 
 # ── 默认模板：完全由 stand/registry.json 驱动 ──────────────────────
@@ -78,9 +78,11 @@ CALLER_NAME = "Hermes"
 
 # 房间里"非 Stand"的发件人 —— 这些消息不算 Stand 的执行结果：
 #   Hermes  = Caller 自己（直写 SQLite 时 from_agent）
-#   高律师  = 用户（REST 通道 from 为 "高律师"）
+#   HUMAN_NAME = 人类用户（REST 通道的 from_agent）。名称因人而异，故走
+#                env > config/local.json > 默认 的三层配置，不硬编码个人称谓。
 #   all/system = 广播/系统消息
-NON_STAND_SENDERS = {CALLER_NAME, "高律师", "all", "system"}
+HUMAN_NAME = os.environ.get("STANDCODE_HUMAN_NAME") or _LOCAL_CONF.get("human_name") or "user"
+NON_STAND_SENDERS = {CALLER_NAME, HUMAN_NAME, "all", "system"}
 
 # ── Thinker/Worker 严格分工：结构化 plan 模板 + 门控 ──────────────
 # plan 模板：强制 Thinker 按「目标/上下文/步骤/约束/判据/落点」结构化输出，
@@ -383,7 +385,7 @@ def check_should_dispatch(task_description: str) -> dict:
 def _room_label(request: str, summary: str | None, role: str) -> str:
     """新建房间名：任务摘要前置 + 角色单字母 + 4 位 hex。
 
-    2026-07-25 高律师报障：areco 项目边栏清一色 Stand-worker-general-xxx，截断后零识别度。
+    2026-07-25 用户报障：areco 项目边栏清一色 Stand-worker-general-xxx，截断后零识别度。
     边栏截断保留的是前缀，所以摘要必须放最前；summary 缺省时取 request 前 16 字兜底。
     """
     text = " ".join((summary or request or "").split())
@@ -708,7 +710,7 @@ class Caller:
         to:   收件人成员名
         body: 消息正文
         from_: 发件人身份（默认 "Hermes"）
-        human_relay: 是否按「转述人类原话」投递（默认 True）。Caller 代发任务=转述高律师
+        human_relay: 是否按「转述人类原话」投递（默认 True）。Caller 代发任务=转述用户
             意图，置 True 让 areco room-relay 把 Hermes 当人类发言（默认投全体 + 清零链深
             + 附 context 预览），Stand 才会当指令回应。前提：from（Hermes）需在 areco
             config.json 的 humanRelayAgents 白名单（生产已配 = ['Hermes']）。
@@ -748,7 +750,7 @@ class Caller:
             conn.close()
 
     def get_room_messages_rest(self, room_id: str, limit: int = 100) -> list[dict]:
-        """通过 REST API 获取房间消息（只读场景用，from 为 '高律师'）"""
+        """通过 REST API 获取房间消息（只读场景用，from 为 HUMAN_NAME）"""
         return self._api_get(f"/rooms/{room_id}/messages", params={"limit": limit})
 
     # ── 核心调度 API ────────────────────────────────────────────
@@ -969,7 +971,7 @@ class Caller:
                 "room_id": str | None,
                 "status": "completed" | "timeout" | "error",
                 "result_text": str,         # Stand 回复合并文本（completed 才有）
-                "stand_replies": [...],     # 仅 Stand 的回复（排除 Hermes/高律师）
+                "stand_replies": [...],     # 仅 Stand 的回复（排除 Hermes/用户）
                 "elapsed": float,           # 耗时（秒）
                 "completed_at": str | None, # ISO 完成时间
                 "messages_count": int,
@@ -1002,7 +1004,7 @@ class Caller:
             for msg in messages:
                 last_id = max(last_id, msg.get("id", 0))
                 sender = msg.get("from_agent", "")
-                # 非 Caller、非高律师 = Stand 的回复
+                # 非 Caller、非用户 = Stand 的回复
                 if sender and sender not in NON_STAND_SENDERS:
                     stand_replies.append(msg)
 
@@ -1208,7 +1210,7 @@ class Caller:
 
         max_retries: Stand 失联（status='lost'）时自动重新派发到新 Stand 的次数上限。
             默认 0（关）——与改动前完全一致；重派发会外部 spawn 新房间+会话，属不可逆
-            动作，须高律师显式开 >0 才生效。仅对 'lost' 重试，'timeout'/'error' 不重试
+            动作，须用户显式开 >0 才生效。仅对 'lost' 重试，'timeout'/'error' 不重试
             （避免对真超时/真异常的任务无限烧额度）。
         """
         retries = 0
@@ -2267,7 +2269,7 @@ def _bg_worker(task_id: str) -> int:
         print(f"未找到任务状态 {task_id}", file=_sys.stderr)
         return 2
     spec = state.get("spec", {})
-    # 拉模式（2026-07-25 高律师定）：spec.dry_run 不再影响任何发送——触发消息链已废除
+    # 拉模式（2026-07-25 用户定）：spec.dry_run 不再影响任何发送——触发消息链已废除
     # （下方两处 send_callback_trigger 恒 dry_run=True 只拼不发），结果只落 inbox 等 Hermes 拉取。
     caller = Caller()
     state["status"] = "running"
@@ -2337,7 +2339,7 @@ def _bg_worker(task_id: str) -> int:
             "error": state.get("error"),
         }
         write_inbox(task_id, inbox_payload)
-        # 拉模式（2026-07-25 高律师定）：触发消息链废除，恒 dry_run=True 只拼不发——
+        # 拉模式（2026-07-25 用户定）：触发消息链废除，恒 dry_run=True 只拼不发——
         # 结果只落 inbox，由 Hermes 下次被微信唤醒时拉取（SKILL.md「收信箱拉模式」）。
         trigger = send_callback_trigger(
             task_id, summary_hint=spec.get("summary", ""), dry_run=True

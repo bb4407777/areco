@@ -88,7 +88,7 @@ StandCode Caller 是多 agent 调度框架的核心入口（角色 **Caller**）
 ### Inbox 目录
 
 ```
-/Users/gao/Code/StandCode/data/inbox/
+$STANDCODE_ROOT/data/inbox/
   ├── bg-1743064900-a1b2c3.json        # 任务结果
   ├── bg-1743064900-a1b2c3.processing  # 锁文件（防并发）
   └── ...
@@ -125,7 +125,7 @@ StandCode Caller 是多 agent 调度框架的核心入口（角色 **Caller**）
 ### Hermes 汇总入口（CLI）
 
 ```bash
-python3 /Users/gao/Code/StandCode/caller/caller.py _process_inbox <task_id>
+python3 $STANDCODE_ROOT/caller/caller.py _process_inbox <task_id>
 # 返回: {"ok": true, "task_id": "...", "message": "汇总内容", "action": "relayed"}
 ```
 
@@ -177,7 +177,7 @@ from caller import Caller
 
 caller = Caller(
     base_url="http://127.0.0.1:8790",  # areco 服务地址
-    projects_db="/Users/gao/Code/areco/data/projects.db",  # SQLite 消息库
+    projects_db="$ARECO_ROOT/data/projects.db",  # SQLite 消息库
     registry_path="stand/registry.json",  # Stand 注册表
 )
 ```
@@ -290,7 +290,7 @@ result = caller.poll_result(
 
 #### Stand 回复识别
 
-只把**非 Caller、非高律师**的消息算作 Stand 的执行结果（排除 `Hermes` / `高律师` / `all` / `system`）。
+只把**非 Caller、非用户**的消息算作 Stand 的执行结果（排除 `Hermes` / `用户` / `all` / `system`）。
 
 #### 提前退出检测
 
@@ -332,7 +332,7 @@ result = caller.relay_to_wechat(
 底层调用：
 
 ```bash
-HOME=/Users/gao /Users/gao/scripts/cc-send.sh \
+HOME=$HOME $CC_SEND_BIN \
   -s weixin:dm:<你的会话id>@im.wechat -m "<内容>"
 ```
 
@@ -365,9 +365,9 @@ HOME=/Users/gao /Users/gao/scripts/cc-send.sh \
 result = caller.dispatch_and_relay(
     request="请总结这份转写",
     task_type=None,
-    request_summary="姜Dora AI工作流教程摘要",  # 一句话结论
+    request_summary="某教程转写摘要",  # 一句话结论
     role="worker",                               # thinker | worker | None
-    file_path="/Users/gao/Desktop/头脑风暴/姜Dora-AI工作流.docx",
+    file_path="/path/to/transcript.docx",
     poll_timeout=600,
     dry_run=False,                               # 测试时 True
 )
@@ -516,7 +516,7 @@ msg = caller.aggregate_results([
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     team TEXT NOT NULL,          -- 房间 team 名（如 "room-a1b2c3d4"）
-    from_agent TEXT NOT NULL,    -- 发送方（"Hermes" / Stand 名称 / "高律师"）
+    from_agent TEXT NOT NULL,    -- 发送方（"Hermes" / Stand 名称 / "用户"）
     to_agent TEXT NOT NULL,      -- 接收方（Stand 名称 / "all"）
     body TEXT NOT NULL,          -- 消息正文
     created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -566,17 +566,17 @@ Caller 发消息 → SQLite INSERT → 房间 relay 检测到新消息
 | 变量             | 默认值                              | 说明                   |
 | ---------------- | ----------------------------------- | ---------------------- |
 | `ARECO_BASE`     | `http://127.0.0.1:8790`             | areco 服务地址         |
-| `ARECO_ROOT`     | `/Users/gao/Code/areco`             | areco 数据目录         |
-| `CC_SEND_BIN`    | `/Users/gao/scripts/cc-send.sh`     | 微信代发脚本           |
+| `ARECO_ROOT`     | `~/Code/areco`                      | areco 数据目录         |
+| `CC_SEND_BIN`    | `cc-send`（或 config/local.json）   | 微信代发脚本           |
 | `WECHAT_TARGET`  | `weixin:dm:<你的会话id>@im.wechat` | 微信目标会话 |
-| `STANDCODE_HOME` | `/Users/gao`                        | cc-send 的 HOME 前缀   |
+| `STANDCODE_HOME` | `$HOME`                             | cc-send 的 HOME 前缀   |
 
 ---
 
 ## 测试
 
 ```bash
-cd /Users/gao/Code/StandCode
+cd $STANDCODE_ROOT
 
 # 主动轮询 + 微信代发（dry-run，只验证轮询链路，不发微信）
 python3 caller/test_dispatch.py --relay --task-type general --poll-timeout 120 --cleanup
@@ -609,7 +609,7 @@ python3 caller/test_dispatch.py --task-type general --wait --timeout 60
 
 ```bash
 # 后台（推荐）：立刻返回 task_id，caller 自己轮询并回微信
-python3 /Users/gao/Code/StandCode/caller/caller.py run "任务描述" --bg
+python3 $STANDCODE_ROOT/caller/caller.py run "任务描述" --bg
 
 # 指定角色：worker=Reasonix / thinker=GLM-5.2
 python3 caller/caller.py run "总结这份转写" --bg --role worker --file /path/x.docx --summary "一句话结论"

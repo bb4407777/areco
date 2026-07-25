@@ -1,6 +1,6 @@
 # Yuanbao StandCode 讨论回顾（2026-07-24）
 
-> 高律师昨日在腾讯元宝（yuanbao.tencent.com，会话 naQivTmsDa）上与 AI 讨论 StandCode 相关核心议题，共 40+ 个历史对话，其中 6 个与 StandCode 产品方向直接相关。以下摘要核心观点与隐含决策。
+> 用户昨日在腾讯元宝（yuanbao.tencent.com）上与 AI 讨论 StandCode 相关核心议题，共 40+ 个历史对话，其中 6 个与 StandCode 产品方向直接相关。以下摘要核心观点与隐含决策。
 
 ---
 
@@ -177,4 +177,4 @@
 
 ---
 
-*本文档基于 2026-07-24 腾讯元宝会话 naQivTmsDa 中 6 个核心讨论整理。全文由 WorkBuddy 提取并摘要，原始对话在元宝账号可查。*
+*本文档基于 2026-07-24 腾讯元宝会话 中 6 个核心讨论整理。全文由 WorkBuddy 提取并摘要，原始对话在元宝账号可查。*

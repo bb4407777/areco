@@ -49,15 +49,15 @@ platform_toolsets:
 
 ### 方案 A：Terminal 命令分类拦截器（推荐，立即可做）
 
-在 Hermes 的 workspace 目录创建 `/Users/gao/.qclaw-hermes/workspace/terminal-guard.sh`：
+在 Hermes 的 workspace 目录创建 `$HERMES_HOME/workspace/terminal-guard.sh`：
 
 ```bash
 #!/bin/bash
 # terminal-guard.sh — 在 Hermes terminal 执行前做命令分类
-# 安装：config.yaml terminal.command_prefix 设为 source /Users/gao/.qclaw-hermes/workspace/terminal-guard.sh && 
+# 安装：config.yaml terminal.command_prefix 设为 source $HERMES_HOME/workspace/terminal-guard.sh && 
 
 # 白名单：允许直接跑的命令（派发、状态查询、cc-send、自检）
-ALLOW_DIRECT="^(node .*areco-msg|python3 .*caller.py|pgrep|ps|cc-send|launchctl|hermes-switch-model.py|echo '收到|cat /Users/gao/.qclaw-hermes)"
+ALLOW_DIRECT="^(node .*areco-msg|python3 .*caller.py|pgrep|ps|cc-send|launchctl|hermes-switch-model.py|echo '收到|cat $HERMES_HOME)"
 
 # 拦截类：这些命令应该走派发，不走直干
 SHOULD_DISPATCH="^(git |vim |nvim |code |curl |find |grep |rg |python3(?!.*caller.py)|npm |pip |cp |mv |rm |mkdir |write|edit|sed |awk |jq |open |opencli )"
@@ -73,8 +73,8 @@ fi
 # 拦截类 → 系统提示：这类命令必须走派发
 if echo "$CMD" | grep -qE "$SHOULD_DISPATCH"; then
     echo "⛔ terminal-guard: 此命令属于 Worker 执行类操作，必须通过 StandCode 派发。"
-    echo "   请使用: python3 /Users/gao/Code/StandCode/caller/caller.py dispatch '<任务>' "
-    echo "   或: node /Users/gao/Code/areco/scripts/areco-msg.mjs <room> Hermes <stand> '<任务>' --human-relay"
+    echo "   请使用: python3 $STANDCODE_ROOT/caller/caller.py dispatch '<任务>' "
+    echo "   或: node $ARECO_ROOT/scripts/areco-msg.mjs <room> Hermes <stand> '<任务>' --human-relay"
     echo "   被拦命令: $CMD"
     exit 1
 fi
@@ -159,7 +159,7 @@ def validate_dispatch(command: str, task_type: str | None = None) -> dict:
 在 `~/.cc-connect/crons/jobs.json` 中增加一个每日 12:00/18:00 的 cron：
 - 读取昨日 Hermes state.db 中的所有 terminal 调用
 - 统计"应派发但直干"的比例
-- 如果 >30%，微信通知高律师："昨日 Hermes 跳过派发率 X%，请检查"
+- 如果 >30%，微信通知用户："昨日 Hermes 跳过派发率 X%，请检查"
 - 用 `caller.py` 的 `validate_dispatch` 做离线分类
 
 ---
@@ -207,7 +207,7 @@ Hermes 在微信平台只有 terminal 工具。以下 terminal 操作**必须先
 - `pgrep -f hermes` — 健康检查
 - `cc-send` — 微信回执
 - `echo '收到...'` — 秒回确认
-- `cat /Users/gao/.qclaw-hermes/config.yaml` — 自检配置
+- `cat $HERMES_HOME/config.yaml` — 自检配置
 
 **自拦截口诀**（每次用 terminal 前念一遍）：
 > 这是派发还是直干？直干能交给 Worker 做吗？
@@ -244,7 +244,7 @@ Hermes 在微信平台只有 terminal 工具。以下 terminal 操作**必须先
 
 ```bash
 # 分析 Hermes 上周的所有 terminal 调用，输出"直干率"
-python3 /Users/gao/Code/StandCode/scripts/audit-direct-work.py --week -1
+python3 $STANDCODE_ROOT/scripts/audit-direct-work.py --week -1
 ```
 
 输出示例：
@@ -418,12 +418,12 @@ platform_toolsets:
     - terminal  # 唯一工具
 skills:
   external_dirs:
-    - /Users/gao/.qclaw-hermes/skills-router  # 含 StandCode 软链
+    - $HERMES_HOME/skills-router  # 含 StandCode 软链
 agent:
   max_turns: 40
   image_input_mode: auto
 terminal:
-  cwd: /Users/gao/.qclaw-hermes/workspace  # 链接 → vault CLAUDE.md
+  cwd: $HERMES_HOME/workspace  # 链接 → vault CLAUDE.md
 ```
 
 **关键限制**：

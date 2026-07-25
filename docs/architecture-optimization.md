@@ -1,7 +1,7 @@
 # StandCode 架构优化方案
 
 > 版本: v0.1 | 定稿: 2026-07-25
-> 来源: 元宝讨论（2026-07-24 会话 naQivTmsDa）+ 当前架构审计
+> 来源: 元宝讨论（2026-07-24 会话）+ 当前架构审计
 > 角色: Thinker via WorkBuddy DeepSeek-v4-pro（stand-thinker-workbuddy）
 
 ---
@@ -269,7 +269,7 @@ StandCode 走本地+远程，核心卖点 = 数据不出域 + 灵活定制。
 2. **W3**：Stand 完成 → worktree 结果 merge 回主分支 → clean worktree
 3. **W4**：参考 graith 的 worktree 自动隔离模式
 
-**技术依赖**：areco 模板 `cwd` 动态化支持（当前为固定 `/Users/gao`），需改造为任务级隔离
+**技术依赖**：areco 模板 `cwd` 动态化支持（当前为固定 `$HOME`），需改造为任务级隔离
 
 ---
 
