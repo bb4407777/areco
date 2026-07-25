@@ -8,6 +8,7 @@
 check_should_dispatch 这些纯函数**零覆盖**，而它们恰恰是选路的判据——选错路的代价是
 烧一个 Stand 段或用错档位的模型，比崩溃更贵，因为不会报错。
 """
+import os
 import sys
 import pathlib
 import tempfile
@@ -132,8 +133,12 @@ class _FakeCaller(C.Caller):
                               else ["Worker 干完了，产物在 /tmp/out.txt"])
         return {"name": name, "sessionId": f"ses-{name}"}
 
+    def list_template_ids(self):
+        return {"thinker-tpl", "worker-tpl"}
+
     def archive_room(self, rid):
-        pass
+        self._archived = getattr(self, "_archived", [])
+        self._archived.append(rid)
 
     def _session_status(self, sid):
         return "running"
@@ -186,8 +191,60 @@ def test_plan_and_execute() -> None:
         C.time.sleep = _sleep
 
 
+def test_dispatch_hardening() -> None:
+    """审计（2026-07-26）指出的派发期缺陷：孤儿房 / 归档房挂死 / 未知模板。"""
+    print("\n[dispatch] 派发期加固（孤儿房 / 归档房 / 未知模板）")
+    _sleep = C.time.sleep
+    C.time.sleep = lambda *a, **k: None
+    try:
+        tmp = pathlib.Path(tempfile.mkdtemp())
+
+        # 1) 未知模板 → 在建房之前就拒绝，不留孤儿房
+        c = _FakeCaller(tmp / "a.db")
+        try:
+            c.dispatch("任务", template_id="不存在的模板")
+            check(False, "未知模板应被拒绝")
+        except RuntimeError as e:
+            check("不存在" in str(e), "未知模板 → 建房前拒绝")
+            check(not c._rooms, "未知模板 → 一个房间都没建（改动前会留孤儿房）")
+
+        # 2) add_stand 中途失败 → 自建的房间被回滚归档
+        c = _FakeCaller(tmp / "b.db")
+        c.add_stand = lambda rid, tid: (_ for _ in ()).throw(RuntimeError("areco 起 Stand 失败"))
+        try:
+            c.dispatch("任务")
+            check(False, "add_stand 失败应向上抛")
+        except RuntimeError:
+            check(c._rooms == getattr(c, "_archived", []),
+                  f"中途失败 → 自建房间已回滚归档（建 {c._rooms} / 归档 {getattr(c, '_archived', [])}）")
+
+        # 3) 已归档房间 → 当场拒绝，而不是让 --wait 无限等
+        c = _FakeCaller(tmp / "c.db")
+        c.get_room = lambda rid: {"id": rid, "team": f"team-{rid}", "name": "旧房",
+                                  "archivedAt": "2026-07-01T00:00:00Z"}
+        try:
+            c.dispatch("任务", room_id="room-old")
+            check(False, "归档房间应被拒绝")
+        except RuntimeError as e:
+            check("已归档" in str(e), "归档房间 → 当场拒绝（改动前 --wait 会静默挂死）")
+    finally:
+        C.time.sleep = _sleep
+
+
+def test_conf_float() -> None:
+    """配置手误不该让整个 CLI 死在 import 上。"""
+    print("\n[_conf_float] 配置解析容错")
+    check(C._conf_float("__NOPE__", None, 30) == 30.0, "缺省 → 默认值")
+    os.environ["__BAD_FLOAT__"] = "30m"
+    try:
+        check(C._conf_float("__BAD_FLOAT__", None, 30) == 30.0, "手误 '30m' → 回落默认值而非崩溃")
+    finally:
+        del os.environ["__BAD_FLOAT__"]
+
+
 def main() -> int:
-    for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute):
+    for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute,
+              test_dispatch_hardening, test_conf_float):
         t()
     print()
     if _fails:

@@ -28,13 +28,15 @@ logger = logging.getLogger("standcode.caller")
 
 # ── 默认配置 ────────────────────────────────────────────────────────
 ARECO_BASE = os.environ.get("ARECO_BASE", "http://127.0.0.1:8790")
-ARECO_ROOT = os.environ.get("ARECO_ROOT", str(Path.home() / "Code" / "areco"))
-PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
-REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
-
-# ── 微信代发配置 ────────────────────────────────────────────────────
-# 本机私有值不进仓：优先级 env > config/local.json（gitignore）> 空。
+# ── 本机私有配置 ────────────────────────────────────────────────────
+# 本机私有值不进仓：优先级 env > config/local.json（gitignore）> 默认。
 # WECHAT_TARGET 为空时 relay_to_wechat 直接返回未配置错误，不影响 dispatch/poll/inbox 主链。
+#
+# ⚠️ 这一段必须在 ARECO_ROOT 之前——HOME_DIR 是所有「家目录派生路径」的唯一源头。
+# 改动前 ARECO_ROOT/TASKS_DIR 走 Path.home()、而 HOME_DIR 走 local.json，两者在隔离
+# HOME 下会分裂：REST 照样连本机 8790 建出真房间、起真 Stand（烧额度），随后 send_message
+# 却对着 $HOME/Code/areco/data/projects.db 找不到库而炸——留下一个永远收不到任务的孤儿房。
+# 本机大量 agent 跑在隔离 HOME 下，这不是假想（见 memory: isolated-home-tool-pitfall）。
 _LOCAL_CONF_PATH = Path(__file__).resolve().parent.parent / "config" / "local.json"
 try:
     _LOCAL_CONF = json.loads(_LOCAL_CONF_PATH.read_text()) if _LOCAL_CONF_PATH.exists() else {}
@@ -43,6 +45,10 @@ except Exception:
 CC_SEND_BIN = os.environ.get("CC_SEND_BIN") or _LOCAL_CONF.get("cc_send_bin") or "cc-send"
 WECHAT_TARGET = os.environ.get("WECHAT_TARGET") or _LOCAL_CONF.get("wechat_target") or ""
 HOME_DIR = os.environ.get("STANDCODE_HOME") or _LOCAL_CONF.get("home_dir") or str(Path.home())
+
+ARECO_ROOT = os.environ.get("ARECO_ROOT") or str(Path(HOME_DIR) / "Code" / "areco")
+PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
+REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
 
 # ── 房间来源标记 / 台账 / 自动归档 ──────────────────────────────────
 # 2026-07-25 用户报障：房间名换成任务语义后（_room_label），派发房与人手建的案件房
@@ -78,14 +84,31 @@ def _conf_bool(env_key: str, conf_key: str, default: bool) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _conf_float(env_key: str, conf_key: str | None, default: float) -> float:
+    """读浮点配置，解析失败只告警回落默认值。
+
+    这些解析在 import 期执行——裸 float() 一旦遇到 `STANDCODE_SWEEP_IDLE_MIN=30m`
+    这种手误就是 ValueError，**整个 CLI 连同 `import caller` 一起死在 import 上**，
+    每个子命令都打 traceback。一个配置手误不该造成全量停摆。
+    """
+    raw = os.environ.get(env_key)
+    if raw is None and conf_key:
+        raw = _LOCAL_CONF.get(conf_key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("%s=%r 不是合法数字，回落默认值 %s", env_key, raw, default)
+        return default
+
+
 AUTO_ARCHIVE = _conf_bool("STANDCODE_AUTO_ARCHIVE", "auto_archive", True)
 # 清扫判定的空闲门槛（分钟）：房间最后一条消息距今超过它才算「静了」，防止把
 # 用户正在里面追问的房间扫掉。
-SWEEP_IDLE_MIN = float(
-    os.environ.get("STANDCODE_SWEEP_IDLE_MIN")
-    or _LOCAL_CONF.get("sweep_idle_min")
-    or 30
-)
+SWEEP_IDLE_MIN = _conf_float("STANDCODE_SWEEP_IDLE_MIN", "sweep_idle_min", 30)
+# 连续读 projects.db 失败多少次就放弃等待（见 get_messages）
+MSG_READ_FAIL_LIMIT = int(_conf_float("STANDCODE_MSG_READ_FAIL_LIMIT", None, 10))
 
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
@@ -107,8 +130,8 @@ except Exception:  # 建不出目录也不能拖垮主流程——log_audit 自�
 # （详见 _HeartbeatWriter 与 read_heartbeat 的注释）。
 HEARTBEAT_DIR = Path(os.environ.get("STANDCODE_HEARTBEAT_DIR", "/tmp/standcode-heartbeat"))
 WORKSPACE_DIR = Path(os.environ.get("STANDCODE_WORKSPACE_DIR", "/tmp/standcode-workspaces"))
-HEARTBEAT_STALE_SEC = float(os.environ.get("STANDCODE_HEARTBEAT_STALE", "15"))
-HEARTBEAT_TICK_SEC = float(os.environ.get("STANDCODE_HEARTBEAT_TICK", "5"))
+HEARTBEAT_STALE_SEC = _conf_float("STANDCODE_HEARTBEAT_STALE", None, 15)
+HEARTBEAT_TICK_SEC = _conf_float("STANDCODE_HEARTBEAT_TICK", None, 5)
 # 自动重派发默认关闭：会外部 spawn 新房间 + 新 Stand 会话（消耗额度、产生持久状态、
 # 不可逆）。须用户显式开 max_retries>0 才生效，对齐「对外不可逆动作事前确认」。
 DEFAULT_MAX_REDISPATCH = 0
@@ -1035,6 +1058,40 @@ class Caller:
         log_audit("room_archived", {"task_id": task_id, "room_id": room_id, "by": "auto"})
         return {"archived": True, "room_id": room_id, "reason": "completed"}
 
+    def list_template_ids(self) -> set[str]:
+        """areco 现有模板 id 集合（进程内缓存一次）。取不到返回空集 = 不做校验。"""
+        cached = getattr(self, "_template_ids", None)
+        if cached is not None:
+            return cached
+        ids: set[str] = set()
+        try:
+            data = self._api_get("/templates")
+            items = data.get("templates") or data.get("data") or data
+            if isinstance(items, dict):
+                items = items.get("templates", [])
+            for t in items or []:
+                tid = t.get("id") if isinstance(t, dict) else t
+                if tid:
+                    ids.add(str(tid))
+        except Exception as e:
+            logger.warning("取 areco 模板列表失败，跳过模板校验: %s", e)
+        self._template_ids = ids
+        return ids
+
+    def _assert_template_exists(self, tid: str) -> None:
+        """派发前确认模板真的存在于 areco。
+
+        刻意 fail-open：取不到模板列表（areco 没起/接口变了）时**不拦**——审计发现
+        registry.json 里的 zcode 在 areco 根本不存在，但这类漂移不该让整个 CLI 罢工，
+        只该在能确认「列表拿到了、里面没有它」时才拒绝。
+        """
+        known = self.list_template_ids()
+        if known and tid not in known:
+            raise RuntimeError(
+                f"模板『{tid}』在 areco 中不存在（现有：{', '.join(sorted(known))}）。"
+                f"检查 stand/registry.json 与 areco 模板列表是否漂移。"
+            )
+
     def get_room(self, room_id: str) -> dict:
         """获取单个房间详情"""
         rooms = self._api_get("/rooms")
@@ -1136,8 +1193,22 @@ class Caller:
                 "SELECT * FROM messages WHERE team=? AND id>? ORDER BY id ASC LIMIT ?",
                 (team, after_id, limit),
             ).fetchall()
+            self._msg_read_failures = 0
             return [dict(r) for r in rows]
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            # 不能静默返回 []：poll_result 会把它当成「Stand 还没回话」继续等，而
+            # --wait 默认 timeout=0（无限等）→ 库被锁/schema 漂移时进程永远挂着，
+            # 既不报错也不写 inbox。连续失败到阈值就抛，让上层看得见。
+            self._msg_read_failures = getattr(self, "_msg_read_failures", 0) + 1
+            logger.warning(
+                "读消息失败（第 %d 次，team=%s）: %s",
+                self._msg_read_failures, team, e,
+            )
+            if self._msg_read_failures >= MSG_READ_FAIL_LIMIT:
+                raise RuntimeError(
+                    f"连续 {self._msg_read_failures} 次读 projects.db 失败，"
+                    f"停止等待（库被锁 / schema 漂移 / 路径不对）：{e}"
+                ) from e
             return []
         finally:
             conn.close()
@@ -1245,6 +1316,12 @@ class Caller:
             if isolated else None
         )
 
+        # 1.8 模板存在性前置校验：放在 create_room 之前。
+        # 改动前 tid 不存在时会先建好房间、再在 add_stand 炸 RuntimeError，留下一个
+        # 没有 Stand 的孤儿房（且当时还没写台账，rooms --sweep 都扫不到）。
+        # 典型触发：registry.json 列了 zcode，但 areco 侧根本没有这个模板。
+        self._assert_template_exists(tid)
+
         # 2. 创建或使用已有房间
         # room_created 决定收口时能不能归档：只有自己新建的房间才归得，用户传进来的
         # 房间（复用/人手建的案件房）一律不碰，也不进台账——台账即「StandCode 的地盘」，
@@ -1252,6 +1329,15 @@ class Caller:
         room_created = not bool(room_id)
         if room_id:
             room = self.get_room(room_id)
+            # 已归档房间：areco 的 deliverMentions 开头就 `if (room.archivedAt !== null) return`，
+            # 消息写进去也永远不投递。而 --wait 默认 timeout=0（无限等），于是等待者进程
+            # 静默挂死、不报错、不写 inbox。宁可当场炸。
+            if room.get("archivedAt") is not None:
+                raise RuntimeError(
+                    f"房间 {room_id} 已归档，areco 不会投递消息（--wait 会无限等）。"
+                    f"先在 UI「恢复任务」，或不传 --room-id 让它新建。"
+                )
+
         else:
             room = self.create_room(
                 _room_label(request, request_summary, effective_role)
@@ -1260,16 +1346,46 @@ class Caller:
         team = room["team"]
         rid = room["id"]
 
-        # 3. 添加 Stand（agent session）
-        member = self.add_stand(rid, tid)
-        stand_name = member["name"]
-        stand_session_id = member.get("sessionId", "")
+        # 台账先落再干活：改动前 ledger_append 在 send_message 之后，中途炸掉的房间
+        # 不进台账 = rooms --sweep 永远扫不到 = 孤儿房只能人工发现。
+        if room_created:
+            ledger_append(
+                "created", rid,
+                task_id=task_id, room_name=room.get("name", ""), team=team,
+                role=effective_role, template_id=tid, task_type=effective_task_type,
+                request_preview=(request or "")[:120], pid=os.getpid(),
+            )
 
-        # 4. 等待片刻让 session 启动（TUI boot）
-        time.sleep(3)
+        # 3-5 步任一失败都要回滚：自建的房间归档掉，别留着烧额度。
+        try:
+            # 3. 添加 Stand（agent session）
+            member = self.add_stand(rid, tid)
+            stand_name = member["name"]
+            stand_session_id = member.get("sessionId", "")
 
-        # 5. 向房间发送任务消息（直写 SQLite）
-        msg_id = self.send_message(team, stand_name, request)
+            # 4. 等待片刻让 session 启动（TUI boot）
+            time.sleep(3)
+
+            # 5. 向房间发送任务消息（直写 SQLite）
+            msg_id = self.send_message(team, stand_name, request)
+        except Exception as e:
+            logger.error("派发中途失败（room=%s tid=%s）：%s", rid, tid, e)
+            log_audit("dispatch_failed", {
+                "task_id": task_id, "mode": mode, "role": effective_role,
+                "template": tid, "room_id": rid, "error": str(e),
+                "rolled_back": room_created,
+            })
+            if room_created:
+                # 自己建的才收拾；用户传进来的房间不碰
+                try:
+                    self.archive_room(rid)
+                    ledger_append("archived", rid, task_id=task_id,
+                                  status="dispatch_failed", by="rollback")
+                except Exception as ae:
+                    logger.warning("回滚归档失败 room=%s: %s", rid, ae)
+                    ledger_append("kept", rid, task_id=task_id,
+                                  status="dispatch_failed", reason=f"rollback_failed: {ae}")
+            raise
 
         result = {
             "task_id": task_id,
@@ -1288,12 +1404,11 @@ class Caller:
             "workspace_cwd": bool((workspace_info or {}).get("applied", False)),
         }
         if room_created:
+            # 补一条带 Stand 信息的台账（created 已在建房后先落，这里只是补全）
             ledger_append(
-                "created", rid,
-                task_id=task_id, room_name=room.get("name", ""), team=team,
-                role=effective_role, template_id=tid, task_type=effective_task_type,
-                stand_name=stand_name, stand_session_id=stand_session_id,
-                request_preview=(request or "")[:120], pid=os.getpid(),
+                "stand_added", rid,
+                task_id=task_id, stand_name=stand_name,
+                stand_session_id=stand_session_id, template_id=tid,
             )
         log_audit("dispatch", {
             "task_id": task_id,
@@ -2341,6 +2456,10 @@ class Caller:
                 dry_run=dry_run,
             )
             relayed = wechat.get("ok", False)
+        # 收口：auto_dispatch 的直派分支此前**从不 finish_room**，每次调用泄一个房间到
+        # 看板（dispatch_and_relay / plan_and_execute / dispatch_parallel 都收口了，
+        # 只有这条路漏了）。归档只发生在 completed，失败照旧留看板看现场。
+        archive = self.finish_room(exec_dispatch, exec_poll.get("status"))
         return {
             "mode": "direct",
             **exec_dispatch,
@@ -2348,6 +2467,7 @@ class Caller:
             "result_text": result_text,
             "wechat": wechat,
             "relayed": relayed,
+            "archive": archive,
         }
 
     # ── 多 Stand 结果汇总（并行召回 / 追问聚合）─────────────────
@@ -2646,7 +2766,7 @@ def dispatch_parallel(requests: list[dict], **kwargs) -> dict:
 import sys as _sys
 
 TASKS_DIR = Path(
-    os.environ.get("STANDCODE_TASKS_DIR", str(Path.home() / ".standcode" / "tasks"))
+    os.environ.get("STANDCODE_TASKS_DIR") or str(Path(HOME_DIR) / ".standcode" / "tasks")
 )
 
 # ── 异步回调 inbox ────────────────────────────────────────────────────
@@ -2905,10 +3025,21 @@ def process_inbox_callback(task_id: str) -> dict:
         ok = r.get("ok", False)
         msg = summary
 
-        # 5. 清理 inbox
-        delete_inbox(task_id)
+        # 5. 清理 inbox —— 只在真发出去之后。
+        # 改动前无条件删：cc-send 失败（微信通道断、Clash 没起、目标会话失效）时，
+        # 结果的唯一副本就此消失——Stand 白跑，用户什么都收不到，也无从补发。
+        # 现在失败就留着，下次 Hermes 被唤醒还能从 inbox 里读到（拉模式本来就靠这个）。
+        if ok:
+            delete_inbox(task_id)
+            action = "relayed"
+        else:
+            logger.warning(
+                "微信代发失败，保留 inbox 待下次拉取（task=%s）：%s",
+                task_id, r.get("error") or r,
+            )
+            action = "relay_failed"
 
-        return {"ok": ok, "task_id": task_id, "message": msg, "action": "relayed"}
+        return {"ok": ok, "task_id": task_id, "message": msg, "action": action}
     except Exception as e:
         logger.error("process_inbox_callback 异常: %s", e)
         release_processing_lock(task_id)
