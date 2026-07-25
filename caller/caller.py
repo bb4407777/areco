@@ -376,6 +376,18 @@ def check_should_dispatch(task_description: str) -> dict:
 # 心跳键统一用 stand_session_id：Stand 宿主进程知道自己的 session id，可据此写文件；
 # task_id 是 Caller 内部生成、Stand 侧无从得知，作心跳键会让「Stand 写、Caller 读」
 # 永远对不上。任务原文写 {task_id}.hb，这里改成 {session_id}.hb 才能闭环。
+def _room_label(request: str, summary: str | None, role: str) -> str:
+    """新建房间名：任务摘要前置 + 角色单字母 + 4 位 hex。
+
+    2026-07-25 高律师报障：areco 项目边栏清一色 Stand-worker-general-xxx，截断后零识别度。
+    边栏截断保留的是前缀，所以摘要必须放最前；summary 缺省时取 request 前 16 字兜底。
+    """
+    text = " ".join((summary or request or "").split())
+    label = text[:16] + ("…" if len(text) > 16 else "")
+    tag = "T" if role == "thinker" else "W"
+    return f"{label or 'Stand'}·{tag}{uuid.uuid4().hex[:4]}"
+
+
 def heartbeat_path(session_id: str) -> Path:
     """Stand 心跳文件路径（键 = stand_session_id）"""
     return HEARTBEAT_DIR / f"{session_id}.hb"
@@ -746,11 +758,13 @@ class Caller:
         role: str | None = None,
         isolated: bool = False,
         workspace_repo: str | None = None,
+        request_summary: str | None = None,
     ) -> dict:
         """向 Stand 派发任务
 
         参数:
             request:    任务描述（自然语言）
+            request_summary: 一句话摘要——用作新建房间名前缀（边栏识别度）；None 时取 request 前 16 字
             task_type:  任务类型（search/coding/writing/analysis/general）；None=不按类型分派
             room_id:    指定房间（None=新建）
             template_id: 指定模板（None=自动选择）
@@ -832,7 +846,7 @@ class Caller:
             room = self.get_room(room_id)
         else:
             room = self.create_room(
-                f"Stand-{effective_role}-{effective_task_type}-{uuid.uuid4().hex[:6]}"
+                _room_label(request, request_summary, effective_role)
             )
 
         team = room["team"]
@@ -1369,6 +1383,7 @@ class Caller:
             room_id=room_id,
             template_id=template_id,
             role=role,
+            request_summary=request_summary,
         )
         poll = self.poll_result(
             room_id=dispatch_result["room_id"],
