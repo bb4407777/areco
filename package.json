@@ -13,12 +13,7 @@
     "config/harnesses.example.json",
     "config/models.json",
     "config/presets.json",
-    "config/stands.json",
     "stand/",
-    "scripts/openclaw-stand-wrapper.sh",
-    "scripts/qclaw-stand-wrapper.py",
-    "scripts/qclaw-stand-wrapper.sh",
-    "scripts/sync-areco-templates.py",
     "README.md",
     "LICENSE"
   ],

@@ -57,7 +57,7 @@ def dispatch(body: str, template_id: str, timeout: int = 120):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--body", default="请用一句话解释什么是回文数。")
-    parser.add_argument("--template", default="stand-thinker-workbuddy")
+    parser.add_argument("--template", default="workbuddy-deepseek-pro")
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
     dispatch(args.body, args.template, args.timeout)

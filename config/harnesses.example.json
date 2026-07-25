@@ -2,12 +2,6 @@
   "version": "1.0.0",
   "comment": "Harness 层：运行框架，只定义怎么启动 agent，不绑定模型",
   "harnesses": {
-    "openclaw": {
-      "command": "~/Code/StandCode/scripts/qclaw-stand-wrapper.py",
-      "args": [],
-      "cwd": "~",
-      "description": "Python wrapper 调用 qclaw 脚本，正确处理 PTY 输入"
-    },
     "reasonix": {
       "command": "reasonix",
       "args": [

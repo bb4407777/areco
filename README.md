@@ -20,14 +20,13 @@
 ```
 角色层   Caller / Thinker / Worker
   = 「该角色默认用哪个 areco 模板」的映射（stand/registry.json），不是配置体系
-      ↓ 选择
-模板层   areco Template（执行配置唯一落点）
+      ↓ 选择（直接引用 areco 现有模板 id，不在 areco 里新建模板）
+模板层   areco Template（执行配置唯一落点，areco config.json / 设置页维护）
   可带 harness / model / preset 三个可选字段 = 模板的深度自定义
   spawn 时 areco standcode-resolver 现场解析成 command/args/env
       ↓ 引用
 配件字典  config/：harnesses.json（壳）models.json（模型）
-  presets.json（预设）stands.json（组合）
-  scripts/sync-areco-templates.py 把组合同步成 areco 模板
+  presets.json（预设）
 ```
 
 ## 派发与回收：收信箱拉模式
@@ -52,14 +51,14 @@ python3 caller/caller.py list
 
 ```bash
 # 1. 前置：areco 跑在 127.0.0.1:8790，python3 ≥ 3.10
-# 2. 配件字典（示例 → 本机）
+# 2. 角色映射：stand/registry.json 的 default_thinker / default_worker
+#    直接填 areco 现有模板 id（areco 设置页可查），不新建模板
+# 3. 配件字典（可选，仅当模板用 harness/model/preset 深度自定义时）
 cp config/harnesses.example.json config/harnesses.json   # 改成你的 harness 路径
-# 3. 本机私有配置（可选，微信代发用；不进仓）
+# 4. 本机私有配置（可选，微信代发用；不进仓）
 cat > config/local.json <<'EOF'
 { "cc_send_bin": "<你的发信脚本>", "wechat_target": "weixin:dm:<你的会话id>@im.wechat" }
 EOF
-# 4. 同步模板进 areco
-python3 scripts/sync-areco-templates.py
 # 5. 派第一个任务
 python3 caller/caller.py run --wait "回复两个字：成功"
 ```
@@ -80,7 +79,7 @@ python3 caller/caller.py run --wait "回复两个字：成功"
 
 - **REST**：建房、加 Stand（`/api/rooms`）；任务面板（`/api/tasks`）
 - **projects.db**：房间消息直写（带 `human_relay` 转述闸）
-- **模板同步**：`sync-areco-templates.py` → areco `stand-*` 模板；spawn 时 areco 侧 `standcode-resolver` 读本仓 `config/` 字典
+- **模板引用**：`stand/registry.json` 的角色默认直接填 areco 现有模板 id；模板若带 harness/model/preset 字段，spawn 时 areco 侧 `standcode-resolver` 读本仓 `config/` 字典现场解析
 - **看板**：Stand 即 areco 会话，活动任务自动置顶
 
 ## License

@@ -67,6 +67,8 @@ DEFAULT_MAX_REDISPATCH = 0
 # registry 用 think/plan/execute/work/fast，模板用 stand-thinker-*/stand-worker-*，且
 # reasonix 根本不在 registry 模板表里（孤儿）。已改为默认值全部由 Caller._load_registry()
 # 从 registry.json 读取，此处不再保留任何业务硬编码默认。
+# 2026-07-25：角色映射改为直接引用 areco 现有模板 id（如 workbuddy-deepseek-pro），
+# 不再经 sync-areco-templates.py 新建 stand-* 模板（已清理）。
 # registry.json 字段映射：
 #   default_thinker     → default_thinker_id（Thinker 角色）
 #   default_worker      → default_worker_id（Worker 角色 + 全局兜底 default_template_id）
@@ -537,7 +539,7 @@ class Caller:
         """
         # registry 文件完全不可用时的紧急兜底（与 registry.json 当前取值一致；
         # 仅在文件缺失/解析失败时启用，正常路径不参与）
-        _FALLBACK_THINKER = "stand-thinker-workbuddy"
+        _FALLBACK_THINKER = "workbuddy-deepseek-pro"
         _FALLBACK_WORKER = "claude"
 
         def _apply_fallback(reason: str) -> None:
