@@ -3,18 +3,10 @@
   "comment": "Harness 层：运行框架，只定义怎么启动 agent，不绑定模型",
   "harnesses": {
     "openclaw": {
-      "command": "/Applications/QClaw.app/Contents/Resources/node/node",
-      "args": [
-        "/Users/gao/Library/Application Support/QClaw/openclaw/node_modules/openclaw/openclaw.mjs",
-        "agent"
-      ],
-      "env": {
-        "HOME": "/Users/gao",
-        "OPENCLAW_STATE_DIR": "/Users/gao/.qclaw",
-        "OPENCLAW_CONFIG_PATH": "/Users/gao/.qclaw/openclaw.json"
-      },
+      "command": "/Users/gao/Code/StandCode/scripts/qclaw-stand-wrapper.py",
+      "args": [],
       "cwd": "/Users/gao",
-      "description": "QClaw/openclaw 原生 agent"
+      "description": "Python wrapper 调用 qclaw 脚本，正确处理 PTY 输入"
     },
     "reasonix": {
       "command": "reasonix",

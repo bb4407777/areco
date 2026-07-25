@@ -1,0 +1,9 @@
+{
+  "task_id": "test-stand-worker-default-20260725",
+  "result_text": "stand-worker-default 模板测试结果：\n\n✅ 连通成功\n\n测试参数：\n- 模板 ID: stand-worker-default\n- Harness: openclaw\n- Model: glm-5.2（pool-glm-5.2）\n- Preset: worker\n- 测试方式：caller.py dispatch_and_relay（dry_run）\n\n执行详情：\n- 房间: 2e97416e\n- 会话: room-2e97416e\n- 耗时: 45.85s\n- Stand 名称：默认 Worker：openclaw + GLM-5.2 + worker 预设\n\n结论：stand-worker-default 模板路线完全正常\n- areco（8790）运行正常\n- stands.json 配置正确\n- 四层配置（areco config → harness/model/preset/stands）一致\n- openclaw harness + qclaw-stand-wrapper 正常拉起 GLM-5.2 并响应\n- relay_to_wechat dry-run 正常",
+  "status": "completed",
+  "request_summary": "stand-worker-default 模板连通测试通过",
+  "files": [],
+  "room_id": "2e97416e",
+  "stand": "默认 Worker：openclaw + GLM-5.2 + worker 预设"
+}
