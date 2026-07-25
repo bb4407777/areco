@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 看板：会话卡片网格 + 新建会话 + 已归档折叠区 + 空状态引导
 // 桌面端在 SessionLayout 侧边栏已显示会话列表，本页仅在内容区显示欢迎/空状态
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NEmpty, useDialog, useMessage } from 'naive-ui'
 import type { SessionSummary } from '../../../shared/protocol'
@@ -30,8 +30,15 @@ let ticker: number | null = null
 // 手机看板会话分项目（与桌面侧栏共用 utils/sessionGroups 规则）；
 // rooms 未加载时静默拉一次（旧服务端 404 也无碍，分组退化为全零散）
 const grouping = computed(() => groupSessionsByRoom(roomsStore.rooms, store.boardSessions))
-/** 展开的项目分组 id 集（默认全部收起，与已归档同交互，2026-07-22 维护者定） */
+/** 展开的项目分组 id 集（默认全部展开，2026-07-25 改：以前全收起） */
 const expandedGroups = ref<Set<string>>(new Set())
+watchEffect(() => {
+  // grouping 就绪后自动填满展开集；用户手动折叠后 size>0，不再覆盖
+  const gids = grouping.value.groups.map(g => g.id)
+  if (gids.length > 0 && expandedGroups.value.size === 0) {
+    expandedGroups.value = new Set(gids)
+  }
+})
 
 function toggleGroup(id: string) {
   const next = new Set(expandedGroups.value)

@@ -28,6 +28,20 @@ export interface Template {
    * 设了它模板即视为 claude 系：spawn 注入 --session-id/--resume、对话视图与历史恢复按此 HOME 定位。
    * command basename 为 claude 的模板不用设（默认服务进程 HOME）。
    */
+  /**
+   * StandCode 分层配置：harness 层（如 openclaw / workbuddy / reasonix）。
+   * 设置后 command/args 可由 buildSpawnSpec 根据 harness 配置自动生成。
+   */
+  harness?: string
+  /**
+   * StandCode 分层配置：model 层（如 deepseek-v4-pro / glm-5.2）。
+   */
+  model?: string
+  /**
+   * StandCode 分层配置：preset 层（如 thinker / worker）。
+   * 决定 system prompt、thinking、timeout 等行为参数。
+   */
+  preset?: string
   claudeHome?: string
   /**
    * claude 布局的 transcript projects 根目录（如 /Users/gao/.qoder-cn/projects）：

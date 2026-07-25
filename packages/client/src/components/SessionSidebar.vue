@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, useDialog, useMessage } from 'naive-ui'
 import { useSessionsStore } from '../stores/sessions'
@@ -23,13 +23,6 @@ const emit = defineEmits<{ new: [] }>()
 
 const activeId = computed(() => route.params.id as string | undefined)
 const showArchived = ref(false)
-/** 展开的项目分组 id 集（默认全部收起，与已归档同交互：点组头才展开，2026-07-22 维护者定） */
-const expandedGroups = ref<Set<string>>(new Set())
-
-// 看板侧栏也要项目分组：rooms 由项目页以外入口打开时可能尚未加载，静默拉一次（旧服务端 404 也无碍）
-onMounted(() => {
-  if (!roomsStore.loaded) roomsStore.refresh().catch(() => {})
-})
 
 /**
  * 项目分组（规则集中在 utils/sessionGroups，与手机看板共用）：
@@ -38,6 +31,20 @@ onMounted(() => {
 const grouping = computed(() => groupSessionsByRoom(roomsStore.rooms, store.boardSessions))
 const projectGroups = computed(() => grouping.value.groups)
 const looseSessions = computed(() => grouping.value.loose)
+
+/** 展开的项目分组 id 集（默认全部展开，2026-07-25 改：以前全收起；点组头才折叠） */
+const expandedGroups = ref<Set<string>>(new Set())
+watchEffect(() => {
+  const gids = grouping.value.groups.map(g => g.id)
+  if (gids.length > 0 && expandedGroups.value.size === 0) {
+    expandedGroups.value = new Set(gids)
+  }
+})
+
+// 看板侧栏也要项目分组：rooms 由项目页以外入口打开时可能尚未加载，静默拉一次（旧服务端 404 也无碍）
+onMounted(() => {
+  if (!roomsStore.loaded) roomsStore.refresh().catch(() => {})
+})
 
 function toggleGroup(id: string) {
   const next = new Set(expandedGroups.value)

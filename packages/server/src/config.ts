@@ -102,6 +102,10 @@ function normalizeTemplate(raw: Partial<Template>, index: number): Template {
     ...(typeof raw.claudeHome === 'string' && raw.claudeHome.trim() ? { claudeHome: raw.claudeHome.trim() } : {}),
     // transcriptDir 同 claudeHome 口径：白名单拷贝必须带上，漏掉 = 重启剥字段 + 保存回写丢失
     ...(typeof raw.transcriptDir === 'string' && raw.transcriptDir.trim() ? { transcriptDir: raw.transcriptDir.trim() } : {}),
+    // StandCode 分层配置：harness/model/preset
+    ...(typeof raw.harness === 'string' && raw.harness.trim() ? { harness: raw.harness.trim() } : {}),
+    ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
+    ...(typeof raw.preset === 'string' && raw.preset.trim() ? { preset: raw.preset.trim() } : {}),
   }
 }
 

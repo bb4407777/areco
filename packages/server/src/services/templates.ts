@@ -7,6 +7,7 @@ import type { Template } from '../../../shared/protocol'
 import type { AppConfig } from '../config'
 import { saveConfig } from '../config'
 import { createLogger } from '../logger'
+import { resolveStandCode } from './standcode-resolver'
 
 const log = createLogger('templates')
 
@@ -111,21 +112,31 @@ export function buildSpawnSpec(
   template: Template,
   opts: { cwd?: string; claudeSessionId?: string | null; resume?: boolean; extraArgs?: string[] }
 ): SpawnSpec {
-  const args = [...template.args, ...(opts.extraArgs ?? [])]
+  // StandCode 分层配置解析：harness/model/preset 优先
+  const resolved = resolveStandCode(template)
+  const command = resolved?.command ?? template.command
+  const baseArgs = resolved?.args ?? template.args
+  const args = [...baseArgs, ...(opts.extraArgs ?? [])]
   // claude 系（含 c5 这类透传 "$@" 的包装器）注入会话 id；非 claude 系两个 flag 都不认，不注入
   if (effectiveClaudeHome(template) !== null && opts.claudeSessionId) {
     if (opts.resume) args.push('--resume', opts.claudeSessionId)
     else args.push('--session-id', opts.claudeSessionId)
   }
-  const cwd = opts.cwd || template.cwd || os.homedir()
-  if (!resolveCommand(template.command)) {
-    log.warn(`预检未找到命令 ${template.command}，仍尝试经登录 shell 启动`)
+  const cwd = opts.cwd || template.cwd || resolved?.cwd || os.homedir()
+  if (!resolveCommand(command)) {
+    log.warn(`预检未找到命令 ${command}，仍尝试经登录 shell 启动`)
+  }
+  const env = buildCleanEnv()
+  if (resolved?.env) {
+    for (const [k, v] of Object.entries(resolved.env)) {
+      if (v !== undefined) env[k] = v
+    }
   }
   return {
     file: '/bin/zsh',
-    args: ['-ilc', buildShellCommand(template.command, args)],
+    args: ['-ilc', buildShellCommand(command, args)],
     cwd: fs.existsSync(cwd) ? cwd : os.homedir(),
-    env: buildCleanEnv(),
+    env,
   }
 }
 
@@ -175,7 +186,7 @@ export class TemplateStore {
   create(input: Template): Template {
     if (!input.id || !/^[a-zA-Z0-9_-]+$/.test(input.id)) throw new Error('模板 id 只能含字母数字-_')
     if (this.get(input.id)) throw new Error(`模板 id 已存在: ${input.id}`)
-    if (!input.command) throw new Error('command 不能为空')
+    if (!input.command && !input.harness) throw new Error('command 不能为空（harness 模板可省略 command）')
     const template: Template = {
       id: input.id,
       name: input.name || input.id,
@@ -198,7 +209,7 @@ export class TemplateStore {
     if (patch.command !== undefined && !patch.command) throw new Error('command 不能为空')
     Object.assign(template, {
       name: patch.name ?? template.name,
-      command: patch.command ?? template.command,
+      command: (patch.command ?? template.command) || (template.harness ? '' : template.command),
       args: Array.isArray(patch.args) ? patch.args.map(String) : template.args,
       cwd: patch.cwd ?? template.cwd,
       color: patch.color ?? template.color,
