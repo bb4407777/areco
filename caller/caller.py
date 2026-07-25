@@ -117,6 +117,8 @@ DEFAULT_MAX_REDISPATCH = 0
 #   default_worker      → default_worker_id（Worker 角色 + 全局兜底 default_template_id）
 #   task_type_defaults  → task_map（任务类型 → 模板 id）
 # registry 文件缺失/解析失败时的紧急兜底见 _load_registry() 顶部局部常量。
+# 优先级（2026-07-25 起）：areco 设置页「StandCode 默认角色」
+# （GET /api/standcode/defaults，见 _apply_areco_defaults）> registry.json > 紧急兜底。
 
 # 来自 Caller 自身的身份标识
 CALLER_NAME = "Hermes"
@@ -156,6 +158,38 @@ PLAN_KEYWORDS = (
 DIRECT_KEYWORDS = (
     "总结", "摘要", "翻译", "转格式", "转成", "改成", "找一下", "查找",
     "下载", "生成这份", "套模板", "格式转换", "提取",
+)
+
+# ── 工作模式（docs/work-modes.md，2026-07-26 定版）────────────────────────
+# 模式是一等字段：显式传 --mode，落审计（log_audit 的 mode 列），可被直干率审计统计。
+#   operator — Caller 自持车道（白名单工具，不派发；由 `caller.py check` 记账）
+#   worker   — → Worker：单步、判据明确、交付物是「东西」
+#   think    — → Thinker：交付物是「判断」（结论/取舍/评估）；+plan_only 则只出结构化计划
+#   plan     — → Thinker → Worker 两段式：多步有依赖，且交付物是「东西」
+#   fanout   — → Worker × N 并行：N 个互不依赖的子任务
+MODES = ("operator", "worker", "think", "plan", "fanout")
+DISPATCH_MODES = ("worker", "think", "plan", "fanout")  # run 能派的（operator 不派发）
+
+# route_mode 的两个维度：
+#  交付物维度 · 要「判断」——产物是文本结论，不落盘、不改外部系统 → Thinker（模式 4）
+JUDGMENT_KEYWORDS = (
+    "选哪个", "怎么选", "选型", "该不该", "要不要", "是否", "值不值", "有没有必要",
+    "优缺点", "利弊", "取舍", "评估", "复盘", "为什么", "根因", "怎么看",
+    "建议", "看法", "判断", "风险", "可行性", "对比", "比较", "分析一下",
+)
+#  交付物维度 · 要「东西」——落盘或改动文件/外部系统 → 必须有 Worker
+#  刻意只收「明确要改动」的复合词：裸「写」「建」「存」太泛（「写点看法」是判断不是东西）。
+ARTIFACT_KEYWORDS = (
+    "落盘", "存到", "保存到", "生成文件", "写入", "写到", "下载", "导出",
+    "转成", "转格式", "套模板", "提取", "翻译成",
+    "改代码", "改文件", "改配置", "重构", "修复", "实现", "部署", "提交",
+    "跑一下", "执行", "安装", "建目录", "删掉", "清理",
+)
+#  明确「只要计划、别动手」→ think + plan_only（六段结构化计划，执行另议）
+#  刻意不收「分几步」——它在 PLAN_KEYWORDS 里表示「多步依赖」，含义是要做不是别做。
+PLAN_ONLY_KEYWORDS = (
+    "只要计划", "先出计划", "出个计划", "出份计划", "只规划", "不要执行",
+    "先规划", "别动手", "先别做", "只出方案不执行",
 )
 
 
@@ -629,6 +663,7 @@ class Caller:
         self.default_template_id: str = ""
         self.default_thinker_id: str = ""
         self.default_worker_id: str = ""
+        self.default_caller_id: str = ""  # areco 设置页的 caller 默认（仅记录，caller 角色由入口 agent 自任）
         self.template_names: dict[str, str] = {}
         self.roles: dict[str, str] = {}  # template_id → "thinker" | "worker"
         self._load_registry()
@@ -666,6 +701,7 @@ class Caller:
             self.default_worker_id = _FALLBACK_WORKER
             self.default_template_id = _FALLBACK_WORKER
             self.task_map = {}
+            self._apply_areco_defaults()  # registry 挂了仍吃 areco 设置页的角色默认
 
         if not self.registry_path.exists():
             _apply_fallback(f"注册表不存在 {self.registry_path}")
@@ -706,6 +742,52 @@ class Caller:
             self.default_worker_id,
             len(self.task_map),
         )
+        self._apply_areco_defaults()
+
+    def _apply_areco_defaults(self) -> None:
+        """areco 设置页的角色默认覆盖层（优先级：areco 设置 > registry.json > 紧急兜底）。
+
+        GET /api/standcode/defaults 返回 {caller, thinker, worker, fastWorker}（模板 id）。
+        非空字段覆盖对应默认（thinker→think/plan，worker→execute/work + 全局兜底，
+        fastWorker→fast）；areco 不可达或旧版无此端点 = 静默保持 registry 取值。
+        覆盖层是增强不是依赖——任何异常都不允许影响派发主流程。
+        """
+        try:
+            resp = self._http.get(f"{self.base_url}/api/standcode/defaults", timeout=2)
+            if resp.status_code != 200:
+                return
+            sc = resp.json().get("data")
+            if not isinstance(sc, dict):
+                return
+        except Exception:
+            return  # areco 未起 / 旧版无端点：静默回落 registry
+        applied = []
+        thinker = str(sc.get("thinker") or "").strip()
+        if thinker:
+            self.default_thinker_id = thinker
+            for tt in ("think", "plan"):
+                if tt in self.task_map:
+                    self.task_map[tt] = thinker
+            applied.append(f"thinker={thinker}")
+        worker = str(sc.get("worker") or "").strip()
+        if worker:
+            self.default_worker_id = worker
+            self.default_template_id = worker
+            for tt in ("execute", "work"):
+                if tt in self.task_map:
+                    self.task_map[tt] = worker
+            applied.append(f"worker={worker}")
+        fast = str(sc.get("fastWorker") or "").strip()
+        if fast:
+            if "fast" in self.task_map:
+                self.task_map["fast"] = fast
+            applied.append(f"fastWorker={fast}")
+        caller = str(sc.get("caller") or "").strip()
+        if caller:
+            self.default_caller_id = caller
+            applied.append(f"caller={caller}")
+        if applied:
+            logger.info("已应用 areco 角色默认覆盖：%s", "、".join(applied))
 
     # ── REST API 辅助 ───────────────────────────────────────────
 
@@ -1775,12 +1857,111 @@ class Caller:
     # ── 严格分工辅助：门控 / plan 解析 / 自动选路 ─────────────────
 
     @staticmethod
-    def should_plan(request: str) -> bool:
-        """门控：判断任务是否需要走两段式（Thinker→plan→Worker）。
+    def route_mode(request: str) -> dict:
+        """四格路由（docs/work-modes.md P1-1）：按「交付物 × 结构」两维选模式。
 
-        规划价值高的任务（多步/取舍/探索/工程预估）→ True，简单执行型 → False。
-        启发式：命中 PLAN_KEYWORDS 且未强命中 DIRECT_KEYWORDS → True。
-        Caller 可据此自动选 dispatch_worker vs plan_and_execute。
+        取代二元的 should_plan——后者只有 plan/worker 两个出口，导致「要判断不要东西」
+        的任务（选型/评估/复盘）必然被错配：命中 PLAN_KEYWORDS 就白烧一个 Worker 段去
+        「执行」一个只需结论的判断，没命中就用 thinking=minimal 的执行档模型干规划档的活。
+
+        两个维度：
+            交付物  要「判断」（结论/取舍，不落盘）  vs  要「东西」（落盘/改文件/改外部系统）
+            结构    多步有依赖（第一步错则后面全废）  vs  单步无依赖
+
+        四格：
+                            要东西              要判断
+            单步无依赖      worker              think
+            多步有依赖      plan                think + plan_only
+
+        判定顺序（先到先得）：
+            1. 命中 PLAN_ONLY_KEYWORDS（「只要计划」「别动手」）→ think + plan_only
+            2. 交付物 = 判断（命中 JUDGMENT 且未命中 ARTIFACT）→ think
+               （多步则 plan_only=True——多步判断的自然产物就是结构化计划）
+            3. 交付物 = 东西 且 多步有依赖 → plan（两段式）
+            4. 其余 → worker
+
+        刻意不返回 fanout / operator：
+            fanout 要求「N 个互不依赖的子任务」，关键词启发式判不出子任务边界——
+                   必须调用方显式 --mode fanout --sub … 声明拆法。
+            operator 判的是「命令」不是「任务」，归 check_should_dispatch。
+
+        返回:
+            {
+                "mode": "worker" | "think" | "plan",
+                "plan_only": bool,
+                "deliverable": "judgment" | "artifact",
+                "structure": "multi_step" | "single_step",
+                "reason": str,
+                "signals": {"judgment": [...], "artifact": [...],
+                            "plan": [...], "direct": [...], "plan_only": [...]},
+            }
+        """
+        text = request or ""
+
+        def _hits(kws) -> list[str]:
+            return [k for k in kws if k in text]
+
+        judgment = _hits(JUDGMENT_KEYWORDS)
+        artifact = _hits(ARTIFACT_KEYWORDS)
+        plan_kw = _hits(PLAN_KEYWORDS)
+        direct_kw = _hits(DIRECT_KEYWORDS)
+        plan_only_kw = _hits(PLAN_ONLY_KEYWORDS)
+        signals = {
+            "judgment": judgment, "artifact": artifact,
+            "plan": plan_kw, "direct": direct_kw, "plan_only": plan_only_kw,
+        }
+
+        # 结构维度：沿用 should_plan 的强否逻辑——只命中 DIRECT 不命中 PLAN 视为单步
+        multi_step = bool(plan_kw) and not (direct_kw and not plan_kw)
+        structure = "multi_step" if multi_step else "single_step"
+
+        # 1) 显式「只要计划」
+        if plan_only_kw:
+            return {
+                "mode": "think", "plan_only": True,
+                "deliverable": "judgment", "structure": structure,
+                "reason": f"显式要求只出计划不执行（命中 {plan_only_kw}）→ Thinker 出结构化计划，执行另议",
+                "signals": signals,
+            }
+
+        # 2) 交付物 = 判断（要结论，不要东西）
+        if judgment and not artifact:
+            return {
+                "mode": "think", "plan_only": multi_step,
+                "deliverable": "judgment", "structure": structure,
+                "reason": (
+                    f"交付物是判断（命中 {judgment}，无落盘信号）"
+                    + ("；多步有依赖，产物取结构化计划" if multi_step else "；单步，自由格式结论即可")
+                ),
+                "signals": signals,
+            }
+
+        # 3) 交付物 = 东西 且 多步有依赖 → 两段式
+        if multi_step:
+            return {
+                "mode": "plan", "plan_only": False,
+                "deliverable": "artifact", "structure": "multi_step",
+                "reason": f"交付物是东西且多步有依赖（命中 {plan_kw}）→ Thinker 出计划、Worker 执行",
+                "signals": signals,
+            }
+
+        # 4) 单步执行
+        return {
+            "mode": "worker", "plan_only": False,
+            "deliverable": "artifact", "structure": "single_step",
+            "reason": (
+                f"单步可完成、判据明确（命中 {direct_kw or artifact or '无信号，按保守默认'}）→ 直派 Worker"
+            ),
+            "signals": signals,
+        }
+
+    @staticmethod
+    def should_plan(request: str) -> bool:
+        """[保留兼容] 二元门控：任务是否走两段式（Thinker→plan→Worker）。
+
+        ⚠️ 已被 route_mode() 取代（四格路由，docs/work-modes.md P1-1）——新代码请用
+        route_mode。本方法行为**刻意保持原样不变**（docs/api.md 与既有调用方按此描述），
+        只作向后兼容：命中 PLAN_KEYWORDS 且未强命中 DIRECT_KEYWORDS → True。
         """
         text = request or ""
         direct_hit = any(k in text for k in DIRECT_KEYWORDS)
