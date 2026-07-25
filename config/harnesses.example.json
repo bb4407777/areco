@@ -3,9 +3,9 @@
   "comment": "Harness 层：运行框架，只定义怎么启动 agent，不绑定模型",
   "harnesses": {
     "openclaw": {
-      "command": "/Users/gao/Code/StandCode/scripts/qclaw-stand-wrapper.py",
+      "command": "~/Code/StandCode/scripts/qclaw-stand-wrapper.py",
       "args": [],
-      "cwd": "/Users/gao",
+      "cwd": "~",
       "description": "Python wrapper 调用 qclaw 脚本，正确处理 PTY 输入"
     },
     "reasonix": {
@@ -14,14 +14,14 @@
         "--yolo"
       ],
       "env": {},
-      "cwd": "/Users/gao",
+      "cwd": "~",
       "description": "Reasonix 多模型编码 agent"
     },
     "zcode": {
       "command": "/Applications/ZCode.app/Contents/MacOS/ZCode",
       "args": [],
       "env": {},
-      "cwd": "/Users/gao",
+      "cwd": "~",
       "description": "ZCode 编辑器内置 agent（CLI 待确认）"
     },
     "workbuddy": {
@@ -30,7 +30,7 @@
         "--dangerously-skip-permissions"
       ],
       "env": {},
-      "cwd": "/Users/gao",
+      "cwd": "~",
       "description": "WorkBuddy codebuddy CLI"
     }
   }

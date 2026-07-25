@@ -22,11 +22,11 @@ if [ -z "$MESSAGE" ]; then
   exit 1
 fi
 
-export HOME=/Users/gao
-export OPENCLAW_STATE_DIR=/Users/gao/.qclaw
-export OPENCLAW_CONFIG_PATH=/Users/gao/.qclaw/openclaw.json
+export HOME="${HOME:-$(cd ~ && pwd)}"
+export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.qclaw}"
+export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$HOME/.qclaw/openclaw.json}"
 
 NODE=/Applications/QClaw.app/Contents/Resources/node/node
-MJS="/Users/gao/Library/Application Support/QClaw/openclaw/node_modules/openclaw/openclaw.mjs"
+MJS="${OPENCLAW_MJS:-$HOME/Library/Application Support/QClaw/openclaw/node_modules/openclaw/openclaw.mjs}"
 
 exec "$NODE" "$MJS" agent --agent "$AGENT" --json --message "$MESSAGE" --timeout "$TIMEOUT" ${MODEL:+--model "$MODEL"}

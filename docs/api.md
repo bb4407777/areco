@@ -333,7 +333,7 @@ result = caller.relay_to_wechat(
 
 ```bash
 HOME=/Users/gao /Users/gao/scripts/cc-send.sh \
-  -s weixin:dm:o9cq802pfYrkgul79flJor4d7uQs@im.wechat -m "<内容>"
+  -s weixin:dm:<你的会话id>@im.wechat -m "<内容>"
 ```
 
 纯文字消息（`-m`）不经 `.ok` gate。微信消息格式：
@@ -568,7 +568,7 @@ Caller 发消息 → SQLite INSERT → 房间 relay 检测到新消息
 | `ARECO_BASE`     | `http://127.0.0.1:8790`             | areco 服务地址         |
 | `ARECO_ROOT`     | `/Users/gao/Code/areco`             | areco 数据目录         |
 | `CC_SEND_BIN`    | `/Users/gao/scripts/cc-send.sh`     | 微信代发脚本           |
-| `WECHAT_TARGET`  | `weixin:dm:o9cq802pfYrkgul79flJor4d7uQs@im.wechat` | 微信目标会话 |
+| `WECHAT_TARGET`  | `weixin:dm:<你的会话id>@im.wechat` | 微信目标会话 |
 | `STANDCODE_HOME` | `/Users/gao`                        | cc-send 的 HOME 前缀   |
 
 ---

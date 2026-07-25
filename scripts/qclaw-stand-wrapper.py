@@ -1,3 +1,4 @@
+import os
 #!/usr/bin/env python3
 """qclaw-stand-wrapper: areco 会话专用，从 stdin 读一行消息，调用 qclaw 脚本"""
 import json
@@ -26,7 +27,7 @@ for arg in args:
 # 调用 qclaw 脚本
 try:
     r = subprocess.run(
-        ["/Users/gao/skills/qclaw/qclaw", "--message", message, "--model", model, "--wait", "--timeout", str(timeout)],
+        [os.environ.get("QCLAW_BIN", str(Path.home() / "skills" / "qclaw" / "qclaw")), "--message", message, "--model", model, "--wait", "--timeout", str(timeout)],
         capture_output=True, text=True, timeout=timeout + 30
     )
 except subprocess.TimeoutExpired:

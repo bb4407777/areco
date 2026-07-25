@@ -19,7 +19,7 @@ if [ -z "$MESSAGE" ]; then
   exit 1
 fi
 
-RESULT=$(/Users/gao/skills/qclaw/qclaw --message "$MESSAGE" --model "$MODEL" --wait --timeout "$TIMEOUT" 2>/dev/null)
+RESULT=$("${QCLAW_BIN:-$HOME/skills/qclaw/qclaw}" --message "$MESSAGE" --model "$MODEL" --wait --timeout "$TIMEOUT" 2>/dev/null)
 
 REPLY=$(echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reply',''))" 2>/dev/null || echo "")
 

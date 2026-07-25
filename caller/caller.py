@@ -32,12 +32,16 @@ PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
 REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
 
 # ── 微信代发配置 ────────────────────────────────────────────────────
-CC_SEND_BIN = os.environ.get("CC_SEND_BIN", "/Users/gao/scripts/cc-send.sh")
-WECHAT_TARGET = os.environ.get(
-    "WECHAT_TARGET",
-    "weixin:dm:o9cq802pfYrkgul79flJor4d7uQs@im.wechat",
-)
-HOME_DIR = os.environ.get("STANDCODE_HOME", "/Users/gao")
+# 本机私有值不进仓：优先级 env > config/local.json（gitignore）> 空。
+# WECHAT_TARGET 为空时 relay_to_wechat 直接返回未配置错误，不影响 dispatch/poll/inbox 主链。
+_LOCAL_CONF_PATH = Path(__file__).resolve().parent.parent / "config" / "local.json"
+try:
+    _LOCAL_CONF = json.loads(_LOCAL_CONF_PATH.read_text()) if _LOCAL_CONF_PATH.exists() else {}
+except Exception:
+    _LOCAL_CONF = {}
+CC_SEND_BIN = os.environ.get("CC_SEND_BIN") or _LOCAL_CONF.get("cc_send_bin") or "cc-send"
+WECHAT_TARGET = os.environ.get("WECHAT_TARGET") or _LOCAL_CONF.get("wechat_target") or ""
+HOME_DIR = os.environ.get("STANDCODE_HOME") or _LOCAL_CONF.get("home_dir") or str(Path.home())
 
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
@@ -777,7 +781,7 @@ class Caller:
                         走真正的 git worktree，否则只 mkdir 空目录。
                         ⚠️ 当前仅「准备目录 + 回填 workspace_cwd 到结果」，并不真正
                         把 Stand 的 cwd 改过去——areco addMember 只收 {templateId}
-                        （rooms.ts:113），cwd 来自模板（固定 /Users/gao），Caller 无权
+                        （rooms.ts:113），cwd 来自模板（固定模板 cwd），Caller 无权
                         覆盖。需 areco 支持 per-session cwd 后才能落地（见 prepare_workspace）。
                         默认 False，行为与改动前完全一致。
             workspace_repo: isolated=True 时基于哪个 git 仓库建 worktree；None=只建空目录。
@@ -1144,7 +1148,7 @@ class Caller:
         - source_repo 省略：只 mkdir 空目录（不是 git worktree，无隔离实效，仅占位）。
 
         返回 {path, kind, applied}。applied 恒为 False：Caller 无权把 Stand 的 cwd 切到
-        此目录（areco addMember 只收 templateId，cwd 来自模板固定 /Users/gao）。真正落地
+        此目录（areco addMember 只收 templateId，cwd 来自模板固定值）。真正落地
         需 areco 支持 per-session cwd（见 docs/architecture-optimization.md 技术依赖）。
         所以这里只「准备目录 + 回填路径」，不改 Stand 行为。
         """
@@ -1313,6 +1317,18 @@ class Caller:
                 "content": content,
                 "stdout": "",
                 "returncode": 0,
+            }
+
+        # 未配置微信目标（env WECHAT_TARGET / config/local.json 均缺）：明确报错不盲发
+        if not WECHAT_TARGET:
+            logger.warning("WECHAT_TARGET 未配置，跳过微信代发（设 env 或 config/local.json）")
+            return {
+                "ok": False,
+                "dry_run": False,
+                "content": content,
+                "stdout": "",
+                "returncode": -1,
+                "error": "WECHAT_TARGET 未配置（env WECHAT_TARGET 或 config/local.json 的 wechat_target）",
             }
 
         # cc-send.sh 依赖 ${HOME}/.npm-global/bin（worker 独立进程可能 PATH 不全）

@@ -1,0 +1,29 @@
+{
+  "name": "standcode",
+  "version": "0.1.0",
+  "description": "Caller/Thinker/Worker agent orchestration on top of areco — dispatch tasks to CLI agent Stands, results land in a pull-based inbox (zero polling)",
+  "license": "Apache-2.0",
+  "author": "bb4407777",
+  "repository": "github:bb4407777/standcode",
+  "keywords": ["agent", "orchestration", "multi-agent", "areco", "cli", "dispatcher"],
+  "bin": { "standcode": "bin/standcode.js" },
+  "files": [
+    "bin/",
+    "caller/caller.py",
+    "config/harnesses.example.json",
+    "config/models.json",
+    "config/presets.json",
+    "config/stands.json",
+    "stand/",
+    "scripts/openclaw-stand-wrapper.sh",
+    "scripts/qclaw-stand-wrapper.py",
+    "scripts/qclaw-stand-wrapper.sh",
+    "scripts/sync-areco-templates.py",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "python3 -m py_compile caller/caller.py && python3 caller/caller.py --help"
+  }
+}

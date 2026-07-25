@@ -1,80 +1,88 @@
 # StandCode
 
-微信通道为入口的多 agent 调度框架：
+> 替身使者不亲自战斗——它召唤替身。
+> Caller / Thinker / Worker 三层 agent 编排框架，跑在 [areco](https://github.com/bb4407777/areco) 会话底座之上。
 
-- **Client**：用户前端（当前是微信对话）
-- **Caller**：Hermes 中间层，接收 Client 请求、决策、分发给 Stand
-- **Stand**：子 agent，执行具体任务
+**StandCode 解决一个问题**：让一个常驻入口 agent（Caller，例如接微信的 Hermes）把活派给各种 CLI agent（Claude Code / Kimi / DeepSeek / 任意 TUI harness），任务全程在 areco 看板可见，做完结果落收信箱——不轮询、不推送、零多余 token。
 
-## 当前阶段
+## 三层角色
 
-以 areco 作为 Stand 运行底座，房间(room) + 模板工人(template worker) = 临时 Stand。
-Caller 封装 areco API，提供统一调度接口。
+| 角色 | 干什么 | 默认 |
+|---|---|---|
+| **Caller** | 纯指挥：识别请求 → 派发 → 收结果回执。不亲自干活 | 你的入口 agent（如微信 Hermes） |
+| **Thinker** | 只规划：把复杂任务拆成结构化计划（目标/步骤/判据） | `stand/registry.json` 的 default_thinker |
+| **Worker** | 只执行：按计划或直接指令干活 | `stand/registry.json` 的 default_worker |
 
-## 目录
+三层不互调、不串层。执行者（Stand）永远是 areco 会话——看板可见、可接管、可回放。
+
+## 配置分层（只有一套执行配置）
 
 ```
-StandCode/
-  caller/    # Hermes Caller 核心
-  stand/     # Stand 模板与注册表
-  client/    # 微信/其他 Client 适配
-  docs/      # 架构与协议文档
+角色层   Caller / Thinker / Worker
+  = 「该角色默认用哪个 areco 模板」的映射（stand/registry.json），不是配置体系
+      ↓ 选择
+模板层   areco Template（执行配置唯一落点）
+  可带 harness / model / preset 三个可选字段 = 模板的深度自定义
+  spawn 时 areco standcode-resolver 现场解析成 command/args/env
+      ↓ 引用
+配件字典  config/：harnesses.json（壳）models.json（模型）
+  presets.json（预设）stands.json（组合）
+  scripts/sync-areco-templates.py 把组合同步成 areco 模板
 ```
 
-## 第一里程碑
+## 派发与回收：收信箱拉模式
 
-- [ ] Caller 能够接收一条自然语言请求
-- [ ] 根据请求类型选择合适 Stand（模板）
-- [ ] 在 areco 中创建/复用 room，派发任务
-- [ ] 收集 Stand 结果并返回给 Client
-- [ ] 结果模板化：一句话结论 + 文件路径 + 核心要点 3-5 条
-
-## 流程固化：Caller 派发纪律（2026-07-25）
-
-> 背景：Hermes（Caller）在微信平台只有 `terminal` 一个工具——它既是**合法派发通道**（`areco-msg` / `caller.py`），也是**非法直干通道**（`git` / `grep` / `curl` / `python3`）。工具本身不做区分，全凭 Caller 自觉选路，导致频繁跳过派发自己干活（2026-07-25 session `20260725_151549_e91ec1c3` 录得 4 起跳过实例，用户 42 分钟内纠正 6 次）。
-> 完整根因分析、技术方案与错误案例见 `docs/workflow-hardening.md`。
-
-### 根因（四条）
-
-1. **工具对称性陷阱**：`terminal` 既能派发也能直干，LLM 全凭自觉。
-2. **缺硬闸机制**：无 pre-tool hook / 命令白名单；SKILL.md 规则是软约束。
-3. **惯性 + 局部最优**：派发要 3-5 步，直干 `cat`/`grep` 一步到位，模型本能先干。
-4. **缺执行前 checklist**：旧规则是行为描述，不是「动手前先问该不该派」的决策树。
-
-### 三道防线（已落地）
-
-**1. SKILL.md 规则层**（`/Users/gao/skills/StandCode/SKILL.md`）
-- **禁止直干清单**：`git / grep / curl / python3 / sed / vim / open` 等必须先 `dispatch_worker`。
-- **允许直干清单**：仅 `areco-msg / caller.py / pgrep / cc-send / echo '收到' / launchctl list` 可直干。
-- **派发铁律决策树**（自拦截口诀）：每次 terminal 前先过白/黑/灰三分类。
-- **Terminal 前置声明**：每次调 terminal 在 reasoning 中声明「派发检查：此命令 [X]，属于白名单 / 禁止直干 → 改为 dispatch_worker」。
-
-**2. caller.py Gatekeeper 层**（`check_should_dispatch`）
 ```bash
-# 动手前先核查：返回 {should_dispatch, category, reason, suggested_action}
-python3 caller/caller.py check "<任务或命令>"
-# 或编程式
-python3 -c "from caller import check_should_dispatch; print(check_should_dispatch('git commit'))"
-```
-判定顺序：高危动作（git commit/rm -rf/bootout，即便跟在白名单后）→ 以白名单工具调用开头（放行）→ 生产类信号（必须派发）→ 灰区（保守派发）。Advisory 软约束，目的是让 Caller「过一遍脑子」。
+# 标准派发（等待者模式）：阻塞到 Stand 完成，结果写 data/inbox/ + stdout 全文
+python3 caller/caller.py run --wait "调研 X 并输出报告" --role worker --summary "X调研"
 
-**3. Caller 流水线**（不可跳步）
-```
-Client 请求
-  → 立刻秒回「收到，安排 <角色> <动作>」(cc-send)
-  → check_should_dispatch(任务) 核查
-  → should_plan? 两段式(Thinker→Worker) : 直派 Worker
-  → 主动轮询 / inbox 回调（>5min 主动 caller.py status）
-  → 按模板汇总回执（一句话结论 + 文件路径 + 3-5 要点）
+# 两段式：Thinker 出计划 → Worker 执行
+python3 caller/caller.py run --wait "设计一个方案" --plan
+
+# 查任务 / 列任务
+python3 caller/caller.py status <task_id>
+python3 caller/caller.py list
 ```
 
-### 铁律
+- 任务完成只落 `data/inbox/{task_id}.json`，**不推送**；Caller 下次醒来 `ls data/inbox/` 拉取，汇报完 `mv` 加 `.done`。
+- 长任务可选：支持后台进程追踪的宿主（如 Hermes gateway terminal 工具 `background=true + notify_on_complete=true`）跑 `--wait`，进程退出原生唤醒一次——事件、非轮询。
+- 禁 shell 级 `&`/`nohup`/`setsid` 脱管（宿主追踪不到 = 唤不醒），`--bg` 已弃用。
 
-Hermes 是**路由器，不是执行器**。「这个我能做」≠「我应该做」——能交给 Worker 的一律派出去。
+## 快速开始
 
-### 后续（待落地）
+```bash
+# 1. 前置：areco 跑在 127.0.0.1:8790，python3 ≥ 3.10
+# 2. 配件字典（示例 → 本机）
+cp config/harnesses.example.json config/harnesses.json   # 改成你的 harness 路径
+# 3. 本机私有配置（可选，微信代发用；不进仓）
+cat > config/local.json <<'EOF'
+{ "cc_send_bin": "<你的发信脚本>", "wechat_target": "weixin:dm:<你的会话id>@im.wechat" }
+EOF
+# 4. 同步模板进 areco
+python3 scripts/sync-areco-templates.py
+# 5. 派第一个任务
+python3 caller/caller.py run --wait "回复两个字：成功"
+```
 
-- **方案 A** `terminal-guard.sh` 命令拦截器：待 Hermes 支持 `command_prefix` / `tool_hooks` 后部署。
-- **方案 D** 每日直干率审计 cron（`audit-direct-work.py`）：直干率 > 20% 微信告警。
+## 环境变量
 
-参考：`docs/workflow-hardening.md`（根因 + 4 技术方案 + 5 硬化措施 + 4 错误案例）。
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ARECO_BASE` | `http://127.0.0.1:8790` | areco 服务地址 |
+| `ARECO_ROOT` | `~/Code/areco` | areco 仓根（直写 projects.db 用） |
+| `CC_SEND_BIN` | `cc-send`（或 config/local.json） | 微信代发脚本 |
+| `WECHAT_TARGET` | 空（或 config/local.json） | 微信目标会话；空 = 跳过代发 |
+| `STANDCODE_TASKS_DIR` | `~/.standcode/tasks` | 任务状态目录 |
+
+## 与 areco 的关系
+
+姊妹项目：areco 是通用会话底座（PTY 会话/房间/消息/看板/模板），StandCode 是其上的编排语义层。集成面：
+
+- **REST**：建房、加 Stand（`/api/rooms`）；任务面板（`/api/tasks`）
+- **projects.db**：房间消息直写（带 `human_relay` 转述闸）
+- **模板同步**：`sync-areco-templates.py` → areco `stand-*` 模板；spawn 时 areco 侧 `standcode-resolver` 读本仓 `config/` 字典
+- **看板**：Stand 即 areco 会话，活动任务自动置顶
+
+## License
+
+Apache-2.0

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """将 StandCode stands 同步为 concrete areco 模板。"""
 import json
+from pathlib import Path
 import os
 
-STANDCODE_DIR = "/Users/gao/Code/StandCode/config"
-ARECO_CONFIG = "/Users/gao/Code/areco/config.json"
+STANDCODE_DIR = str(Path(__file__).resolve().parent.parent / "config")
+ARECO_CONFIG = os.environ.get("ARECO_ROOT", str(Path.home() / "Code" / "areco")) + "/config.json"
 
 
 def load_config(name):
@@ -47,7 +48,7 @@ def resolve_stand(stand_id, stand):
     return {
         "command": command,
         "args": args,
-        "cwd": harness.get("cwd", stand.get("cwd", "/Users/gao")),
+        "cwd": harness.get("cwd", stand.get("cwd", str(Path.home()))),
     }
 
 
