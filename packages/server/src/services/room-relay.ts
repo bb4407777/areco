@@ -20,7 +20,6 @@ import { shellQuote } from './templates'
 import { agentKindOf, readAgentTranscript } from './agent-transcript'
 import { transcriptPath } from './transcript'
 import { readHistoryAllMessages } from './history'
-import { ensureWorktree, slugify, wipCommit, worktreeDirFor } from './worktree'
 
 const log = createLogger('room-relay')
 
@@ -47,9 +46,6 @@ const CAPTURE_TEXT_MAX = 2000 // 自动回执正文截断
 /** serial 串行轮转：当前放行成员的回复超时（超过即置 timeout 自动放下一位）。
  *  走 RoomRelay 构造函数可选参数覆盖，测试传小值。 */
 const DELIVERY_TIMEOUT_MS = 10 * 60_000
-
-/** claim 认领制：报认领窗口（超时无人认领收单）。构造参数可注入，测试传小值。 */
-const CLAIM_DEADLINE_MS = 5 * 60_000
 
 // ---- auto-recall 记忆注入（2026-07-22 项目房间定稿）：投递 note 时自动跑统一记忆库 recall ----
 // 人→agent 一律注入；agent→agent 仅正文命中委派格式特征才注入；dispatch 指令（from='areco-调度'）算委派。
@@ -120,8 +116,6 @@ function buildContextPreview(team: string, currentId?: number): { path: string; 
 export interface RoomRelayOpts {
   /** serial 当前放行成员的回复超时毫秒数（默认 DELIVERY_TIMEOUT_MS=10 分钟；测试传小值） */
   deliveryTimeoutMs?: number
-  /** claim 报认领窗口毫秒数（默认 CLAIM_DEADLINE_MS=5 分钟；测试传小值） */
-  claimDeadlineMs?: number
   /** 允许「转述维护者原话」的 agent 白名单（如微信通道 Hermes）。名单内 agent 带
    *  human_relay 标记的消息按人类语义处理：清零链深 + 无 @ 默认投全体；名单外打标无效。
    *  默认空 = 功能关闭。署名不变（仍是 agent 自己），防环闸与身份闸都不破。 */
@@ -144,7 +138,6 @@ export class RoomRelay {
   >()
   private timer: NodeJS.Timeout | null = null
   private readonly deliveryTimeoutMs: number
-  private readonly claimDeadlineMs: number
   private readonly humanRelayAgents: string[]
 
   constructor(
@@ -154,7 +147,6 @@ export class RoomRelay {
     opts: RoomRelayOpts = {}
   ) {
     this.deliveryTimeoutMs = opts.deliveryTimeoutMs ?? DELIVERY_TIMEOUT_MS
-    this.claimDeadlineMs = opts.claimDeadlineMs ?? CLAIM_DEADLINE_MS
     this.humanRelayAgents = opts.humanRelayAgents ?? []
   }
 
@@ -175,16 +167,13 @@ export class RoomRelay {
     this.timer = null
   }
 
-  /** 会话被删除：联动移除所有项目里指向它的 member（避免悬空 member 发消息静默失效），
-   *  并对其作为 implementer 的工作区做兜底提交（WIP 不丢） */
+  /** 会话被删除：联动移除所有项目里指向它的 member（避免悬空 member 发消息静默失效） */
   private onSessionRemoved(sessionId: string) {
     let changed = false
-    const victims: { room: RoomInfo; member: RoomMember }[] = []
     for (const room of this.rooms.list()) {
       if (room.archivedAt !== null) continue // 归档项目保留成员快照，不随会话删除而改写
       const victim = room.members.find((m) => m.kind === 'session' && m.sessionId === sessionId)
       if (!victim) continue
-      victims.push({ room, member: victim })
       try {
         this.rooms.removeMember(room.id, victim.name)
         log.info(`会话 ${sessionId.slice(0, 8)} 被删，联动移除项目「${room.name}」成员 ${victim.name}`)
@@ -193,32 +182,7 @@ export class RoomRelay {
         log.warn(`联动移除成员失败 项目「${room.name}」`, err)
       }
     }
-    for (const { room, member } of victims) this.wipCommitOnExit(room, member.name)
     if (changed) this.broadcastRooms()
-  }
-
-  /**
-   * 会话退出兜底提交（认领制阶段三）：查该成员作为 implementer 的 active dispatch，
-   * 其 areco 自建工作区（以 dispatch.worktree_path 为准，绝不碰用户主检出）有未提交改动则
-   * add -A + commit。失败只记日志——会话删除流程不能被 git 问题炸断。
-   */
-  private wipCommitOnExit(room: RoomInfo, memberName: string): void {
-    let dispatches: projectDb.DispatchRow[]
-    try {
-      dispatches = projectDb.activeDispatchesOfImplementer(memberName)
-    } catch (err) {
-      log.warn(`兜底提交查询失败 ${memberName}`, err)
-      return
-    }
-    for (const d of dispatches) {
-      if (!d.worktreePath) continue
-      try {
-        const committed = wipCommit(d.worktreePath, `wip: 会话退出兜底提交 (dispatch #${d.id})`)
-        if (committed) log.info(`项目「${room.name}」成员 ${memberName} 退出，工作区 ${d.worktreePath} 已兜底提交（dispatch #${d.id}）`)
-      } catch (err) {
-        log.warn(`兜底提交失败 ${d.worktreePath}（dispatch #${d.id}）`, err)
-      }
-    }
   }
 
   /** 房间列表注入最近消息时间（副本，不污染 rooms.json 落盘对象） */
@@ -324,12 +288,10 @@ export class RoomRelay {
   }
 
   /** 消息落库后的统一后处理（tick 轮询 / postMessage / captureTick 三路径共用）：
-   *  1) mention 投递（parallel=现状全员即注；serial=只放行当前轮到的成员；claim=全员发「先报认领」）；
-   *  2) claim 认领：本条 from 报 [claim] → 原子批准唯一 Implementer（与 serial 轮转互斥，见 handleClaim）；
-   *  3) 串行推进：本条 from 命中 active serial dispatch 的 current_target → 当前 delivery 落定、放下一位。 */
+   *  1) mention 投递（parallel=现状全员即注；serial=只放行当前轮到的成员）；
+   *  2) 串行推进：本条 from 命中 active serial dispatch 的 current_target → 当前 delivery 落定、放下一位。 */
   private onMessageStored(room: RoomInfo, m: { id: number; from: string; body: string; to?: string; humanRelay?: boolean }) {
     this.deliverMentions(room, m.from, m.body, m.id, m.humanRelay ?? false, m.to)
-    this.handleClaim(room, m)
     this.advanceSerial(room, m.from)
   }
 
@@ -416,14 +378,6 @@ export class RoomRelay {
     if (dispatch && room.dispatchMode === 'serial') {
       const busy = deliveries.some((d) => d.status === 'injected' || d.status === 'working')
       if (!busy) this.serialAdvanceNext(room, dispatch.id)
-      this.broadcastDispatches(room)
-      return
-    }
-
-    // claim 认领制：全员收到第一阶段「先报认领、禁止改码」，等 [claim] 回复后原子批准唯一 Implementer。
-    // 与 serial 互斥：claim 单不进 activeSerialDispatches（mode 过滤），serial 的轮转/超时都不碰它。
-    if (dispatch && room.dispatchMode === 'claim') {
-      this.deliverClaimPhaseOne(room, dispatch, deliveries)
       this.broadcastDispatches(room)
       return
     }
@@ -625,174 +579,6 @@ export class RoomRelay {
     this.broadcastDispatches(room)
   }
 
-  // ---- claim 认领制（与 serial 轮转互斥：claim 单 mode='claim'，serial 的查询/推进/超时都只看 mode='serial'）----
-
-  /**
-   * claim 第一阶段：给每个目标成员注入「先报认领、禁止改码」note。
-   * 幂等：phase 只在首次置 claiming + 认领截止；delivery 仍 queued 的才注入（重入不重复打扰）。
-   */
-  private deliverClaimPhaseOne(room: RoomInfo, dispatch: projectDb.DispatchRow, deliveries: projectDb.DeliveryRow[]): void {
-    try {
-      if (!dispatch.phase) {
-        projectDb.setDispatchState(dispatch.id, {
-          phase: 'claiming',
-          claimDeadline: new Date(Date.now() + this.claimDeadlineMs).toISOString(),
-        })
-      }
-      const root = projectDb.messageById(dispatch.rootMessageId)
-      if (!root) return
-      const flat = root.body.replace(/\s*\r?\n\s*/g, '；')
-      const senderKind = root.from === this.rooms.humanName ? 'human' : 'session'
-      for (const del of deliveries) {
-        if (del.status !== 'queued') continue
-        const member = room.members.find((m) => m.kind === 'session' && m.name === del.memberName)
-        const nonce = member
-          ? this.injectToMember(
-              room,
-              member,
-              root.from,
-              flat,
-              senderKind,
-              root.id,
-              '认领制任务·第一阶段：先报认领——回复以 [claim] 开头说明认领范围；未获批准前禁止改任何代码'
-            )
-          : null
-        this.tryUpdateDelivery(
-          del.id,
-          nonce
-            ? { status: 'injected', attempt: del.attempt + 1, correlationId: nonce }
-            : { status: 'failed', attempt: del.attempt + 1 }
-        )
-      }
-    } catch (err) {
-      log.warn(`claim 第一阶段投递失败 项目「${room.name}」 dispatch #${dispatch.id}`, err)
-    }
-  }
-
-  /**
-   * 认领处理：成员消息 body 以 [claim] 开头（大小写不敏感）且房内有 claiming 中的 active dispatch
-   * → 认最早那单（先建的任务先被认领，语义最直白），原子 UPDATE 按 affected rows 判输赢，先到先得。
-   * 赢家放行第二阶段；迟到者只收轻量 note，不在房间自动发消息（防环）。重复 [claim] 天然幂等：
-   * 赢家再发 [claim] 时 implementer 已非 NULL，tryClaimDispatch 返回失败 → 走迟到分支再收一条 reviewer note。
-   */
-  private handleClaim(room: RoomInfo, m: { id: number; from: string; body: string }): void {
-    if (room.archivedAt !== null) return
-    if (!/^\s*\[claim\]/i.test(m.body)) return
-    if (m.from === this.rooms.humanName) return
-    const member = room.members.find((x) => x.kind === 'session' && x.name === m.from)
-    if (!member) return
-    let claiming: projectDb.DispatchRow[]
-    try {
-      claiming = projectDb.activeClaimingDispatches(room.team)
-    } catch (err) {
-      log.warn(`认领查询失败 项目「${room.name}」`, err)
-      return
-    }
-    // 只认在该单 deliveries 里的成员（显式 @ 指派时，没被投到的人不能抢单）
-    const target = claiming.find((d) => projectDb.deliveriesOf(d.id).some((del) => del.memberName === m.from))
-    if (!target) {
-      // 迟到认领：claiming 单已没有，但房内有已被别人认领的实施中单 → 只给迟到者补一条 reviewer note
-      // （赢家自己重复发 [claim] 不算迟到，直接忽略，避免重放第二阶段 note）
-      try {
-        const held = projectDb
-          .listDispatches(room.team, 10)
-          .find(
-            (d) =>
-              d.mode === 'claim' &&
-              d.state === 'active' &&
-              d.phase === 'implementing' &&
-              d.implementer !== m.from &&
-              d.deliveries.some((del) => del.memberName === m.from)
-          )
-        if (held) this.claimLate(room, held, member)
-      } catch (err) {
-        log.warn(`迟到认领检查失败 项目「${room.name}」`, err)
-      }
-      return
-    }
-    let won = false
-    try {
-      won = projectDb.tryClaimDispatch(target.id, m.from)
-    } catch (err) {
-      log.warn(`原子认领失败 项目「${room.name}」 dispatch #${target.id}`, err)
-      return
-    }
-    if (won) this.claimWon(room, target, member)
-    else this.claimLate(room, target, member)
-    this.broadcastDispatches(room)
-  }
-
-  /** 认领赢家：delivery 置 working，绑了 repo 则幂等开工作区，注入第二阶段「可动手」note；输家降 reviewer */
-  private claimWon(room: RoomInfo, dispatch: projectDb.DispatchRow, winner: RoomMember): void {
-    const deliveries = projectDb.deliveriesOf(dispatch.id)
-    const winDel = deliveries.find((d) => d.memberName === winner.name)
-    if (winDel) this.tryUpdateDelivery(winDel.id, { status: 'working' })
-    log.info(`项目「${room.name}」成员 ${winner.name} 认领成功（dispatch #${dispatch.id}）`)
-
-    // 第二阶段 note：可动手 + 绑 repo 时自动开工作区（失败不阻断放行，note 里如实说明）
-    let directive = '认领制任务·第二阶段：已批准你为 Implementer，可动手实施。'
-    if (room.repoPath) {
-      try {
-        const root = projectDb.messageById(dispatch.rootMessageId)
-        // 工作区/分支命名：slug 取根消息摘要净化（中文净化后为空则兜底 d<dispatchId>）；
-        // 分支前缀 areco/，成员名净化为空兜底 m<deliveryId>
-        let slug = slugify(clipBody(root?.body ?? '', 60), `d${dispatch.id}`)
-        let dir = worktreeDirFor(room.repoPath, slug)
-        let branch = `areco/${slugify(winner.name, `m${winDel?.id ?? 0}`)}-${slug}`
-        // 撞车兜底：目录已存在且不是本单上次建的（别的 dispatch 摘要前缀恰好相同，或本单上次
-        // 建了一半没来得及记档）→ slug 追加单号区分；本单已成功建过的重入则 dispatch.branch 相等直接复用
-        if (fs.existsSync(dir) && dispatch.branch !== branch) {
-          slug = `${slug}-d${dispatch.id}`
-          dir = worktreeDirFor(room.repoPath, slug)
-          branch = `areco/${slugify(winner.name, `m${winDel?.id ?? 0}`)}-${slug}`
-        }
-        ensureWorktree(room.repoPath, dir, branch) // 幂等：同 dispatch 重复触发复用既有目录/分支
-        projectDb.setDispatchState(dispatch.id, { worktreePath: dir, branch })
-        directive +=
-          `工作区：${dir}（分支 ${branch}）。纪律：① 只在自己工作区里改，不碰主检出；` +
-          `② WIP 随手 commit 进自己分支；③ 不执行合并，等${this.rooms.humanName}统一收口。`
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err)
-        log.warn(`项目「${room.name}」工作区创建失败（dispatch #${dispatch.id}）`, err)
-        directive += `（⚠️工作区创建失败：${reason}。仍已批准你为 Implementer，请先回报${this.rooms.humanName}再动手。）`
-      }
-    }
-    this.injectToMember(room, winner, 'areco-调度', directive, 'session', dispatch.rootMessageId)
-
-    // 输家：delivery 落定 done，轻量 note 降为 reviewer（不在房间发消息，防环）
-    for (const del of deliveries) {
-      if (del.memberName === winner.name) continue
-      if (del.status !== 'queued' && del.status !== 'injected') continue
-      this.tryUpdateDelivery(del.id, { status: 'done' })
-      const loser = room.members.find((m) => m.kind === 'session' && m.name === del.memberName)
-      if (loser) {
-        this.injectToMember(
-          room,
-          loser,
-          'areco-调度',
-          `${winner.name} 已认领该任务（dispatch #${dispatch.id}），你转为 reviewer：不要改码，等评审。`,
-          'session',
-          dispatch.rootMessageId
-        )
-      }
-    }
-  }
-
-  /** 迟到认领（已有人赢）：不改任何状态，只给迟到者注入 reviewer note（同样不在房间发消息） */
-  private claimLate(room: RoomInfo, dispatch: projectDb.DispatchRow, member: RoomMember): void {
-    const current = projectDb.dispatchById(dispatch.id)
-    const holder = current?.implementer ?? '他人'
-    log.info(`项目「${room.name}」成员 ${member.name} 认领迟到，${holder} 已持有（dispatch #${dispatch.id}）`)
-    this.injectToMember(
-      room,
-      member,
-      'areco-调度',
-      `认领已被 ${holder} 获得（dispatch #${dispatch.id}），你转为 reviewer：不要改码，等评审。`,
-      'session',
-      dispatch.rootMessageId
-    )
-  }
-
   /** serial 超时扫描（tick 每 2s 顺带做）：当前放行位超 deadline 未回复 → 置 timeout，放下一位 */
   private sweepTimeouts(room: RoomInfo): void {    if (room.archivedAt !== null) return
     let actives: projectDb.DispatchRow[]
@@ -819,26 +605,6 @@ export class RoomRelay {
       }
       this.serialAdvanceNext(room, d.id)
       changed = true
-    }
-    // claim 认领超时：claiming 超 claim_deadline 无人认领 → 收单 done，原因留痕，不自动重投
-    let claimings: projectDb.DispatchRow[] = []
-    try {
-      claimings = projectDb.activeClaimingDispatches(room.team)
-    } catch (err) {
-      log.warn(`认领超时扫描失败 项目「${room.name}」`, err)
-    }
-    for (const d of claimings) {
-      if (!d.claimDeadline || Date.parse(d.claimDeadline) > now) continue
-      try {
-        projectDb.setDispatchState(d.id, { state: 'done', phase: 'done', cancelReason: '无人认领超时' })
-        for (const del of projectDb.deliveriesOf(d.id)) {
-          if (del.status === 'queued' || del.status === 'injected') projectDb.updateDelivery(del.id, { status: 'done' })
-        }
-        log.info(`项目「${room.name}」dispatch #${d.id} 认领超时，收单`)
-        changed = true
-      } catch (err) {
-        log.warn(`认领超时收单失败 项目「${room.name}」 dispatch #${d.id}`, err)
-      }
     }
     if (changed) this.broadcastDispatches(room)
   }

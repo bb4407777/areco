@@ -8,8 +8,6 @@ import type { TemplateStore } from '../services/templates'
 import type { RoomStore } from '../services/rooms'
 import type { RoomRelay } from '../services/room-relay'
 import * as projectDb from '../services/project-db'
-import { mergeCheck as wtMergeCheck } from '../services/worktree'
-import { effectiveClaudeHome } from '../services/templates'
 import { MSG_CLI_PATH } from '../config'
 import type { ProjectFileService } from '../services/project-files'
 
@@ -59,7 +57,7 @@ export class RoomControllers {
       const room = this.rooms.get(ctx.params.id)
       // 级联删除房内会话（维护者 2026-07-22）：主边界 = roomId 强归属（项目内 spawn 的专属会话随项目走）。
       // legacy 兜底 = 无归属字段的旧成员会话、且未挂在其它项目 members（多房共享的保留，免误删）。
-      // 解冲突会话（resolveConflict spawn、不进 members 也不绑 roomId）与已移出项目的会话不在边界内，属可接受残留。
+      // 已移出项目的会话不在边界内，属可接受残留。
       const elsewhere = new Set(
         this.rooms
           .list()
@@ -188,20 +186,11 @@ export class RoomControllers {
       ok(ctx, projectDb.listDispatches(room.team))
     })
 
-  /** 切调度模式：{mode: 'parallel'|'serial'|'claim'}——parallel=全员即注；serial=串行轮转；claim=认领制先到先得 */
+  /** 切调度模式：{mode: 'parallel'|'serial'}——parallel=全员即注；serial=串行轮转 */
   setMode = (ctx: Context) =>
     guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { mode?: 'parallel' | 'serial' | 'claim' }
-      const room = this.rooms.setDispatchMode(ctx.params.id, body.mode as 'parallel' | 'serial' | 'claim')
-      this.relay.broadcastRooms()
-      ok(ctx, room)
-    })
-
-  /** 绑定/解绑 git 仓库：{repoPath: string|null}——claim 赢家获批时自动开工作区；绑定时校验真是 git 仓 */
-  setRepo = (ctx: Context) =>
-    guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { repoPath?: string | null }
-      const room = this.rooms.setRepoPath(ctx.params.id, body.repoPath ?? null)
+      const body = (ctx.request.body ?? {}) as { mode?: 'parallel' | 'serial' }
+      const room = this.rooms.setDispatchMode(ctx.params.id, body.mode as 'parallel' | 'serial')
       this.relay.broadcastRooms()
       ok(ctx, room)
     })
@@ -234,67 +223,5 @@ export class RoomControllers {
       const dispatchId = Number(ctx.params.dispatchId)
       this.relay.cancelDispatch(ctx.params.id, dispatchId, body.reason)
       ok(ctx, { cancelled: dispatchId })
-    })
-
-  /**
-   * 合并干跑预检：git merge-tree --write-tree（不动任何工作区/分支/索引，只写不可达 tree 对象）。
-   * 返回 {clean, conflicts, message}；dispatch 无分支（未绑 repo / 工作区创建失败）时 400。
-   */
-  mergeCheck = (ctx: Context) =>
-    guard(ctx, () => {
-      const room = this.rooms.get(ctx.params.id)
-      const d = projectDb.dispatchById(Number(ctx.params.dispatchId))
-      if (!d || d.team !== room.team) throw new Error(`调度 ${ctx.params.dispatchId} 不存在`)
-      if (!room.repoPath) throw new Error('本项目未绑定 git 仓库')
-      if (!d.branch) throw new Error('该调度没有分支（尚未认领或工作区创建失败）')
-      ok(ctx, wtMergeCheck(room.repoPath, d.branch))
-    })
-
-  /**
-   * 派 agent 解冲突：{templateId}——先做 merge-check 拿冲突清单，
-   * 在赢家工作区里 spawn 一个新会话并把冲突文件清单作为首条指令注入。
-   */
-  resolveConflict = (ctx: Context) =>
-    guard(ctx, () => {
-      const room = this.rooms.get(ctx.params.id)
-      const d = projectDb.dispatchById(Number(ctx.params.dispatchId))
-      if (!d || d.team !== room.team) throw new Error(`调度 ${ctx.params.dispatchId} 不存在`)
-      if (!room.repoPath || !d.branch || !d.worktreePath) throw new Error('该调度没有可解冲突的工作区')
-      const body = (ctx.request.body ?? {}) as { templateId?: string }
-      const template = this.templates.get(body.templateId ?? '')
-      if (!template || !template.enabled) throw new Error('模板不存在或已停用')
-      if (SHELLS.has(path.basename(template.command))) throw new Error('shell 模板无法解冲突')
-      const check = wtMergeCheck(room.repoPath, d.branch)
-      if (check.clean) {
-        ok(ctx, { clean: true, conflicts: [], message: '已无可合并冲突，无需派单' })
-        return
-      }
-      const prompt =
-        `你是合并冲突解决专员。当前目录是分支 ${d.branch} 的工作区，它合并回主分支时与以下文件冲突：\n` +
-        check.conflicts.map((f) => `- ${f}`).join('\n') +
-        `\n请用 git merge-tree / git diff 分析两边改动，在保持本分支意图的前提下给出冲突解决方案` +
-        `（优先直接在本分支上 rework 掉冲突点；不要执行合并进主分支，不要碰主检出 ${room.repoPath}）。`
-      // claude 系/codex 支持启动参数带首条指令；其余 TUI 等首屏安静后注入（同 spawnWithHandoff 惯例）
-      const viaArg = effectiveClaudeHome(template) !== null || path.basename(template.command) === 'codex'
-      const summary = this.manager.spawn(template.id, {
-        cwd: d.worktreePath,
-        name: `解冲突 #${d.id}`,
-        extraArgs: viaArg ? [prompt] : undefined,
-        agentBindingPrompt: viaArg ? prompt : undefined,
-      })
-      if (!viaArg) {
-        try {
-          this.manager.get(summary.id).onceQuiet(() => {
-            try {
-              this.manager.get(summary.id).sendline(prompt, { autoName: false })
-            } catch {
-              /* 会话可能已退出/被删 */
-            }
-          }, 5000)
-        } catch {
-          /* 会话可能已退出/被删 */
-        }
-      }
-      ok(ctx, { clean: false, conflicts: check.conflicts, sessionId: summary.id, message: `已派 ${summary.name} 到工作区解冲突` })
     })
 }

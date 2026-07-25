@@ -1,7 +1,7 @@
 // 群聊房间状态：房间列表 + 各房消息缓存。实时性靠 WS（rooms 全量 / roomMessage 增量），
 // REST 只用于首载与 CRUD；mutations 后等服务端 broadcastRooms 回流，不本地改名单。
 import { defineStore } from 'pinia'
-import type { DispatchMode, MergeCheckInfo, RoomDispatchInfo, RoomInfo, RoomMessage, ServerMsg } from '../../../shared/protocol'
+import type { DispatchMode, RoomDispatchInfo, RoomInfo, RoomMessage, ServerMsg } from '../../../shared/protocol'
 import { api } from '../api'
 
 interface RoomsPayload {
@@ -132,22 +132,11 @@ export const useRoomsStore = defineStore('rooms', {
     async setMode(roomId: string, mode: DispatchMode) {
       return api.post<RoomInfo>(`/api/rooms/${roomId}/mode`, { mode })
     },
-    async setRepo(roomId: string, repoPath: string | null) {
-      return api.post<RoomInfo>(`/api/rooms/${roomId}/repo`, { repoPath })
-    },
     async setRoot(roomId: string, rootPath: string | null) {
       return api.post<RoomInfo>(`/api/rooms/${roomId}/root`, { rootPath })
     },
     async cancelDispatch(roomId: string, dispatchId: number, reason?: string) {
       return api.post(`/api/rooms/${roomId}/dispatches/${dispatchId}/cancel`, { reason })
-    },
-    async mergeCheck(roomId: string, dispatchId: number) {
-      return api.post<MergeCheckInfo>(`/api/rooms/${roomId}/dispatches/${dispatchId}/merge-check`)
-    },
-    async resolveConflict(roomId: string, dispatchId: number, templateId: string) {
-      return api.post<MergeCheckInfo & { sessionId?: string }>(`/api/rooms/${roomId}/dispatches/${dispatchId}/resolve-conflict`, {
-        templateId,
-      })
     },
   },
 })

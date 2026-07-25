@@ -177,18 +177,16 @@ function locateProjectFile(path: string) {
   activePane.value = 'files'
 }
 
-// ---- 房间调度（并行=全员即注；串行=一次放行一位；认领制=先报认领、原子批准唯一 Implementer）----
+// ---- 房间调度（并行=全员即注；串行=一次放行一位）----
 
 const showDispatch = ref(false)
 const dispatchList = computed(() => (activeId.value ? (rooms.dispatches[activeId.value] ?? []) : []))
 const activeSerial = computed(() => dispatchList.value.find((d) => d.mode === 'serial' && d.state === 'active'))
-const activeClaim = computed(() => dispatchList.value.find((d) => d.mode === 'claim' && d.state === 'active'))
 
-const MODE_LABEL: Record<DispatchMode, string> = { parallel: '并行讨论', serial: '串行轮转', claim: '认领制' }
+const MODE_LABEL: Record<DispatchMode, string> = { parallel: '并行讨论', serial: '串行轮转' }
 const MODE_TOAST: Record<DispatchMode, string> = {
   parallel: '已切到并行讨论：全体同时收到',
   serial: '已切到串行轮转：一次只放行一位 agent',
-  claim: '已切到认领制：先报认领，先到先得唯一 Implementer',
 }
 
 async function setDispatchMode(mode: DispatchMode) {
@@ -196,62 +194,6 @@ async function setDispatchMode(mode: DispatchMode) {
   try {
     await rooms.setMode(room.value.id, mode)
     message.success(MODE_TOAST[mode])
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  }
-}
-
-// ---- repo 绑定（认领制赢家自动开工作区用）----
-
-const repoDraft = ref('')
-watch(
-  () => room.value?.repoPath,
-  (v) => {
-    repoDraft.value = v ?? ''
-  },
-  { immediate: true }
-)
-
-async function saveRepo() {
-  if (!room.value) return
-  try {
-    await rooms.setRepo(room.value.id, repoDraft.value.trim() || null)
-    message.success(repoDraft.value.trim() ? '已绑定仓库，认领赢家将自动开工作区' : '已解绑仓库')
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  }
-}
-
-// ---- 合并预检 / 派 agent 解冲突（认领制阶段四）----
-
-/** dispatchId → 最近一次预检结果（不缓存进 store，面板级瞬态即可） */
-const mergeResults = ref<Record<number, { clean: boolean; conflicts: string[]; message: string }>>({})
-const mergeChecking = ref(0) // 正在预检的 dispatchId（0=无）
-
-async function runMergeCheck(dispatchId: number) {
-  if (!room.value) return
-  mergeChecking.value = dispatchId
-  try {
-    mergeResults.value[dispatchId] = await rooms.mergeCheck(room.value.id, dispatchId)
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  } finally {
-    mergeChecking.value = 0
-  }
-}
-
-async function resolveConflict(dispatchId: number) {
-  if (!room.value) return
-  // 解冲突 agent 用哪个模板：取第一个启用的非 shell 模板（与「加成员」同一批候选）
-  const template = sessionsStore.enabledTemplates.find((t) => !SHELLS.has(t.command.split('/').pop() ?? t.command))
-  if (!template) {
-    message.error('没有可用的 agent 模板')
-    return
-  }
-  try {
-    const res = await rooms.resolveConflict(room.value.id, dispatchId, template.id)
-    if (res.clean) message.success(res.message)
-    else message.success(`${res.message}（${template.name}）`)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -268,7 +210,6 @@ async function cancelDispatch(dispatchId: number) {
 }
 
 const DISPATCH_STATE_LABEL: Record<string, string> = { active: '进行中', done: '已完成', cancelled: '已取消' }
-const DISPATCH_PHASE_LABEL: Record<string, string> = { claiming: '报认领中', implementing: '实施中', done: '已收单' }
 const DELIVERY_STATUS_LABEL: Record<DeliveryStatus, string> = {
   queued: '排队',
   injected: '已注入',
@@ -657,9 +598,6 @@ onMounted(async () => {
               调度 · {{ MODE_LABEL[room.dispatchMode] }} {{ showDispatch ? '▾' : '▸' }}
             </button>
             <span v-if="activeSerial?.currentTarget" class="dispatch-cur">轮到 {{ activeSerial.currentTarget }}</span>
-            <span v-else-if="activeClaim" class="dispatch-cur">
-              {{ activeClaim.implementer ? `${activeClaim.implementer} 实施中` : '等待认领' }}
-            </span>
             <template v-if="showDispatch">
               <button
                 class="mode-btn"
@@ -673,25 +611,9 @@ onMounted(async () => {
                 title="一次只放行一位 agent，回复/超时自动轮到下一位"
                 @click="setDispatchMode('serial')"
               >串行轮转</button>
-              <button
-                class="mode-btn"
-                :class="{ on: room.dispatchMode === 'claim' }"
-                title="全员先报认领，原子批准唯一 Implementer，其余转 reviewer"
-                @click="setDispatchMode('claim')"
-              >认领制</button>
             </template>
           </div>
           <div v-if="showDispatch" class="dispatch-list">
-            <div class="repo-bind">
-              <NInput
-                v-model:value="repoDraft"
-                placeholder="绑定 git 仓库绝对路径（认领赢家自动开工作区），留空解绑"
-                size="tiny"
-                class="repo-input"
-                @keyup.enter="saveRepo"
-              />
-              <button class="mode-btn" @click="saveRepo">保存</button>
-            </div>
             <NEmpty v-if="!dispatchList.length" description="还没有调度记录，发一条消息试试" size="small" class="dispatch-empty" />
             <div v-for="d in dispatchList" :key="d.id" class="dispatch-item">
               <div class="dispatch-meta">
@@ -699,28 +621,9 @@ onMounted(async () => {
                 <span class="d-mode">{{ MODE_LABEL[d.mode] }}</span>
                 <span class="d-root" :title="`根消息 #${d.rootMessageId}`">{{ rootSummary(d.rootMessageId) }}</span>
                 <span v-if="d.currentTarget" class="d-cur">→ {{ d.currentTarget }}</span>
-                <span v-if="d.phase" class="d-cur">{{ DISPATCH_PHASE_LABEL[d.phase] ?? d.phase }}</span>
-                <span v-if="d.implementer" class="d-cur">Implementer：{{ d.implementer }}</span>
                 <span v-if="d.state === 'active' && d.deadline" class="d-deadline">{{ fmtTs(d.deadline) }} 超时</span>
-                <span v-if="d.state === 'active' && d.claimDeadline && !d.implementer" class="d-deadline">{{ fmtTs(d.claimDeadline) }} 认领截止</span>
                 <span v-if="d.cancelReason" class="d-reason">取消：{{ d.cancelReason }}</span>
                 <button v-if="d.state === 'active' && d.mode === 'serial'" class="d-cancel" @click="cancelDispatch(d.id)">取消</button>
-                <button
-                  v-if="d.branch"
-                  class="d-cancel"
-                  :disabled="mergeChecking === d.id"
-                  @click="runMergeCheck(d.id)"
-                >{{ mergeChecking === d.id ? '预检中…' : '合并预检' }}</button>
-              </div>
-              <div v-if="d.worktreePath" class="d-worktree" :title="d.worktreePath">
-                工作区 {{ d.worktreePath }} · 分支 {{ d.branch }}
-              </div>
-              <div v-if="mergeResults[d.id]" class="d-merge" :data-clean="mergeResults[d.id].clean">
-                <span>{{ mergeResults[d.id].message }}</span>
-                <template v-if="!mergeResults[d.id].clean && mergeResults[d.id].conflicts.length">
-                  <span v-for="f in mergeResults[d.id].conflicts" :key="f" class="d-conflict">{{ f }}</span>
-                  <button class="d-cancel" @click="resolveConflict(d.id)">派 agent 解冲突</button>
-                </template>
               </div>
               <div class="d-deliveries">
                 <span v-for="del in d.deliveries" :key="del.id" class="d-del" :data-s="del.status">
@@ -1216,40 +1119,6 @@ onMounted(async () => {
 .d-cancel:disabled {
   opacity: 0.5;
   cursor: default;
-}
-.repo-bind {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.repo-input {
-  flex: 1;
-}
-.d-worktree {
-  margin-top: 4px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.d-merge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 4px;
-}
-.d-merge[data-clean='true'] {
-  color: #18a058;
-}
-.d-merge[data-clean='false'] {
-  color: #d03050;
-}
-.d-conflict {
-  padding: 0 6px;
-  border-radius: 6px;
-  background: var(--bar);
-  font-family: monospace;
 }
 .d-deliveries {
   display: flex;

@@ -286,10 +286,8 @@ export interface RoomInfo {
   createdAt: number
   /** 归档时间；null = 当前项目。归档项目保留成员快照和消息，只读且不参与消息投递。 */
   archivedAt: number | null
-  /** 房间调度模式（2026-07-22）：parallel=全员即注；serial=串行轮转一次只放行一位成员（默认，旧 rooms.json 读取时补此值）；claim=认领制（先报认领、原子批准唯一 Implementer） */
-  dispatchMode: 'parallel' | 'serial' | 'claim'
-  /** 绑定的 git 仓库绝对路径（可空）：claim 模式赢家获批时自动开工作区；旧 rooms.json 读取时补 null */
-  repoPath: string | null
+  /** 房间调度模式（2026-07-22）：parallel=全员即注；serial=串行轮转一次只放行一位成员（默认，旧 rooms.json 读取时补此值） */
+  dispatchMode: 'parallel' | 'serial'
   /** 项目/案件文件根目录（可空）：Files 只读浏览的唯一根，不从成员 cwd 推断。 */
   rootPath: string | null
   /** 最后一条消息时间（ISO，服务端列表时从 projects.db 注入；无消息缺省）。前端按它排序房间，不回写 rooms.json */
@@ -327,11 +325,9 @@ export interface ProjectFileList {
 
 // ---- 房间调度（确定性轮转，2026-07-22）：底账在 projects.db 的 dispatch/delivery 表 ----
 
-export type DispatchMode = 'parallel' | 'serial' | 'claim'
+export type DispatchMode = 'parallel' | 'serial'
 export type DispatchState = 'active' | 'done' | 'cancelled'
 export type DeliveryStatus = 'queued' | 'injected' | 'working' | 'replied' | 'done' | 'timeout' | 'cancelled' | 'failed'
-/** claim 模式阶段：claiming=全员报认领中；implementing=已有赢家在实施；done=收单 */
-export type DispatchPhase = 'claiming' | 'implementing' | 'done'
 
 export interface RoomDeliveryInfo {
   id: number
@@ -359,26 +355,9 @@ export interface RoomDispatchInfo {
   deadline: string | null
   maxDepth: number
   cancelReason: string | null
-  /** claim：当前阶段（parallel/serial 恒 null） */
-  phase: DispatchPhase | null
-  /** claim：赢家成员名（未认领为 null） */
-  implementer: string | null
-  /** claim：认领截止时间（ISO 文本） */
-  claimDeadline: string | null
-  /** claim：赢家获批时自动开的 git 工作区绝对路径（未绑 repo 或创建失败为 null） */
-  worktreePath: string | null
-  /** claim：工作区分支名 */
-  branch: string | null
   createdAt: string
   updatedAt: string
   deliveries: RoomDeliveryInfo[]
-}
-
-/** 合并干跑预检结果（git merge-tree --write-tree，不动任何工作区/分支） */
-export interface MergeCheckInfo {
-  clean: boolean
-  conflicts: string[]
-  message: string
 }
 
 // ---- 文件预览（Phase 4）：白名单内本地产物在手机上预览 ----

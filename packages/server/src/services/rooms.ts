@@ -7,7 +7,6 @@ import path from 'node:path'
 import type { RoomInfo, RoomMember } from '../../../shared/protocol'
 import { DATA_DIR } from '../config'
 import { createLogger } from '../logger'
-import { isGitRepo } from './worktree'
 
 const log = createLogger('rooms')
 
@@ -68,12 +67,12 @@ export class RoomStore {
       if (!Array.isArray(parsed)) return []
       // 旧 rooms.json 没有 archivedAt：读取时补 null，下一次保存自然完成迁移。
       // 旧 rooms.json 同样没有 dispatchMode：补 'serial'（当前默认），迁移方式同 archivedAt。
-      // repoPath（认领制自动开工作区用）、rootPath（项目 Files 根）缺省补 null，同上。
+      // rootPath（项目 Files 根）缺省补 null，同上。
       return (parsed as Partial<RoomInfo>[]).map((room) => ({
         ...(room as RoomInfo),
         archivedAt: typeof room.archivedAt === 'number' ? room.archivedAt : null,
-        dispatchMode: room.dispatchMode === 'parallel' || room.dispatchMode === 'claim' ? room.dispatchMode : 'serial',
-        repoPath: typeof room.repoPath === 'string' && room.repoPath ? room.repoPath : null,
+        // claim 调度模式已砍掉（2026-07-25），旧 rooms.json 里残留的 'claim' 视为默认 'serial'
+        dispatchMode: room.dispatchMode === 'parallel' ? 'parallel' : 'serial',
         rootPath: typeof room.rootPath === 'string' && room.rootPath ? room.rootPath : null,
       }))
     } catch (err) {
@@ -113,7 +112,6 @@ export class RoomStore {
       createdAt: Date.now(),
       archivedAt: null,
       dispatchMode: 'serial', // 默认串行轮转（2026-07-22 调转）：一次只放行一位成员
-      repoPath: null,
       rootPath: null,
       members: [{ name: this.humanName, kind: 'human', sessionId: null }],
     }
@@ -153,26 +151,13 @@ export class RoomStore {
     if (room.archivedAt !== null) throw new Error(`项目「${room.name}」已归档，只能查看或恢复`)
   }
 
-  /** 切调度模式：parallel=全员即注；serial=串行轮转一次只放行一位（默认）；claim=认领制先到先得 */
-  setDispatchMode(id: string, mode: 'parallel' | 'serial' | 'claim'): RoomInfo {
+  /** 切调度模式：parallel=全员即注；serial=串行轮转一次只放行一位（默认） */
+  setDispatchMode(id: string, mode: 'parallel' | 'serial'): RoomInfo {
     const room = this.get(id)
     this.assertActive(room)
-    if (mode !== 'parallel' && mode !== 'serial' && mode !== 'claim') throw new Error('调度模式只能是 parallel、serial 或 claim')
+    if (mode !== 'parallel' && mode !== 'serial') throw new Error('调度模式只能是 parallel 或 serial')
     if (room.dispatchMode !== mode) {
       room.dispatchMode = mode
-      this.save()
-    }
-    return room
-  }
-
-  /** 绑定/解绑 git 仓库（claim 赢家自动开工作区用）；绑定时校验真是 git 仓，null 解绑 */
-  setRepoPath(id: string, repoPath: string | null): RoomInfo {
-    const room = this.get(id)
-    this.assertActive(room)
-    const trimmed = repoPath?.trim() || null
-    if (trimmed && !isGitRepo(trimmed)) throw new Error(`「${trimmed}」不是 git 仓库（git rev-parse 失败）`)
-    if (room.repoPath !== trimmed) {
-      room.repoPath = trimmed
       this.save()
     }
     return room

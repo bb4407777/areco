@@ -2,7 +2,6 @@
 // 隔离同 room-relay.test.ts：先于 import 设 ARECO_ROOT 到临时目录，project-db/rooms 落盘都在其下（不污染真库）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -38,7 +37,7 @@ function mockManager(runningIds: string[]): { manager: unknown; sent: Sent } {
 }
 
 let seq = 0
-function setup(mode: 'parallel' | 'serial' | 'claim'): {
+function setup(mode: 'parallel' | 'serial'): {
   rooms: InstanceType<typeof RoomStore>
   roomId: string
   team: string
@@ -49,24 +48,9 @@ function setup(mode: 'parallel' | 'serial' | 'claim'): {
   const room = rooms.create(name)
   rooms.addMember(room.id, { name: 'A', kind: 'session', sessionId: 'sa' })
   rooms.addMember(room.id, { name: 'B', kind: 'session', sessionId: 'sb' })
-  if (mode !== 'serial') rooms.setDispatchMode(room.id, mode) // serial 为默认，其余模式显式切
+  if (mode !== 'serial') rooms.setDispatchMode(room.id, mode) // serial 为默认，parallel 显式切
   return { rooms, roomId: room.id, team: room.team, name }
 }
-
-/** tmpdir 里 git init 一个测试仓（一个初始提交），供绑房间/开工作区/兜底提交用 */
-function gitRepo(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-claim-repo-'))
-  const git = (args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' })
-  git(['init'])
-  git(['config', 'user.email', 'test@areco.local'])
-  git(['config', 'user.name', 'areco-test'])
-  fs.writeFileSync(path.join(dir, 'README.md'), 'base\n')
-  git(['add', '-A'])
-  git(['commit', '-m', 'init'])
-  return dir
-}
-
-const gitOut = (cwd: string, args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf-8' }).trim()
 
 const tick = (relay: unknown) => (relay as { tick(): void }).tick()
 
@@ -220,187 +204,4 @@ test('serial：显式 @ 单个成员只创建谁的 delivery', () => {
   const d = projectDb.listDispatches(team)[0]
   assert.equal(d.deliveries.length, 1)
   assert.equal(d.currentTarget, 'B')
-})
-
-// ---- claim 认领制（2026-07-22 第二阶段）：先报认领、原子批准唯一 Implementer、绑 repo 自动开工作区 ----
-
-test('claim：人类发言全员收到第一阶段 note（先报认领/禁止改码），dispatch 进 claiming', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const { manager, sent } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', '大家一起评估这个方案')
-
-  for (const sid of ['sa', 'sb']) {
-    const note = sent[sid]?.[0] ?? ''
-    assert.ok(note.includes('先报认领'), `${sid} 应收到「先报认领」指令`)
-    assert.ok(note.includes('禁止改任何代码'), `${sid} 应收到「禁止改码」指令`)
-    assert.ok(note.includes('[claim]'), `${sid} 应被告知认领前缀`)
-  }
-  const d = projectDb.listDispatches(team)[0]
-  assert.equal(d.mode, 'claim')
-  assert.equal(d.phase, 'claiming')
-  assert.equal(d.implementer, null)
-  assert.ok(d.claimDeadline, 'claiming 应带认领截止时间')
-  const byName = Object.fromEntries(d.deliveries.map((x) => [x.memberName, x]))
-  assert.equal(byName.A.status, 'injected')
-  assert.equal(byName.B.status, 'injected')
-})
-
-test('claim：先到先得——第一个 [claim] 成 Implementer，第二个转 reviewer，重复认领不重复放行', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const { manager, sent } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', '做个调研')
-  relay.postMessage(roomId, 'A', '[claim] 我负责这一块')
-
-  let d = projectDb.listDispatches(team)[0]
-  assert.equal(d.implementer, 'A', '第一个认领的 A 应赢')
-  assert.equal(d.phase, 'implementing')
-  assert.equal(d.state, 'active')
-  let byName = Object.fromEntries(d.deliveries.map((x) => [x.memberName, x]))
-  assert.equal(byName.A.status, 'working', '赢家 delivery 应置 working')
-  assert.equal(byName.B.status, 'done', '输家 delivery 应落定 done')
-
-  const winnerNote = sent['sa'].find((t) => t.includes('可动手'))
-  assert.ok(winnerNote, '赢家应收到第二阶段「可动手」note')
-  const loserNote = sent['sb'].find((t) => t.includes('已认领该任务'))
-  assert.ok(loserNote?.includes('reviewer'), '输家应收到转 reviewer 的轻量 note')
-
-  // B 迟到再认领：只补一条「认领已被 A 获得」note，状态不动
-  relay.postMessage(roomId, 'B', '[claim] 我也想做')
-  const lateNote = sent['sb'].find((t) => t.includes('认领已被 A 获得'))
-  assert.ok(lateNote, '迟到认领应收到「已被获得」note')
-  d = projectDb.listDispatches(team)[0]
-  assert.equal(d.implementer, 'A', '迟到认领不改变 implementer')
-  assert.equal(d.phase, 'implementing')
-
-  // 赢家重复 [claim]：不再重放第二阶段 note（幂等）
-  relay.postMessage(roomId, 'A', '[claim] 再说一次')
-  assert.equal(sent['sa'].filter((t) => t.includes('可动手')).length, 1, '第二阶段 note 不应重放')
-  byName = Object.fromEntries(projectDb.listDispatches(team)[0].deliveries.map((x) => [x.memberName, x]))
-  assert.equal(byName.A.status, 'working')
-})
-
-test('claim：非目标成员（未被投递）不能抢单', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const { manager } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', '@A 你单独评估') // 显式指派只有 A 进单
-  relay.postMessage(roomId, 'B', '[claim] 我想抢')
-  const d = projectDb.listDispatches(team)[0]
-  assert.equal(d.deliveries.length, 1)
-  assert.equal(d.implementer, null, '没被投递的 B 不应能认领')
-  assert.equal(d.phase, 'claiming')
-})
-
-test('claim：认领超时收单，原因留痕，不自动重投', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const { manager, sent } = mockManager(['sa', 'sb'])
-  // claimDeadlineMs:0 → deadline 即当下，下一个 tick 必过期
-  const relay = new RoomRelay(rooms, manager as never, () => {}, { claimDeadlineMs: 0 })
-  relay.postMessage(roomId, 'Owner', '限时认领')
-  tick(relay)
-
-  const d = projectDb.listDispatches(team)[0]
-  assert.equal(d.state, 'done')
-  assert.equal(d.phase, 'done')
-  assert.equal(d.cancelReason, '无人认领超时')
-  assert.equal(d.implementer, null)
-  // 超时后再认领无效
-  relay.postMessage(roomId, 'A', '[claim] 现在还来得及吗')
-  assert.equal(sent['sa'].filter((t) => t.includes('可动手')).length, 0, '超时收单后不应再放行')
-})
-
-test('claim + 绑 repo：赢家获批自动开工作区（目录/分支真实存在、从 HEAD 切出），重复触发幂等', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const repo = gitRepo()
-  rooms.setRepoPath(roomId, repo)
-  const { manager, sent } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', 'fix login bug')
-  relay.postMessage(roomId, 'A', '[claim] 我来修')
-
-  const d = projectDb.listDispatches(team)[0]
-  assert.equal(d.implementer, 'A')
-  assert.ok(d.worktreePath, '应记录工作区路径')
-  assert.ok(d.branch, '应记录分支名')
-  // 目录约定：<repo父目录>/<repo名>-wt/<slug>；分支约定：areco/<成员>-<slug>
-  assert.equal(path.basename(path.dirname(d.worktreePath!)), `${path.basename(repo)}-wt`)
-  assert.equal(path.basename(d.worktreePath!), 'fix-login-bug')
-  assert.equal(d.branch, 'areco/a-fix-login-bug')
-  assert.ok(fs.existsSync(d.worktreePath!), '工作区目录应真实存在')
-  assert.ok(gitOut(repo, ['branch', '--list', d.branch!]).includes(d.branch!), '分支应真实存在')
-  // 分支从主仓 HEAD 切出
-  assert.equal(gitOut(d.worktreePath!, ['rev-parse', 'HEAD']), gitOut(repo, ['rev-parse', 'HEAD']))
-
-  // 赢家第二阶段 note 含工作区路径 + 分支 + 纪律三句
-  const note = sent['sa'].find((t) => t.includes('可动手'))
-  assert.ok(note?.includes(d.worktreePath!), 'note 应含工作区绝对路径')
-  assert.ok(note?.includes(d.branch!), 'note 应含分支名')
-  assert.ok(note?.includes('不碰主检出') && note?.includes('WIP') && note?.includes('不执行合并'), 'note 应含纪律说明')
-
-  // 幂等：同一 dispatch 重复放行复用既有目录/分支，不报错不重建
-  const room = rooms.get(roomId)
-  const winner = room.members.find((m) => m.name === 'A')!
-  const before = gitOut(d.worktreePath!, ['rev-parse', 'HEAD'])
-  ;(relay as unknown as { claimWon(r: unknown, d: unknown, m: unknown): void }).claimWon(
-    room,
-    projectDb.dispatchById(d.id),
-    winner
-  )
-  const d2 = projectDb.dispatchById(d.id)!
-  assert.equal(d2.worktreePath, d.worktreePath)
-  assert.equal(d2.branch, d.branch)
-  assert.equal(gitOut(d2.worktreePath!, ['rev-parse', 'HEAD']), before, '复用不应产生新提交')
-})
-
-test('claim + 中文任务名：slug 净化为空兜底 d<dispatchId>', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const repo = gitRepo()
-  rooms.setRepoPath(roomId, repo)
-  const { manager } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', '修复登录缺陷')
-  relay.postMessage(roomId, 'A', '[claim] 我来')
-
-  const d = projectDb.listDispatches(team)[0]
-  assert.equal(path.basename(d.worktreePath!), `d${d.id}`, '中文净化为空应兜底 dispatch id')
-  assert.ok(fs.existsSync(d.worktreePath!))
-})
-
-test('claim：implementer 会话退出时工作区脏文件兜底提交', () => {
-  const { rooms, roomId, team } = setup('claim')
-  const repo = gitRepo()
-  rooms.setRepoPath(roomId, repo)
-  const { manager } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', 'dirty work test')
-  relay.postMessage(roomId, 'A', '[claim] 接了')
-  const d = projectDb.listDispatches(team)[0]
-  assert.ok(d.worktreePath)
-
-  // 弄脏工作区后删会话：应自动 add -A + commit
-  fs.writeFileSync(path.join(d.worktreePath!, 'wip.txt'), '半成品\n')
-  const headBefore = gitOut(d.worktreePath!, ['rev-parse', 'HEAD'])
-  ;(relay as unknown as { onSessionRemoved(id: string): void }).onSessionRemoved('sa')
-
-  assert.equal(gitOut(d.worktreePath!, ['status', '--porcelain']), '', '兜底提交后工作区应干净')
-  const log = gitOut(d.worktreePath!, ['log', '--oneline', '-1'])
-  assert.ok(log.includes(`wip: 会话退出兜底提交 (dispatch #${d.id})`), 'git log 应见兜底提交')
-  assert.notEqual(gitOut(d.worktreePath!, ['rev-parse', 'HEAD']), headBefore)
-
-  // 干净工作区再退出：不产生多余提交（幂等）
-  const headAfter = gitOut(d.worktreePath!, ['rev-parse', 'HEAD'])
-  ;(relay as unknown as { onSessionRemoved(id: string): void }).onSessionRemoved('sa')
-  assert.equal(gitOut(d.worktreePath!, ['rev-parse', 'HEAD']), headAfter)
-})
-
-test('rooms：绑定 repo 校验必须是 git 仓', () => {
-  const { rooms, roomId } = setup('claim')
-  const repo = gitRepo()
-  rooms.setRepoPath(roomId, repo)
-  assert.equal(rooms.get(roomId).repoPath, repo)
-  assert.throws(() => rooms.setRepoPath(roomId, os.tmpdir()), /不是 git 仓库/)
-  rooms.setRepoPath(roomId, null) // 解绑
-  assert.equal(rooms.get(roomId).repoPath, null)
 })

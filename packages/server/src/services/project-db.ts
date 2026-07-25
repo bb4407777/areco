@@ -38,8 +38,6 @@ CREATE TABLE IF NOT EXISTS message_targets (
   UNIQUE(message_id, target_name)
 );
 -- dispatch：一次投递任务（以触发它的根消息为幂等键，重复建单返回既有行）。
--- claim 模式（认领制）新增列：phase（claiming→implementing→done）、implementer（赢家成员名）、
--- claim_deadline（认领截止）、worktree_path/branch（赢家获批时自动开的 git 工作区）。
 CREATE TABLE IF NOT EXISTS dispatch (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   team TEXT NOT NULL,
@@ -50,11 +48,6 @@ CREATE TABLE IF NOT EXISTS dispatch (
   deadline TEXT,
   max_depth INTEGER NOT NULL DEFAULT 3,
   cancel_reason TEXT,
-  phase TEXT CHECK(phase IN ('claiming', 'implementing', 'done')),
-  implementer TEXT,
-  claim_deadline TEXT,
-  worktree_path TEXT,
-  branch TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   UNIQUE(team, root_message_id)
@@ -88,6 +81,8 @@ function open(): DatabaseSync {
  * 宽容迁移：CREATE TABLE IF NOT EXISTS 不会改既有表。claim 模式上线前的开发库可能已建了
  * 旧版 dispatch 表（CHECK 不含 'claim'、缺 phase/implementer 等新列）——SQLite 改不了 CHECK，
  * 只能整表重建；缺列则 ALTER TABLE ADD COLUMN。生产库上线前从未建过该表，走不到这里。
+ * 注：claim 调度模式已于 2026-07-25 砍掉（保 serial+parallel），下列 ADD COLUMN 仅为旧库兼容，
+ * 新代码不再写入这些列。
  */
 /** messages 表增量列迁移：既有生产库缺 human_relay（2026-07-23 转述标记）则补 */
 function migrateMessages(db: DatabaseSync): void {
@@ -119,11 +114,6 @@ function migrateDispatch(db: DatabaseSync): void {
         deadline TEXT,
         max_depth INTEGER NOT NULL DEFAULT 3,
         cancel_reason TEXT,
-        phase TEXT CHECK(phase IN ('claiming', 'implementing', 'done')),
-        implementer TEXT,
-        claim_deadline TEXT,
-        worktree_path TEXT,
-        branch TEXT,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         UNIQUE(team, root_message_id)
@@ -224,11 +214,9 @@ export function lastMessageAts(): Record<string, string> {
 
 // ---- 房间调度（2026-07-22 设计：不上 LLM selector，规则确定性轮转）----
 
-export type DispatchMode = 'parallel' | 'serial' | 'claim'
+export type DispatchMode = 'parallel' | 'serial'
 export type DispatchState = 'active' | 'done' | 'cancelled'
 export type DeliveryStatus = 'queued' | 'injected' | 'working' | 'replied' | 'done' | 'timeout' | 'cancelled' | 'failed'
-/** claim 模式阶段：claiming=全员报认领中；implementing=已有赢家在实施；done=收单（超时/取消） */
-export type DispatchPhase = 'claiming' | 'implementing' | 'done'
 
 export interface DispatchRow {
   id: number
@@ -240,11 +228,6 @@ export interface DispatchRow {
   deadline: string | null
   maxDepth: number
   cancelReason: string | null
-  phase: DispatchPhase | null
-  implementer: string | null
-  claimDeadline: string | null
-  worktreePath: string | null
-  branch: string | null
   createdAt: string
   updatedAt: string
 }
@@ -276,11 +259,6 @@ function rowToDispatch(r: Record<string, unknown>): DispatchRow {
     deadline: r.deadline === null ? null : String(r.deadline),
     maxDepth: Number(r.max_depth),
     cancelReason: r.cancel_reason === null ? null : String(r.cancel_reason),
-    phase: r.phase === null || r.phase === undefined ? null : (String(r.phase) as DispatchPhase),
-    implementer: r.implementer === null || r.implementer === undefined ? null : String(r.implementer),
-    claimDeadline: r.claim_deadline === null || r.claim_deadline === undefined ? null : String(r.claim_deadline),
-    worktreePath: r.worktree_path === null || r.worktree_path === undefined ? null : String(r.worktree_path),
-    branch: r.branch === null || r.branch === undefined ? null : String(r.branch),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   }
@@ -432,11 +410,6 @@ export function setDispatchState(
     currentTarget?: string | null
     deadline?: string | null
     cancelReason?: string | null
-    phase?: DispatchPhase | null
-    implementer?: string | null
-    claimDeadline?: string | null
-    worktreePath?: string | null
-    branch?: string | null
   }
 ): void {
   const sets: string[] = []
@@ -456,26 +429,6 @@ export function setDispatchState(
   if (patch.cancelReason !== undefined) {
     sets.push('cancel_reason = ?')
     vals.push(patch.cancelReason)
-  }
-  if (patch.phase !== undefined) {
-    sets.push('phase = ?')
-    vals.push(patch.phase)
-  }
-  if (patch.implementer !== undefined) {
-    sets.push('implementer = ?')
-    vals.push(patch.implementer)
-  }
-  if (patch.claimDeadline !== undefined) {
-    sets.push('claim_deadline = ?')
-    vals.push(patch.claimDeadline)
-  }
-  if (patch.worktreePath !== undefined) {
-    sets.push('worktree_path = ?')
-    vals.push(patch.worktreePath)
-  }
-  if (patch.branch !== undefined) {
-    sets.push('branch = ?')
-    vals.push(patch.branch)
   }
   if (!sets.length) return
   const db = open()
@@ -510,58 +463,6 @@ export function messageById(id: number): ProjectMessageRow | null {
   try {
     const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id)
     return row ? rowToMessage(row as Record<string, unknown>) : null
-  } finally {
-    db.close()
-  }
-}
-
-// ---- claim 认领制（先到先得，原子批准唯一 Implementer）----
-
-/** 房间内仍在报认领阶段的 active dispatch（按 id 升序，最早的在前；claim 消息认最早那单） */
-export function activeClaimingDispatches(team: string): DispatchRow[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
-  try {
-    const rows = db
-      .prepare("SELECT * FROM dispatch WHERE team = ? AND mode = 'claim' AND state = 'active' AND phase = 'claiming' ORDER BY id")
-      .all(team)
-    return (rows as Record<string, unknown>[]).map(rowToDispatch)
-  } finally {
-    db.close()
-  }
-}
-
-/**
- * 原子认领：仅当该 dispatch 仍无人认领时批准，按 affected rows 判输赢（先到先得）。
- * 返回 true=本成员赢（phase 同步推进 implementing）；false=已被别人认领（迟到，状态不动）。
- */
-export function tryClaimDispatch(id: number, memberName: string): boolean {
-  const db = open()
-  try {
-    const res = db
-      .prepare(
-        `UPDATE dispatch SET implementer = ?, phase = 'implementing',
-           updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-         WHERE id = ? AND implementer IS NULL`
-      )
-      .run(memberName, id)
-    return Number(res.changes) > 0
-  } finally {
-    db.close()
-  }
-}
-
-/** 某成员作为 implementer 的全部 active 且已开工作区的 dispatch（会话退出兜底提交用，跨房间查） */
-export function activeDispatchesOfImplementer(memberName: string): DispatchRow[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
-  try {
-    const rows = db
-      .prepare(
-        "SELECT * FROM dispatch WHERE implementer = ? AND state = 'active' AND worktree_path IS NOT NULL ORDER BY id"
-      )
-      .all(memberName)
-    return (rows as Record<string, unknown>[]).map(rowToDispatch)
   } finally {
     db.close()
   }
