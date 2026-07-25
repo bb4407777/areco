@@ -151,6 +151,22 @@ PLAN_TEMPLATE = (
     "最终产物落点：<最终交付文件的绝对路径，或『无』>\n"
 )
 
+# 计划重申模板（P0-2 降级第 1 级）：首轮计划缺「步骤」段时，在同房间同 Stand 上重申格式。
+# 只讲格式、不重述任务——Stand 就在房里，任务上下文它有；重述反而可能让它从头再想一遍。
+PLAN_RETRY_TEMPLATE = (
+    "你上一条回复没有按要求的结构输出，缺少可直接照做的「步骤」段，Worker 无法执行。\n"
+    "请**不要重新思考任务**，就把你刚才的分析重排成下面这个结构再发一次：\n\n"
+    "目标：<一句话>\n"
+    "上下文：<必要背景>\n"
+    "步骤：\n"
+    "1. <动作> | 工具或数据：<...> | 产物：<文件路径或『无』>\n"
+    "2. <动作> | 工具或数据：<...> | 产物：<...>\n"
+    "（继续列出所有步骤，必须是「数字. 」开头的编号行）\n"
+    "约束：<口径/红线/边界>\n"
+    "完成判据：<什么算 done，尽量可机检>\n"
+    "最终产物落点：<绝对路径，或『无』>\n"
+)
+
 # 门控信号词（should_plan 用）：命中 PLAN_KEYWORDS 且未强命中 DIRECT_KEYWORDS → 走两段式
 PLAN_KEYWORDS = (
     "调研", "研究", "方案", "设计", "架构", "对比", "规划", "拆解",
@@ -1907,12 +1923,19 @@ class Caller:
 
         流程:
             1. Thinker（registry.default_thinker）拆解任务、产出可执行计划（不直接动手）
-            2. Worker（registry.default_worker）按计划执行，产出结果
+            2. Worker（registry.default_worker）**在同一个房间里**按计划执行（P0-3）
             3. 结果代发微信（dry_run 时只拼不发）
+
+        计划不合格时三级降级（P0-2，改动前是「全损」——缺个标题就零产出）:
+            1. 同房间同 Stand 重申格式模板，再要一次（限 1 次，PLAN_RETRY_TEMPLATE）
+            2. 仍不合格但有正文 → 当「未结构化分析」交 Worker 自行判断（degraded=True）
+            3. 连正文都没有 → 才是真 plan_failed
 
         返回:
             {
                 "stage": "execute" | "plan_failed",
+                "degraded": bool,     # True=计划没通过校验，走了降级路径
+                "degrade_reason": str,
                 "plan": {...},        # Thinker 的 dispatch+poll
                 "execute": {...},     # Worker 的 dispatch+poll
                 "plan_text": str,
@@ -1939,6 +1962,7 @@ class Caller:
         )
         plan_text = plan_poll.get("result_text", "")
         if not plan_text:
+            # 真 · plan_failed：Thinker 一个字都没回（超时/失联），没有可降级的素材。
             logger.warning("Thinker 未产出计划，跳过执行阶段")
             # 计划阶段就挂了：房间留在看板（现场比整洁重要），只在台账记一笔
             self.finish_room(plan_dispatch, "plan_failed")
@@ -1951,34 +1975,89 @@ class Caller:
                 "result_text": "",
                 "wechat": None,
                 "relayed": False,
+                "degraded": False,
                 "error": plan_poll.get("error", "Thinker 未产出计划"),
             }
-        # 结构化校验：plan 必须含「步骤」段，否则视为不合格，不喂 Worker
-        plan = self._parse_plan(plan_text)
-        if not plan["valid"]:
-            logger.warning("Thinker 计划未通过结构化校验（缺步骤段）: %s", plan)
-            self.finish_room(plan_dispatch, "plan_failed")
-            return {
-                "stage": "plan_failed",
-                "plan": {**plan_dispatch, **plan_poll},
-                "execute": {},
-                "plan_text": plan_text,
-                "plan_parsed": plan,
-                "result_text": "",
-                "wechat": None,
-                "relayed": False,
-                "error": "Thinker 计划未通过结构化校验（缺步骤段）",
-            }
 
-        # 2. Worker（registry.default_worker）严格按计划执行：只执行不决策
-        exec_request = (
-            "请严格按以下计划执行并交付结果。你是 Worker，只执行不决策——"
-            "不要重新规划，照步骤做；遇阻在结果里说明，不要擅自改方案。\n\n"
-            "【计划】\n" + plan_text + "\n\n【原始任务】\n" + request
+        # 结构化校验 + 三级降级（P0-2）。改动前这里是「全损」：计划缺个「步骤」标题就
+        # 直接 return，Worker 从不启动、用户零产出——哪怕 Thinker 那段分析完全可用。
+        # 不合格的原因九成是 markdown 标题没按模板写，不是内容没用，为此丢掉一整个
+        # Stand 的产出不划算。故改为：重申一次 → 仍不合格则降级 → 真没正文才算失败。
+        plan = self._parse_plan(plan_text)
+        degraded = False
+        degrade_reason = ""
+        if not plan["valid"]:
+            logger.warning("Thinker 计划未通过结构化校验（缺步骤段），重申模板再要一次")
+            retry_text = ""
+            try:
+                # 降级 1：同房间、同 Stand 重申格式（不新建房、不新起 Stand，只多一轮对话）
+                retry_msg_id = self.send_message(
+                    plan_dispatch["session_id"],
+                    plan_dispatch["stand_name"],
+                    PLAN_RETRY_TEMPLATE,
+                )
+                retry_poll = self.poll_result(
+                    room_id=plan_dispatch["room_id"],
+                    session_id=plan_dispatch["session_id"],
+                    stand_session_id=plan_dispatch.get("stand_session_id"),
+                    after_id=retry_msg_id,
+                    stand_name=plan_dispatch.get("stand_name", ""),
+                    timeout=poll_timeout,
+                    task_id=plan_dispatch.get("task_id", ""),
+                    role=plan_dispatch.get("role", ""),
+                    template=plan_dispatch.get("template_id", ""),
+                )
+                retry_text = retry_poll.get("result_text", "")
+            except Exception as e:
+                logger.warning("计划重申失败（降级继续，不中断整条链）: %s", e)
+            if retry_text:
+                retry_plan = self._parse_plan(retry_text)
+                if retry_plan["valid"]:
+                    logger.info("重申后计划合格，按正常两段式继续")
+                    plan_text, plan = retry_text, retry_plan
+                else:
+                    # 重申后的正文通常比首轮更贴模板，即便仍不合格也用它
+                    plan_text = retry_text
+            if not plan["valid"]:
+                # 降级 2：不合格但有正文 → 当「未结构化的分析」喂 Worker，别丢掉
+                degraded = True
+                degrade_reason = "计划未通过结构化校验（缺步骤段），已降级为「未结构化分析」交 Worker 自行判断"
+                logger.warning("%s", degrade_reason)
+                log_audit("plan_degraded", {
+                    "mode": "plan",
+                    "task_id": plan_dispatch.get("task_id", ""),
+                    "role": plan_dispatch.get("role", ""),
+                    "template": plan_dispatch.get("template_id", ""),
+                    "room_id": plan_dispatch.get("room_id"),
+                    "reason": degrade_reason,
+                })
+
+        # 2. Worker（registry.default_worker）按计划执行
+        if degraded:
+            exec_request = (
+                "下面是 Thinker 对本任务的分析，**未经结构化**（没有可直接照做的步骤段）。"
+                "请自行判断其中哪些可执行，据此完成任务并交付结果；"
+                "分析里没覆盖到的部分按你的判断补齐，并在结果里说明你补了什么。\n\n"
+                "【Thinker 分析】\n" + plan_text + "\n\n【原始任务】\n" + request
+            )
+        else:
+            exec_request = (
+                "请严格按以下计划执行并交付结果。你是 Worker，只执行不决策——"
+                "不要重新规划，照步骤做；遇阻在结果里说明，不要擅自改方案。\n\n"
+                "【计划】\n" + plan_text + "\n\n【原始任务】\n" + request
+            )
+            if plan.get("done_when"):
+                exec_request += "\n\n【完成判据】\n" + plan["done_when"]
+        # P0-3：Worker 复用 Thinker 的房间——一条链一个房间。看板上不再是两个孤立 ⚙ 房，
+        # 计划与执行在同一处可查，也为「Worker 向仍活着的 Thinker 追问」留出通道。
+        # 前提是 poll_result 已按 stand_name + after_id 认人认位（见其 docstring），
+        # 否则 Worker 的 poll 会秒回 Thinker 的计划当成执行结果。
+        exec_dispatch = self.dispatch_worker(
+            exec_request,
+            task_type=task_type,
+            room_id=plan_dispatch["room_id"],
+            mode="plan",
         )
-        if plan.get("done_when"):
-            exec_request += "\n\n【完成判据】\n" + plan["done_when"]
-        exec_dispatch = self.dispatch_worker(exec_request, task_type=task_type)
         exec_poll = self.poll_result(
             room_id=exec_dispatch["room_id"],
             session_id=exec_dispatch["session_id"],
@@ -2013,6 +2092,8 @@ class Caller:
 
         return {
             "stage": "execute",
+            "degraded": degraded,
+            "degrade_reason": degrade_reason,
             "plan": {**plan_dispatch, **plan_poll},
             "execute": {**exec_dispatch, **exec_poll},
             "plan_text": plan_text,

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""工作模式的离线测试：route_mode / resolve_mode / plan_and_execute 降级与共享房间。
+
+全程不碰 areco、不烧额度、不建真房间——REST 层 mock，消息层用真 SQLite 临时库。
+跑法：python3 caller/test_modes.py   （零依赖，不需要 pytest）
+
+为什么值得有：审计（2026-07-26）指出 route_mode / resolve_mode / _parse_plan /
+check_should_dispatch 这些纯函数**零覆盖**，而它们恰恰是选路的判据——选错路的代价是
+烧一个 Stand 段或用错档位的模型，比崩溃更贵，因为不会报错。
+"""
+import sys
+import pathlib
+import tempfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import caller as C  # noqa: E402
+
+_fails: list[str] = []
+
+
+def check(cond: bool, label: str) -> bool:
+    print(f"  {'✓' if cond else '✗'} {label}")
+    if not cond:
+        _fails.append(label)
+    return cond
+
+
+# ── route_mode：四格路由 ───────────────────────────────────────────
+def test_route_mode() -> None:
+    print("\n[route_mode] 四格路由")
+    cases = [
+        # (请求, 期望 mode, 期望 plan_only)
+        ("这两套架构选哪个，为什么", "think", True),
+        ("梳理一下这三种模式的优缺点", "think", False),
+        ("评估这三条迁移路线的可行性", "think", True),
+        ("先出个计划，别动手", "think", True),
+        ("把恩平法院的判决书下载下来", "worker", False),
+        ("总结一下这份文书", "worker", False),
+        ("调研 X 并输出一份报告存到桌面", "plan", False),
+        ("把这个下载下来然后设计一个归档方案", "plan", False),
+    ]
+    for req, exp_mode, exp_po in cases:
+        r = C.Caller.route_mode(req)
+        check(
+            r["mode"] == exp_mode and r["plan_only"] == exp_po,
+            f"{req[:22]:24s} → {r['mode']}{'+plan_only' if r['plan_only'] else ''}"
+            f"（期望 {exp_mode}{'+plan_only' if exp_po else ''}）",
+        )
+    # 回归闸：这三条是改动前被错配到 plan 的（白烧一个 Worker 段去执行一个只需结论的判断）
+    for req in ("这两套架构选哪个，为什么", "梳理一下这三种模式的优缺点", "评估这三条迁移路线的可行性"):
+        check(C.Caller.route_mode(req)["mode"] == "think", f"回归·不再错配到 plan：{req[:20]}")
+
+
+# ── resolve_mode：两代参数收敛 ─────────────────────────────────────
+def test_resolve_mode() -> None:
+    print("\n[resolve_mode] 显式 --mode 与旧 --role/--plan 的收敛")
+    accept = [
+        (dict(mode="think"), "think", False),
+        (dict(mode="think", plan_only=True), "think", True),
+        (dict(mode="plan"), "plan", False),
+        (dict(mode="fanout", subs=["a", "b"]), "fanout", False),
+        (dict(plan=True), "plan", False),
+        (dict(role="thinker"), "think", False),
+        (dict(plan_only=True), "think", True),
+        (dict(subs=["a", "b"]), "fanout", False),
+        (dict(), "worker", False),
+    ]
+    for kw, exp_mode, exp_po in accept:
+        r = C.resolve_mode(**kw)
+        check(r["mode"] == exp_mode and r["plan_only"] == exp_po, f"接受 {kw} → {r['mode']}")
+
+    reject = [
+        dict(mode="plan", plan_only=True),      # 两段式含执行 vs 只出计划
+        dict(mode="think", plan=True),
+        dict(mode="worker", role="thinker"),
+        dict(mode="fanout", subs=["a"]),        # fanout 至少 2 个子任务
+        dict(mode="不存在的模式"),
+        dict(plan=True, plan_only=True),
+        dict(role="worker", plan_only=True),    # 只执行 vs 只规划
+        dict(mode="worker", subs=["a", "b"]),
+    ]
+    for kw in reject:
+        try:
+            C.resolve_mode(**kw)
+            check(False, f"应拒绝但放行了：{kw}")
+        except C.ModeConflictError:
+            check(True, f"拒绝 {kw}")
+
+
+# ── _parse_plan：结构化校验 ────────────────────────────────────────
+def test_parse_plan() -> None:
+    print("\n[_parse_plan] 计划结构化校验")
+    c = C.Caller.__new__(C.Caller)  # 只用纯函数，不跑 __init__
+    good = ("目标：归档\n步骤：\n1. 建目录 | 工具：mkdir | 产物：/tmp/a\n"
+            "2. 移文件 | 工具：mv | 产物：无\n完成判据：目录存在")
+    check(c._parse_plan(good)["valid"], "六段齐全 → valid")
+    check(len(c._parse_plan(good)["steps"]) == 2, "抓到 2 个编号步骤")
+    check(not c._parse_plan("我觉得可以先建个目录然后挪文件")["valid"], "散文无步骤段 → invalid")
+    check(not c._parse_plan("")["valid"], "空文本 → invalid")
+
+
+# ── plan_and_execute：降级 + 共享房间（真 SQLite，mock REST）─────────
+class _FakeCaller(C.Caller):
+    """把 areco REST 全部 mock 掉，只保留真实的 SQLite 消息读写。"""
+
+    def __init__(self, db_path: pathlib.Path):
+        self.projects_db = db_path
+        self.base = "http://fake"
+        self.session = None
+        self.default_thinker_id = "thinker-tpl"
+        self.default_worker_id = "worker-tpl"
+        self.default_template_id = "worker-tpl"
+        self.task_map = {}
+        self.roles = {"thinker-tpl": "thinker", "worker-tpl": "worker"}
+        self._rooms: list[str] = []
+        self._stands: list[str] = []
+        self._script: dict[str, list[str]] = {}
+        self._thinker_replies: list[str] = []
+
+    def create_room(self, name):
+        rid = f"room{len(self._rooms)}"
+        self._rooms.append(rid)
+        return {"id": rid, "team": f"team-{rid}", "name": name}
+
+    def get_room(self, room_id):
+        return {"id": room_id, "team": f"team-{room_id}", "name": "reused", "archivedAt": None}
+
+    def add_stand(self, rid, tid):
+        name = f"Stand-{tid}-{len(self._stands)}"
+        self._stands.append(name)
+        self._script[name] = (list(self._thinker_replies) if tid == "thinker-tpl"
+                              else ["Worker 干完了，产物在 /tmp/out.txt"])
+        return {"name": name, "sessionId": f"ses-{name}"}
+
+    def archive_room(self, rid):
+        pass
+
+    def _session_status(self, sid):
+        return "running"
+
+    def relay_to_wechat(self, **kw):
+        return {"ok": True, "dry_run": True}
+
+    def send_message(self, team, to, body, **kw):
+        """发出去后立刻替目标 Stand 回一条——模拟 areco relay + Stand 应答。"""
+        mid = super().send_message(team, to, body, **kw)
+        queued = self._script.get(to) or []
+        if queued:
+            super().send_message(team, "all", queued.pop(0), from_=to)
+        return mid
+
+
+GOOD_PLAN = ("目标：归档\n步骤：\n1. 建目录 | 工具：mkdir | 产物：/tmp/a\n"
+             "2. 移文件 | 工具：mv | 产物：无\n完成判据：目录存在")
+BAD_PLAN = "我觉得可以先建个目录，然后把文件挪进去，大概就这样。"
+
+
+def _run_plan(thinker_replies: list[str]) -> dict:
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    c = _FakeCaller(tmp / "projects.db")
+    c._thinker_replies = thinker_replies
+    return c.plan_and_execute("设计一个归档方案并落盘", poll_timeout=3, dry_run=True)
+
+
+def test_plan_and_execute() -> None:
+    print("\n[plan_and_execute] P0-2 三级降级 + P0-3 共享房间")
+    _sleep = C.time.sleep
+    C.time.sleep = lambda *a, **k: None  # 不真等 TUI boot / tail 合并
+    try:
+        r = _run_plan([GOOD_PLAN])
+        rooms = {d.get("room_id") for d in (r["plan"], r["execute"]) if d.get("room_id")}
+        check(r["stage"] == "execute" and not r["degraded"], "计划合格 → 正常两段式")
+        check(len(rooms) == 1, f"P0-3：计划段与执行段共享一个房间（实得 {len(rooms)} 个）")
+        check("Worker" in r["result_text"], "P0-3 前置：Worker 的结果不是 Thinker 的计划（认人认位生效）")
+
+        r = _run_plan([BAD_PLAN, GOOD_PLAN])
+        check(r["stage"] == "execute" and not r["degraded"], "降级 1：重申后合格，不算降级")
+
+        r = _run_plan([BAD_PLAN, BAD_PLAN])
+        check(r["stage"] == "execute" and r["degraded"], "降级 2：两轮不合格 → 交 Worker 而非全损")
+        check(bool(r["result_text"]), "降级 2：用户拿到了产出（改动前此处为零产出）")
+
+        r = _run_plan([])
+        check(r["stage"] == "plan_failed", "降级 3：Thinker 零回复 → 真 plan_failed")
+    finally:
+        C.time.sleep = _sleep
+
+
+def main() -> int:
+    for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute):
+        t()
+    print()
+    if _fails:
+        print(f"❌ {len(_fails)} 项失败：")
+        for f in _fails:
+            print(f"   - {f}")
+        return 1
+    print("✅ 全部通过")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
