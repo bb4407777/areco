@@ -11,8 +11,10 @@ Hermes 作为 Caller，接收 Client（微信）的请求，
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -37,19 +39,35 @@ WECHAT_TARGET = os.environ.get(
 )
 HOME_DIR = os.environ.get("STANDCODE_HOME", "/Users/gao")
 
-# 任务类型 → 模板 ID 映射（从 registry 加载，此处为兜底默认值）
-# 所有 worker 类任务（search/coding/writing/analysis/general）默认走 Worker = reasonix
-#   （= Reasonix QClaw DeepSeek-v4-flash，与 registry default_worker 一致）
-# 备选 Worker（需 --template 显式指定）：claude(GLM-5.2) / workbuddy-deepseek / codex
-# Thinker 默认 claude（default_thinker_id，走 --role thinker 或 dispatch_thinker）
-DEFAULT_TEMPLATE_ID = "claude"
-DEFAULT_TASK_MAP = {
-    "search": "reasonix",
-    "coding": "reasonix",
-    "writing": "reasonix",
-    "analysis": "reasonix",
-    "general": "reasonix",
-}
+# ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
+# 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
+# STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
+AUDIT_LOG_PATH = os.environ.get("STANDCODE_AUDIT_LOG", "/tmp/standcode-audit.jsonl")
+
+# ── 会话可靠性 / 工作区隔离（docs/architecture-optimization.md 建议 4）─────────
+# 心跳目录：Caller 只「读」这里的 {session_id}.hb；「写」应由 Stand 宿主进程
+# （areco session / wrapper 脚本）负责——只有宿主活着才等于 Stand 活着。
+# Caller 进程自写的心跳只证明 Caller 跟踪循环在跑，对「Stand 是否掉线」是假信号
+# （详见 _HeartbeatWriter 与 read_heartbeat 的注释）。
+HEARTBEAT_DIR = Path(os.environ.get("STANDCODE_HEARTBEAT_DIR", "/tmp/standcode-heartbeat"))
+WORKSPACE_DIR = Path(os.environ.get("STANDCODE_WORKSPACE_DIR", "/tmp/standcode-workspaces"))
+HEARTBEAT_STALE_SEC = float(os.environ.get("STANDCODE_HEARTBEAT_STALE", "15"))
+HEARTBEAT_TICK_SEC = float(os.environ.get("STANDCODE_HEARTBEAT_TICK", "5"))
+# 自动重派发默认关闭：会外部 spawn 新房间 + 新 Stand 会话（消耗额度、产生持久状态、
+# 不可逆）。须高律师显式开 max_retries>0 才生效，对齐「对外不可逆动作事前确认」。
+DEFAULT_MAX_REDISPATCH = 0
+
+# ── 默认模板：完全由 stand/registry.json 驱动 ──────────────────────
+# 历史上这里硬编码过 DEFAULT_TEMPLATE_ID="claude" 与 DEFAULT_TASK_MAP（search/coding/
+# writing/analysis/general → reasonix）。那套 task_type 与模板 id 与 registry 不一致：
+# registry 用 think/plan/execute/work/fast，模板用 stand-thinker-*/stand-worker-*，且
+# reasonix 根本不在 registry 模板表里（孤儿）。已改为默认值全部由 Caller._load_registry()
+# 从 registry.json 读取，此处不再保留任何业务硬编码默认。
+# registry.json 字段映射：
+#   default_thinker     → default_thinker_id（Thinker 角色）
+#   default_worker      → default_worker_id（Worker 角色 + 全局兜底 default_template_id）
+#   task_type_defaults  → task_map（任务类型 → 模板 id）
+# registry 文件缺失/解析失败时的紧急兜底见 _load_registry() 顶部局部常量。
 
 # 来自 Caller 自身的身份标识
 CALLER_NAME = "Hermes"
@@ -62,7 +80,7 @@ NON_STAND_SENDERS = {CALLER_NAME, "高律师", "all", "system"}
 
 # ── Thinker/Worker 严格分工：结构化 plan 模板 + 门控 ──────────────
 # plan 模板：强制 Thinker 按「目标/上下文/步骤/约束/判据/落点」结构化输出，
-# Worker（默认 Reasonix）拿到即可执行、不必再「理解意图」。三属性：结构化/自包含/有判据。
+# Worker（registry.default_worker）拿到即可执行、不必再「理解意图」。三属性：结构化/自包含/有判据。
 PLAN_TEMPLATE = (
     "你是 Thinker，只做规划、绝不执行（不写代码、不下载、不搜索、不产出最终文件）。\n"
     "请为以下任务产出【可执行计划】，严格按下方格式输出，不要输出计划以外的内容。\n\n"
@@ -95,6 +113,366 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── Gatekeeper：派发前置核查（docs/workflow-hardening.md 方案 B）────────────
+# Hermes 在微信平台只有 terminal 一个工具——它既是合法派发通道（areco-msg / caller.py），
+# 也是非法直干通道（git / grep / curl / python3 ...）。本 Gatekeeper 让 Caller 在动手前
+# 先把「任务/命令」过一遍分类，对齐 SKILL.md「禁止直干清单」与「允许直干清单」。
+#
+# 判定策略（Advisory 软约束，非硬拦；目的是让 Caller「过一遍脑子」）：
+#   0) 高危动作优先（HIGH_DANGER_SIGNALS）——即便命令以白名单工具开头，命中 git commit /
+#      rm -rf / bootout 等也强制判 production，避免 `caller.py status && git commit` 被放行。
+#   1) 命令以白名单工具调用开头（caller.py / areco-msg / cc-send / pgrep / ps aux /
+#      launchctl list / hermes-switch-model / echo '收到 / cat .qclaw-hermes）
+#      → operator，允许直干（哪怕参数里提到改代码——因为正经派发本身就是对的）。
+#   2) 命中生产类信号（PRODUCTION_SIGNALS）→ production，必须派发。
+#   3) 灰区 → 保守派发（对齐 SKILL.md「没有『这个简单我自己做』」）。
+
+# 生产类信号：命中即视为 Worker 执行类，Caller 不得直干（必须 dispatch_worker）
+PRODUCTION_SIGNALS = (
+    # 文件 / 代码变更
+    "git commit", "git add", "git push", "git checkout", "git merge", "git rebase",
+    "vim ", "nvim ", "code ", "subl ",
+    # 代码搜索
+    "grep ", "rg ", "find ", "ag ", "ack ",
+    # 外部请求
+    "curl ", "wget ", "http://", "https://",
+    # 代码执行 / 构建（caller.py / areco-msg 例外：以白名单工具开头时不触发）
+    "python3", "python ", "pip ", "npm ", "yarn ", "node ",
+    # 文件写入
+    "sed -i", "echo >", "tee ", "cp ", "mv ", "rm ", "mkdir ", "ln -s", "touch ",
+    # 系统配置 / 浏览器操作
+    "brew ", "defaults write", "opencli", "open ",
+    # 中文语义信号（任务描述里出现也判为生产类）
+    "改代码", "写代码", "改文件", "搜索代码", "查找文件", "调研", "下载",
+    "格式转换", "生成", "总结", "汇总", "分析", "对比", "实现", "重构",
+    "调试", "修复", "部署",
+)
+
+# 高危动作：即使命令以白名单工具开头，命中下列任一也强制判 production
+HIGH_DANGER_SIGNALS = (
+    "git commit", "git push", "git merge", "git rebase", "git reset",
+    "rm -rf", "sudo rm", " > /", "dd of=", "mkfs",
+    "launchctl bootout", "launchctl load", "launchctl unload",
+    "chmod -r", "chown -r",
+)
+
+# BLOCKED 红线：不可逆灾难性操作——既不直干、也不派发，dispatch 命中即硬拒绝 + 记审计。
+# 与 HIGH_DANGER_SIGNALS（→production，必须派 Worker）刻意区分：BLOCKED 是更高一级的
+# 「永远不该自动执行」清单。check_should_dispatch 命中即返回 category="blocked"；
+# Gatekeeper 函数本身仍 advisory（只判定不拦），硬拒绝发生在 dispatch()。
+#
+# 用正则而非朴素子串：`rm -rf /` 必须精确到「根级抹除」，不能误伤 `rm -rf /tmp/junk`
+# （后者仍走 HIGH_DANGER → production 派发，行为不变）。故 rm/chmod 模式带边界
+# （其后只允许 空白/行尾/*），fork bomb 匹配常见变体。mkfs / dd of= 故意不收入此列——
+# 它们已在 HIGH_DANGER_SIGNALS 里走 production，保持原行为不被打破。
+_BLOCKED_PATTERNS = (
+    re.compile(r"rm\s+-rf\s+/(\s|$)"),          # rm -rf /    抹除根
+    re.compile(r"rm\s+-rf\s+/\*(\s|$)"),        # rm -rf /*   抹除根下所有
+    re.compile(r"rm\s+-rf\s+~(\s|$)"),          # rm -rf ~    抹除家目录
+    re.compile(r"rm\s+-rf\s+~\*(\s|$)"),        # rm -rf ~*   抹除家目录所有
+    re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),  # fork bomb :(){ :|:& };:
+    re.compile(r"chmod\s+-r\s+000\s+/(\s|$)"),  # 根级权限锁死（输入已 lower，故 -r）
+    re.compile(r"chmod\s+-r\s+000\s+~(\s|$)"),  # 家目录权限锁死
+)
+
+# 白名单工具：命令以此开头 → 视为 Caller 正经派发 / 运维（Caller 自身职责）
+_OPERATOR_LEADING_TOOLS = (
+    "caller.py", "areco-msg", "cc-send", "pgrep", "hermes-switch-model",
+)
+_OPERATOR_INTERPRETERS = ("python3", "python", "node", "bash", "sh", "zsh")
+
+
+def _basename(token: str) -> str:
+    """取 token 路径末段并去 ./ 前缀（用于识别命令动词）"""
+    t = token.rsplit("/", 1)[-1]
+    while t.startswith("./"):
+        t = t[2:]
+    return t
+
+
+def _is_operator_invocation(text: str) -> tuple[bool, str]:
+    """判断 text 是否以白名单工具调用开头（Caller 正经派发 / 运维）。
+
+    返回 (is_operator, matched_signal)。处理前导 env / sudo / 变量赋值；
+    支持 `python3 caller.py ...` / `node .../areco-msg.mjs ...` 这类解释器前缀。
+    关键：只认「命令动词」是白名单工具，避免把「帮我把 caller.py 重构一下」
+    （caller.py 只是句子里的被提及对象）误判为白名单。
+    """
+    s = (text or "").strip()
+    # 去前导 env / sudo / VAR=val
+    while True:
+        m = re.match(r"^(?:env(?:\s+-\w+)*\s+|sudo\s+|[A-Z_]+=\S+\s+)", s)
+        if not m:
+            break
+        s = s[m.end():]
+    if not s:
+        return (False, "")
+    low = s.lower()
+    # 带条件的白名单
+    if low.startswith("echo ") and "收到" in s:
+        return (True, "echo '收到")
+    if low.startswith("cat ") and ".qclaw-hermes" in low:
+        return (True, "cat .qclaw-hermes")
+    if low.startswith("launchctl list"):
+        return (True, "launchctl list")
+    if low.startswith("ps aux"):
+        return (True, "ps aux")
+    # 通用：首个 token（或解释器后第二个 token）是否白名单工具
+    tokens = s.split()
+    if not tokens:
+        return (False, "")
+    first = _basename(tokens[0])
+    for tool in _OPERATOR_LEADING_TOOLS:
+        if first == tool or first.startswith(tool):
+            return (True, first)
+    if first.lower() in _OPERATOR_INTERPRETERS and len(tokens) > 1:
+        second = _basename(tokens[1])
+        for tool in _OPERATOR_LEADING_TOOLS:
+            if second == tool or second.startswith(tool):
+                return (True, second)
+    return (False, "")
+
+
+class GatekeeperBlockedError(RuntimeError):
+    """dispatch 因 Gatekeeper BLOCKED 分级拒绝执行时抛出。
+
+    check_should_dispatch 本身是 advisory（只判定、不拦截）；dispatch 对命中 BLOCKED
+    的任务硬拒绝——抛本异常并记审计。调用方（_bg_worker 的 try/except、_cmd_run 前台
+    专捕）捕获后优雅降级，不破坏既有正常派发流程。
+    """
+
+
+def log_audit(event: str, detail: dict | None = None) -> None:
+    """审计日志：每行一条 JSON 追加写入 AUDIT_LOG_PATH（默认 /tmp/standcode-audit.jsonl）。
+
+    固定字段：timestamp / event / task_id / role / template / blocked；
+    detail 中的其余字段（reason / room_id / verdict 等）透传追加，便于追溯。
+    写入失败只 warning、永不抛——审计不得阻塞主流程。
+
+    参数:
+        event:  事件名（如 "dispatch" / "dispatch_blocked" /
+                "poll_completed" / "poll_lost" / "poll_timeout"）
+        detail: 审计上下文；至少应含 task_id / role / template / blocked，
+                其余键原样并入记录。
+    """
+    d = detail or {}
+    record = {
+        "timestamp": _now_iso(),
+        "event": event,
+        "task_id": d.get("task_id", ""),
+        "role": d.get("role", ""),
+        "template": d.get("template", ""),
+        "blocked": bool(d.get("blocked", False)),
+    }
+    # 透传其余 detail 字段（reason / category / room_id / elapsed …），不覆盖固定字段
+    for k, v in d.items():
+        if k not in record:
+            record[k] = v
+    try:
+        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("审计日志写入失败 event=%s: %s", event, e)
+
+
+def check_should_dispatch(task_description: str) -> dict:
+    """Gatekeeper：判断一个任务 / 命令是否必须派发给 Worker（而非 Caller 直干）。
+
+    对齐 SKILL.md「禁止直干清单」+ docs/workflow-hardening.md 方案 B。
+    Caller（Hermes）在用 terminal 做任何非派发操作前，应先调用本函数核查：
+
+        should_dispatch=True  → 必须 dispatch_worker，不得直干；
+        should_dispatch=False → Caller 职责内（派发 / 状态 / 回执），允许直干。
+
+    判定顺序：
+        0. BLOCKED 红线（rm -rf / / mkfs / dd of=/dev/ …）→ blocked，拒绝执行
+        1. 高危动作（git commit / rm -rf / bootout…）→ production（即便以白名单开头）
+        2. 以白名单工具调用开头                    → operator，允许直干
+        3. 命中生产类信号                         → production，必须派发
+        4. 其余灰区                              → 保守派发
+
+    BLOCKED 分级本身是 advisory（只判定、不拦截）——本函数无副作用、不抛异常；
+    硬拒绝发生在 dispatch()：production 类任务（BLOCKED 隐含 production 级危险）
+    命中即 raise GatekeeperBlockedError + 记审计。
+
+    参数:
+        task_description: 任务描述或即将执行的 terminal 命令（自然语言或命令行均可）
+
+    返回:
+        {
+            "should_dispatch": bool,   # blocked 时为 False（既不直干也不派发）
+            "category": "blocked" | "operator" | "production" | "gray",
+            "blocked": bool,           # 仅 blocked 分级为 True，其余恒 False
+            "reason": str,             # 命中依据 / 判定理由
+            "suggested_action": str,
+        }
+    """
+    text = (task_description or "").strip()
+    if not text:
+        return {
+            "should_dispatch": True,
+            "category": "gray",
+            "blocked": False,
+            "reason": "空任务描述；按保守原则默认派发",
+            "suggested_action": "dispatch_worker(明确任务后再派)",
+        }
+    low = text.lower()
+
+    # 0) BLOCKED 红线优先：不可逆灾难性操作 → 既不直干也不派发，dispatch 硬拒
+    for pat in _BLOCKED_PATTERNS:
+        if pat.search(low):
+            return {
+                "should_dispatch": False,
+                "category": "blocked",
+                "blocked": True,
+                "reason": f"命中 BLOCKED 红线『{pat.pattern}』——不可逆灾难性操作，拒绝执行",
+                "suggested_action": "拒绝（Gatekeeper advisory：仅判定；dispatch 会硬拒并记审计）",
+            }
+
+    # 1) 高危动作：即使以白名单工具开头也强制派发
+    for sig in HIGH_DANGER_SIGNALS:
+        if sig in low:
+            return {
+                "should_dispatch": True,
+                "category": "production",
+                "blocked": False,
+                "reason": f"命中高危动作『{sig.strip()}』——必须派 Worker，不得直干",
+                "suggested_action": "dispatch_worker(task_type=按内容选, request='...')",
+            }
+
+    # 2) 以白名单工具调用开头 → operator，允许直干
+    is_op, op_sig = _is_operator_invocation(text)
+    if is_op:
+        return {
+            "should_dispatch": False,
+            "category": "operator",
+            "blocked": False,
+            "reason": f"命令以白名单工具『{op_sig}』调用开头——Caller 职责内，允许直干",
+            "suggested_action": "直接执行（属于 Caller 自身职责）",
+        }
+
+    # 3) 命中生产类信号 → 必须派发
+    for sig in PRODUCTION_SIGNALS:
+        if sig.lower() in low:
+            return {
+                "should_dispatch": True,
+                "category": "production",
+                "blocked": False,
+                "reason": f"命中禁止直干清单（生产类）『{sig.strip()}』——必须派 Worker",
+                "suggested_action": "dispatch_worker(task_type=按内容选, request='...')",
+            }
+
+    # 4) 灰区：保守派发（避免直干）
+    return {
+        "should_dispatch": True,
+        "category": "gray",
+        "blocked": False,
+        "reason": "未命中白名单也未命中明确生产信号；按保守原则派发，避免直干",
+        "suggested_action": "dispatch_worker（确属纯内部运维且不可派时，Caller 可直干但需先自问 3 秒）",
+    }
+
+
+# ── 心跳工具（建议 4·会话可靠性）──────────────────────────────────
+# 心跳键统一用 stand_session_id：Stand 宿主进程知道自己的 session id，可据此写文件；
+# task_id 是 Caller 内部生成、Stand 侧无从得知，作心跳键会让「Stand 写、Caller 读」
+# 永远对不上。任务原文写 {task_id}.hb，这里改成 {session_id}.hb 才能闭环。
+def heartbeat_path(session_id: str) -> Path:
+    """Stand 心跳文件路径（键 = stand_session_id）"""
+    return HEARTBEAT_DIR / f"{session_id}.hb"
+
+
+def read_heartbeat(session_id: str) -> Optional[float]:
+    """读心跳文件 mtime（epoch 秒）。文件不存在/不可读返回 None。
+
+    Caller 只读不写：心跳须由 Stand 宿主（areco session / wrapper）写入才反映 Stand
+    真实存活。Caller 进程自写的心跳只反映 Caller 自己，是假信号（见 _HeartbeatWriter）。
+    """
+    if not session_id:
+        return None
+    try:
+        return heartbeat_path(session_id).stat().st_mtime
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def heartbeat_stale(
+    session_id: str, stale_sec: float = HEARTBEAT_STALE_SEC
+) -> Optional[bool]:
+    """心跳是否过期（距今 > stale_sec）。
+
+    返回 None = 无心跳文件（Stand 端尚未实现心跳写入，无法据此判定）。
+    返回 True = 心跳过期，Stand 宿主大概率已失联。
+    """
+    mtime = read_heartbeat(session_id)
+    if mtime is None:
+        return None
+    return (time.time() - mtime) > stale_sec
+
+
+class _HeartbeatWriter:
+    """用 threading.Timer 周期更新心跳文件的独立线程（每 tick_sec 一次）。
+
+    ⚠️ 适用边界（重要）：本类写出的心跳只证明「这个 Caller 跟踪循环还活着」，
+    不证明 Stand（areco 内独立 pty 子进程）活着。要检测 Stand 掉线，心跳须由
+    Stand 宿主写入、Caller 只读（read_heartbeat）。因此 dispatch 默认【不】启动
+    本类；仅当需要 Caller 侧存活标记（如 bg_worker 崩溃后被外部巡检发现）时显式调用。
+
+    用法：
+        hw = _HeartbeatWriter(session_id).start()
+        try: ...
+        finally: hw.stop()
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        tick_sec: float = HEARTBEAT_TICK_SEC,
+        stale_sec: float = HEARTBEAT_STALE_SEC,
+    ):
+        self.session_id = session_id
+        self.tick_sec = tick_sec
+        self.stale_sec = stale_sec
+        self.path = heartbeat_path(session_id)
+        self._timer: Optional[threading.Timer] = None
+        self._stopped = True
+        self._lock = threading.Lock()
+
+    def _tick(self) -> None:
+        """Timer 回调：touch 心跳文件并重新 arm（threading.Timer 单次触发，靠重 arm 循环）"""
+        try:
+            HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+            # 写当前时间戳内容 + touch mtime（内容便于人读，mtime 供判定）
+            self.path.write_text(f"{time.time():.3f}\n")
+        except OSError as e:
+            logger.warning("心跳写入失败 %s: %s", self.path, e)
+        with self._lock:
+            if self._stopped:
+                return
+            self._timer = threading.Timer(self.tick_sec, self._tick)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def start(self) -> "_HeartbeatWriter":
+        with self._lock:
+            if not self._stopped:
+                return self
+            self._stopped = False
+        self._tick()  # 立即写一次，再由 Timer 续命
+        return self
+
+    def stop(self, remove_file: bool = False) -> None:
+        with self._lock:
+            self._stopped = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        if remove_file:
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 class Caller:
     """StandCode Caller — 调度 Stand 执行任务"""
 
@@ -110,12 +488,12 @@ class Caller:
         self._http = requests.Session()
         self._http.headers.update({"Content-Type": "application/json"})
 
-        # 加载注册表
-        self.task_map: dict[str, str] = dict(DEFAULT_TASK_MAP)
+        # 加载注册表（默认值全部由 registry.json 驱动，此处不预填任何业务默认）
+        self.task_map: dict[str, str] = {}
         self.registry: dict = {}
-        self.default_template_id: str = DEFAULT_TEMPLATE_ID
-        self.default_thinker_id: str = DEFAULT_TEMPLATE_ID
-        self.default_worker_id: str = DEFAULT_TEMPLATE_ID
+        self.default_template_id: str = ""
+        self.default_thinker_id: str = ""
+        self.default_worker_id: str = ""
         self.template_names: dict[str, str] = {}
         self.roles: dict[str, str] = {}  # template_id → "thinker" | "worker"
         self._load_registry()
@@ -123,58 +501,76 @@ class Caller:
     # ── 注册表加载 ──────────────────────────────────────────────
 
     def _load_registry(self) -> None:
-        """从 registry.json 加载模板映射和元信息
+        """从 registry.json 加载默认值与模板元信息（默认值完全由 registry 驱动）
 
-        兼容两种 registry 格式：
-          - 旧：{"task_type_defaults": {<type>: {"template_id": ...}}}
-          - 新：{"default_template": "claude", "templates": [{"id","name","task_types"}]}
+        字段映射：
+          default_thinker      → default_thinker_id（--role thinker / dispatch_thinker）
+          default_worker       → default_worker_id（--role worker / dispatch_worker）
+                                 同时作为全局兜底 default_template_id
+          task_type_defaults   → task_map（任务类型 → 模板 id）
+          templates            → template_names / roles（仅元信息）
 
-        新格式下 default_template 作为兜底默认；templates 的 task_types 仅作元信息存档，
-        不反向覆盖 task_map —— 以保留 DEFAULT_TASK_MAP 里的专家分派
-        （search→kimi / coding→codex / analysis→reasonix）。
+        正常路径取值 100% 来自 registry.json，不掺任何模块级业务硬编码。
+        registry 缺某字段时回退到「同文件内更宽的默认」(default_template→default_worker)
+        或紧急兜底常量；registry 文件完全不可读时使用紧急兜底。
+
+        兼容两种 task_type_defaults 写法：值可为字符串（模板 id）或
+        {"template_id": "..."}（旧嵌套格式）。
         """
+        # registry 文件完全不可用时的紧急兜底（与 registry.json 当前取值一致；
+        # 仅在文件缺失/解析失败时启用，正常路径不参与）
+        _FALLBACK_THINKER = "stand-thinker-workbuddy"
+        _FALLBACK_WORKER = "claude"
+
+        def _apply_fallback(reason: str) -> None:
+            logger.warning(
+                "%s；改用紧急兜底 thinker=%s worker=%s",
+                reason, _FALLBACK_THINKER, _FALLBACK_WORKER,
+            )
+            self.default_thinker_id = _FALLBACK_THINKER
+            self.default_worker_id = _FALLBACK_WORKER
+            self.default_template_id = _FALLBACK_WORKER
+            self.task_map = {}
+
         if not self.registry_path.exists():
-            logger.warning("注册表不存在 %s，使用默认映射", self.registry_path)
+            _apply_fallback(f"注册表不存在 {self.registry_path}")
             return
         try:
             data = json.loads(self.registry_path.read_text())
-            self.registry = data
-            # 新格式：default_template
-            if data.get("default_template"):
-                self.default_template_id = data["default_template"]
-                self.task_map.setdefault("general", self.default_template_id)
-            # 角色默认（Caller/Thinker/Worker 层级）
-            self.default_thinker_id = (
-                data.get("default_thinker") or self.default_template_id
-            )
-            self.default_worker_id = (
-                data.get("default_worker") or self.default_template_id
-            )
-            # 旧格式：task_type_defaults
-            for task_type, cfg in data.get("task_type_defaults", {}).items():
-                self.task_map[task_type] = (
-                    cfg["template_id"] if isinstance(cfg, dict) else cfg
-                )
-            # templates 元信息（id→name / id→role）
-            self.template_names = {}
-            self.roles = {}
-            for t in data.get("templates", []):
-                if not isinstance(t, dict) or not t.get("id"):
-                    continue
-                self.template_names[t["id"]] = t.get("name", t["id"])
-                role = t.get("role", "worker")
-                if role in ("thinker", "worker"):
-                    self.roles[t["id"]] = role
-            logger.info(
-                "已加载注册表 %s（默认=%s thinker=%s worker=%s，%d 种任务类型映射）",
-                self.registry_path,
-                self.default_template_id,
-                self.default_thinker_id,
-                self.default_worker_id,
-                len(self.task_map),
-            )
         except Exception as e:
-            logger.warning("加载注册表失败: %s，使用默认映射", e)
+            _apply_fallback(f"加载注册表失败: {e}")
+            return
+
+        self.registry = data
+        # 角色默认 + 全局兜底：完全由 registry 驱动
+        self.default_thinker_id = data.get("default_thinker") or _FALLBACK_THINKER
+        self.default_worker_id = data.get("default_worker") or _FALLBACK_WORKER
+        # registry 无独立 default_template 字段时，全局兜底 = default_worker
+        self.default_template_id = data.get("default_template") or self.default_worker_id
+        # task_map：完全由 registry 的 task_type_defaults 构建（不再预填业务默认）
+        self.task_map = {}
+        for task_type, cfg in data.get("task_type_defaults", {}).items():
+            self.task_map[task_type] = (
+                cfg["template_id"] if isinstance(cfg, dict) else cfg
+            )
+        # templates 元信息（id→name / id→role）
+        self.template_names = {}
+        self.roles = {}
+        for t in data.get("templates", []):
+            if not isinstance(t, dict) or not t.get("id"):
+                continue
+            self.template_names[t["id"]] = t.get("name", t["id"])
+            role = t.get("role", "worker")
+            if role in ("thinker", "worker"):
+                self.roles[t["id"]] = role
+        logger.info(
+            "已加载注册表 %s（默认=%s thinker=%s worker=%s，%d 种任务类型映射）",
+            self.registry_path,
+            self.default_template_id,
+            self.default_thinker_id,
+            self.default_worker_id,
+            len(self.task_map),
+        )
 
     # ── REST API 辅助 ───────────────────────────────────────────
 
@@ -348,6 +744,8 @@ class Caller:
         room_id: str | None = None,
         template_id: str | None = None,
         role: str | None = None,
+        isolated: bool = False,
+        workspace_repo: str | None = None,
     ) -> dict:
         """向 Stand 派发任务
 
@@ -357,9 +755,18 @@ class Caller:
             room_id:    指定房间（None=新建）
             template_id: 指定模板（None=自动选择）
             role:       角色分派：'thinker' | 'worker' | None
-                        - 'thinker' → default_thinker（默认 claude / GLM-5.2）
-                        - 'worker'  → default_worker （默认 reasonix / DeepSeek-v4-flash）
-                        优先级：template_id > task_type 映射 > role 默认 > default_template
+                        - 'thinker' → registry.default_thinker（见 registry.json）
+                        - 'worker'  → registry.default_worker （见 registry.json）
+                        优先级：template_id > role 默认 > task_type 映射 > default_template
+            isolated:   工作区隔离（建议 4b）。True 时为本任务准备独立工作目录
+                        （/tmp/standcode-workspaces/{task_id}/）；workspace_repo 给定时
+                        走真正的 git worktree，否则只 mkdir 空目录。
+                        ⚠️ 当前仅「准备目录 + 回填 workspace_cwd 到结果」，并不真正
+                        把 Stand 的 cwd 改过去——areco addMember 只收 {templateId}
+                        （rooms.ts:113），cwd 来自模板（固定 /Users/gao），Caller 无权
+                        覆盖。需 areco 支持 per-session cwd 后才能落地（见 prepare_workspace）。
+                        默认 False，行为与改动前完全一致。
+            workspace_repo: isolated=True 时基于哪个 git 仓库建 worktree；None=只建空目录。
 
         返回:
             {
@@ -373,11 +780,33 @@ class Caller:
                 "task_type": str,    # 实际任务类型（None→'general'）
                 "template_id": str,  # 实际模板 ID
                 "role": str,         # 'thinker' | 'worker'
+                "workspace": str | None,     # 隔离工作目录（isolated=True 才有）
+                "workspace_cwd": bool,       # Stand cwd 是否已真正切到 workspace（当前恒 False）
             }
         """
+        # 0. Gatekeeper 硬闸：命中 BLOCKED 红线（不可逆灾难性操作）→ 拒绝执行 + 记审计。
+        #    check_should_dispatch 本身 advisory（只判定不拦），硬拒绝发生在此处；
+        #    BLOCKED 是最高分级（隐含 production 级危险），故 category=="blocked" 即触发。
+        #    先于一切副作用（不建房间、不建会话、不耗额度）。
+        verdict = check_should_dispatch(request or "")
+        if verdict.get("category") == "blocked":
+            blocked_task_id = f"task-{uuid.uuid4().hex[:12]}"
+            log_audit("dispatch_blocked", {
+                "task_id": blocked_task_id,
+                "role": role or "",
+                "template": "",
+                "blocked": True,
+                "category": "blocked",
+                "reason": verdict.get("reason", ""),
+                "request_preview": (request or "")[:200],
+            })
+            raise GatekeeperBlockedError(
+                f"Gatekeeper 拒绝派发（BLOCKED）：{verdict.get('reason', '')}"
+            )
+
         # 1. 确定模板 ID（template_id > 显式 role > task_type 映射 > 全局默认）
         #    role 优先于 task_type：dispatch_thinker/worker 的角色意图必须胜过 task_type
-        #    的通用映射——否则 task_type="general"→reasonix 会把 Thinker 顶成 Worker。
+        #    的通用映射——否则 task_type="execute"→claude(worker) 会把 Thinker 顶成 Worker。
         if template_id:
             tid = template_id
         elif role == "thinker":
@@ -387,10 +816,16 @@ class Caller:
         elif task_type and self.task_map.get(task_type):
             tid = self.task_map[task_type]
         else:
-            tid = self.default_template_id or DEFAULT_TEMPLATE_ID
+            tid = self.default_template_id
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         effective_task_type = task_type or "general"
         effective_role = role or self.roles.get(tid, "worker")
+
+        # 1.5 工作区隔离（默认关）。仅准备目录 + 回填结果；cwd 落地待 areco 支持。
+        workspace_info = (
+            self.prepare_workspace(task_id, source_repo=workspace_repo)
+            if isolated else None
+        )
 
         # 2. 创建或使用已有房间
         if room_id:
@@ -425,7 +860,18 @@ class Caller:
             "task_type": effective_task_type,
             "template_id": tid,
             "role": effective_role,
+            "workspace": (workspace_info or {}).get("path"),
+            "workspace_cwd": bool((workspace_info or {}).get("applied", False)),
         }
+        log_audit("dispatch", {
+            "task_id": task_id,
+            "role": effective_role,
+            "template": tid,
+            "blocked": False,
+            "task_type": effective_task_type,
+            "room_id": rid,
+            "stand_name": stand_name,
+        })
         logger.info(
             "派发任务: session=%s room=%s stand=%s role=%s task_type=%s tid=%s",
             team, rid, stand_name, effective_role, effective_task_type, tid,
@@ -442,11 +888,11 @@ class Caller:
         template_id: str | None = None,
         plan_only: bool = False,
     ) -> dict:
-        """派给 Thinker（默认 GLM-5.2）：规划、分析、判断、路由
+        """派给 Thinker（registry.default_thinker）：规划、分析、判断、路由
 
         plan_only=True 时强制「只规划不执行」：把 request 包进 PLAN_TEMPLATE，
         要求 Thinker 按「目标/上下文/步骤/约束/判据/落点」结构化产出可执行计划，
-        供 Worker（默认 Reasonix）直接执行。用于 plan_and_execute 的 Thinker 阶段。
+        供 Worker（registry.default_worker）直接执行。用于 plan_and_execute 的 Thinker 阶段。
         """
         if plan_only:
             request = PLAN_TEMPLATE.format(request=request)
@@ -465,7 +911,7 @@ class Caller:
         room_id: str | None = None,
         template_id: str | None = None,
     ) -> dict:
-        """派给 Worker（默认 Reasonix / DeepSeek-v4-flash）：代码、搜索、文书、下载、总结"""
+        """派给 Worker（registry.default_worker）：代码、搜索、文书、下载、总结"""
         return self.dispatch(
             request,
             task_type=task_type,
@@ -482,16 +928,22 @@ class Caller:
         poll_interval: float = 1.0,
         stand_session_id: str | None = None,
         after_id: int = 0,
+        *,
+        task_id: str = "",
+        role: str = "",
+        template: str = "",
     ) -> dict:
         """轮询 Stand 执行结果（Caller 主动拉，不依赖 Stand 自汇报 cc-send）
 
         参数:
             room_id:  房间短 ID（REST 兜底/日志用；可为 None）
             session_id: dispatch() 返回的 session_id（房间 team 名，如 "room-xxxx"）。必填。
-            timeout:  最大等待秒数（默认 600）
+            timeout:  最大等待秒数（默认 600）；<=0 表示无限等待，直到 Stand 完成/失联
             poll_interval: 轮询间隔
             stand_session_id: Stand 的 areco session ID（可选，检测 Stand 提前退出）
             after_id: 只看 id>此值的消息（续跑场景）
+            task_id/role/template: 仅用于审计日志（log_audit），由上层 dispatch 结果透传；
+                缺省空串——审计仍写，只是 task_id 一列留空。
 
         返回:
             {
@@ -520,7 +972,7 @@ class Caller:
             session_id, room_id, timeout,
         )
 
-        while time.time() < deadline:
+        while timeout <= 0 or time.time() < deadline:  # timeout<=0：跳过超时，无限轮询直到完成/失联
             # 1) 拉增量消息
             try:
                 messages = self.get_messages(session_id, after_id=last_id)
@@ -557,6 +1009,16 @@ class Caller:
                     "轮询完成: session=%s %d 条 Stand 回复（耗时 %.1fs）",
                     session_id, len(stand_replies), elapsed,
                 )
+                log_audit("poll_completed", {
+                    "task_id": task_id,
+                    "role": role,
+                    "template": template,
+                    "blocked": False,
+                    "session_id": session_id,
+                    "room_id": room_id,
+                    "elapsed": elapsed,
+                    "messages_count": last_id,
+                })
                 return {
                     "session_id": session_id,
                     "room_id": room_id,
@@ -569,33 +1031,66 @@ class Caller:
                     "error": None,
                 }
 
-            # 2) 还没收到回复 —— best-effort 检测 Stand 是否已提前退出
-            #    （Stand 会话经常退出前没回执，这里避免空等满 timeout）
+            # 2) 还没收到回复 —— best-effort 判定是否「lost」（Stand 失联）
+            #    两路信号（建议 4a·会话可靠性）：
+            #    (a) areco 会话状态 == exited：主信号、真实（直查 areco /api/sessions）。
+            #    (b) 心跳文件过期（>15s 未更新）：辅信号。仅当 Stand 宿主写了心跳才有意义；
+            #        无心跳文件（None）不参与判定——Caller 不自写心跳（假信号，见 _HeartbeatWriter）。
+            #    命中任一 → status='lost'，区别于普通 error/timeout，便于上层有针对性地重派发。
             if stand_session_id and time.time() - last_status_check > 10:
                 last_status_check = time.time()
-                status = self._session_status(stand_session_id)
-                if status == "exited":
-                    elapsed = round(time.time() - start_time, 2)
-                    logger.warning(
-                        "Stand 会话已退出但无回复: session=%s stand=%s",
-                        session_id, stand_session_id,
+                lost_reason: str | None = None
+                ses = self._session_status(stand_session_id)
+                hb = heartbeat_stale(stand_session_id)  # None=无文件，True=过期，False=新鲜
+                if ses == "exited":
+                    lost_reason = f"session_exited（areco 报 {stand_session_id}=exited）"
+                elif hb is True:
+                    lost_reason = (
+                        f"heartbeat_stale（{stand_session_id}.hb 超过 "
+                        f"{HEARTBEAT_STALE_SEC:.0f}s 未更新）"
                     )
+                if lost_reason:
+                    elapsed = round(time.time() - start_time, 2)
+                    logger.warning("Stand 失联: session=%s stand=%s reason=%s",
+                                   session_id, stand_session_id, lost_reason)
+                    log_audit("poll_lost", {
+                        "task_id": task_id,
+                        "role": role,
+                        "template": template,
+                        "blocked": False,
+                        "session_id": session_id,
+                        "room_id": room_id,
+                        "stand_session_id": stand_session_id,
+                        "elapsed": elapsed,
+                        "lost_reason": lost_reason,
+                    })
                     return {
                         "session_id": session_id,
                         "room_id": room_id,
-                        "status": "error",
+                        "status": "lost",
                         "result_text": "",
                         "stand_replies": [],
                         "elapsed": elapsed,
                         "completed_at": None,
                         "messages_count": last_id,
-                        "error": f"Stand 会话已退出（{stand_session_id}）但未产生回复",
+                        "lost_reason": lost_reason,
+                        "error": f"Stand 失联：{lost_reason}",
                     }
 
             time.sleep(poll_interval)
 
         elapsed = round(time.time() - start_time, 2)
         logger.warning("轮询超时: session=%s timeout=%ds", session_id, timeout)
+        log_audit("poll_timeout", {
+            "task_id": task_id,
+            "role": role,
+            "template": template,
+            "blocked": False,
+            "session_id": session_id,
+            "room_id": room_id,
+            "elapsed": elapsed,
+            "messages_count": last_id,
+        })
         return {
             "session_id": session_id,
             "room_id": room_id,
@@ -623,6 +1118,63 @@ class Caller:
             return None
         return None
 
+    # ── 工作区隔离（建议 4b）────────────────────────────────────
+
+    def prepare_workspace(
+        self, task_id: str, source_repo: str | None = None
+    ) -> dict:
+        """为本任务准备隔离工作目录（dispatch isolated=True 时调用）。
+
+        - source_repo 给定：在 /tmp/standcode-workspaces/{task_id}/ 建真正的 git worktree
+          （`git -C <repo> worktree add ...`），这是设计文档说的「worktree 隔离」正解。
+        - source_repo 省略：只 mkdir 空目录（不是 git worktree，无隔离实效，仅占位）。
+
+        返回 {path, kind, applied}。applied 恒为 False：Caller 无权把 Stand 的 cwd 切到
+        此目录（areco addMember 只收 templateId，cwd 来自模板固定 /Users/gao）。真正落地
+        需 areco 支持 per-session cwd（见 docs/architecture-optimization.md 技术依赖）。
+        所以这里只「准备目录 + 回填路径」，不改 Stand 行为。
+        """
+        ws = WORKSPACE_DIR / task_id
+        kind = "empty"
+        try:
+            if source_repo:
+                # 真 worktree：基于 source_repo 建独立工作树，新分支名 stand-<task_id>
+                ws.parent.mkdir(parents=True, exist_ok=True)
+                branch = f"stand-{task_id}"
+                subprocess.run(
+                    ["git", "-C", source_repo, "worktree", "add", "-b", branch,
+                     str(ws)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                kind = "git_worktree"
+            else:
+                ws.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning("准备工作区失败 %s: %s", ws, e)
+            kind = f"failed:{e}"
+        logger.info("工作区准备: task=%s path=%s kind=%s applied=False(cwd待areco)",
+                    task_id, ws, kind)
+        return {"path": str(ws), "kind": kind, "applied": False}
+
+    def redispatch(
+        self,
+        dispatch_result: dict,
+        request: str,
+        **dispatch_kwargs,
+    ) -> dict:
+        """对 lost/exited 的任务重新派发到【新房间 + 新 Stand】（建议 4a·W2）。
+
+        与原任务隔离：开新房间，不复用旧 room_id（旧 Stand 已失联）。把旧 task_id 记入
+        result['replaces']，便于审计。本方法不递归 poll——是否再轮询、要不要继续重试，
+        由上层（dispatch_and_relay 等按 max_retries 控制）决定，避免无限自旋 spawn。
+        """
+        replaces = dispatch_result.get("task_id")
+        logger.info("重新派发: replaces=%s request=%s", replaces, request[:60])
+        new = self.dispatch(request=request, **dispatch_kwargs)
+        new["replaces"] = replaces
+        new["redispatch"] = True
+        return new
+
     # ── 综合便捷方法 ────────────────────────────────────────────
 
     def dispatch_and_wait(
@@ -632,19 +1184,41 @@ class Caller:
         room_id: str | None = None,
         template_id: str | None = None,
         timeout: int = 300,
+        max_retries: int = DEFAULT_MAX_REDISPATCH,
     ) -> dict:
-        """派发并等待结果（dispatch + poll_result 一站式）"""
+        """派发并等待结果（dispatch + poll_result 一站式）。
+
+        max_retries: Stand 失联（status='lost'）时自动重新派发到新 Stand 的次数上限。
+            默认 0（关）——与改动前完全一致；重派发会外部 spawn 新房间+会话，属不可逆
+            动作，须高律师显式开 >0 才生效。仅对 'lost' 重试，'timeout'/'error' 不重试
+            （避免对真超时/真异常的任务无限烧额度）。
+        """
+        retries = 0
         dispatch_result = self.dispatch(
             request=request,
             task_type=task_type,
             room_id=room_id,
             template_id=template_id,
         )
-        poll_result = self.poll_result(
-            session_id=dispatch_result["session_id"],
-            timeout=timeout,
-        )
-        return {**dispatch_result, **poll_result}
+        while True:
+            poll = self.poll_result(
+                session_id=dispatch_result["session_id"],
+                stand_session_id=dispatch_result.get("stand_session_id"),
+                timeout=timeout,
+                task_id=dispatch_result.get("task_id", ""),
+                role=dispatch_result.get("role", ""),
+                template=dispatch_result.get("template_id", ""),
+            )
+            if poll.get("status") == "lost" and retries < max_retries:
+                retries += 1
+                logger.warning("lost → 重派发 %d/%d", retries, max_retries)
+                dispatch_result = self.redispatch(
+                    dispatch_result, request,
+                    task_type=task_type, template_id=template_id,
+                )
+                continue
+            poll["redispatch_count"] = retries
+            return {**dispatch_result, **poll}
 
     # ── 微信代发（Caller 主动把 Stand 结果发回 Client）─────────
 
@@ -801,6 +1375,9 @@ class Caller:
             session_id=dispatch_result["session_id"],
             stand_session_id=dispatch_result.get("stand_session_id"),
             timeout=poll_timeout,
+            task_id=dispatch_result.get("task_id", ""),
+            role=dispatch_result.get("role", ""),
+            template=dispatch_result.get("template_id", ""),
         )
 
         status = poll.get("status")
@@ -853,8 +1430,8 @@ class Caller:
         """任务含规划需求时：Caller 先派 Thinker 做计划，再把计划交给 Worker 执行
 
         流程:
-            1. Thinker（GLM-5.2）拆解任务、产出可执行计划（不直接动手）
-            2. Worker（Reasonix）按计划执行，产出结果
+            1. Thinker（registry.default_thinker）拆解任务、产出可执行计划（不直接动手）
+            2. Worker（registry.default_worker）按计划执行，产出结果
             3. 结果代发微信（dry_run 时只拼不发）
 
         返回:
@@ -878,6 +1455,9 @@ class Caller:
             session_id=plan_dispatch["session_id"],
             stand_session_id=plan_dispatch.get("stand_session_id"),
             timeout=poll_timeout,
+            task_id=plan_dispatch.get("task_id", ""),
+            role=plan_dispatch.get("role", ""),
+            template=plan_dispatch.get("template_id", ""),
         )
         plan_text = plan_poll.get("result_text", "")
         if not plan_text:
@@ -909,7 +1489,7 @@ class Caller:
                 "error": "Thinker 计划未通过结构化校验（缺步骤段）",
             }
 
-        # 2. Worker（默认 Reasonix）严格按计划执行：只执行不决策
+        # 2. Worker（registry.default_worker）严格按计划执行：只执行不决策
         exec_request = (
             "请严格按以下计划执行并交付结果。你是 Worker，只执行不决策——"
             "不要重新规划，照步骤做；遇阻在结果里说明，不要擅自改方案。\n\n"
@@ -923,6 +1503,9 @@ class Caller:
             session_id=exec_dispatch["session_id"],
             stand_session_id=exec_dispatch.get("stand_session_id"),
             timeout=poll_timeout,
+            task_id=exec_dispatch.get("task_id", ""),
+            role=exec_dispatch.get("role", ""),
+            template=exec_dispatch.get("template_id", ""),
         )
         result_text = exec_poll.get("result_text", "")
 
@@ -964,6 +1547,15 @@ class Caller:
         if direct_hit and not plan_hit:
             return False
         return plan_hit
+
+    @staticmethod
+    def check_should_dispatch(task_description: str) -> dict:
+        """Gatekeeper 薄包装：委托模块级 check_should_dispatch，便于 OO 调用。
+
+        Caller 动手前先核查：should_dispatch=True → 必须 dispatch_worker，
+        不得直干。详见模块级 check_should_dispatch 文档。
+        """
+        return check_should_dispatch(task_description)
 
     def _parse_plan(self, plan_text: str) -> dict:
         """宽松解析 Thinker 产出的结构化 plan，提取关键字段并校验。
@@ -1052,6 +1644,9 @@ class Caller:
             session_id=exec_dispatch["session_id"],
             stand_session_id=exec_dispatch.get("stand_session_id"),
             timeout=poll_timeout,
+            task_id=exec_dispatch.get("task_id", ""),
+            role=exec_dispatch.get("role", ""),
+            template=exec_dispatch.get("template_id", ""),
         )
         result_text = exec_poll.get("result_text", "")
         wechat = None
@@ -1142,6 +1737,141 @@ class Caller:
             lines.append("下一步建议：暂无结果，请检查 Stand 是否正常启动。")
         return "\n".join(lines)
 
+    # ── 并行调度（多 request 各自独立 room + dispatch，并行 poll 合并返回）────
+
+    def dispatch_parallel(
+        self,
+        requests: list[dict],
+        poll_timeout: int = 600,
+        poll_interval: float = 1.0,
+        max_workers: int | None = None,
+    ) -> dict:
+        """并行派发多个任务：每个 request 独立创建 room + dispatch，并行 poll，合并返回。
+
+        每个 request 是一个 dict，字段透传给 dispatch()：
+            request (必填)   任务描述
+            task_type         任务类型（可选）
+            template_id       指定模板（可选）
+            role              'thinker' | 'worker'（可选）
+            room_id           复用已有房间（可选；并行场景一般不传）
+            summary           该项一句话结论（merged_summary 用，可选）
+
+        参数:
+            poll_timeout   每项轮询超时秒数（默认 600）
+            poll_interval  轮询间隔
+            max_workers    线程并发上限；None=请求数（每项一个线程）
+
+        返回:
+            {
+                "tasks": [
+                    {"task_id", "status", "result",
+                     "room_id", "session_id", "stand_name", "role",
+                     "summary", "error", "elapsed"},
+                    ...
+                ],
+                "merged_summary": str,   # aggregate_results 汇总的多任务文本
+            }
+
+        说明:
+            - 复用 self.dispatch() / self.poll_result()，不改动二者逻辑。
+            - requests.Session 线程安全；SQLite 每次调用新建连接，并行安全。
+            - 单项 dispatch/poll 抛异常不会拖垮整批：该 task 降级为 status=error。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        if not requests:
+            return {"tasks": [], "merged_summary": "（无并行任务）"}
+
+        def _run_one(idx: int, req: dict) -> tuple[int, dict | None, str | None, dict]:
+            spec = dict(req)
+            text = spec.get("request", "")
+            summary = spec.get("summary")
+            try:
+                d = self.dispatch(
+                    request=text,
+                    task_type=spec.get("task_type"),
+                    room_id=spec.get("room_id"),
+                    template_id=spec.get("template_id"),
+                    role=spec.get("role"),
+                )
+                poll = self.poll_result(
+                    room_id=d.get("room_id"),
+                    session_id=d["session_id"],
+                    stand_session_id=d.get("stand_session_id"),
+                    timeout=poll_timeout,
+                    poll_interval=poll_interval,
+                    task_id=d.get("task_id", ""),
+                    role=d.get("role", ""),
+                    template=d.get("template_id", ""),
+                )
+                return idx, d, summary, poll
+            except Exception as e:
+                logger.warning("dispatch_parallel 第 %d 项失败: %s", idx, e)
+                return idx, None, summary, {
+                    "status": "error",
+                    "result_text": "",
+                    "error": str(e),
+                }
+
+        workers = max_workers or len(requests)
+        by_idx: dict[int, tuple[dict | None, str | None, dict]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_run_one, i, r) for i, r in enumerate(requests)]
+            for fut in futures:
+                idx, d, summary, poll = fut.result()
+                by_idx[idx] = (d, summary, poll)
+
+        tasks: list[dict] = []
+        for i in range(len(requests)):
+            d, summary, poll = by_idx[i]
+            d = d or {}
+            tasks.append({
+                "task_id": d.get("task_id"),
+                "status": poll.get("status"),
+                "result": poll.get("result_text") or poll.get("error") or "",
+                "room_id": d.get("room_id"),
+                "session_id": d.get("session_id"),
+                "stand_name": d.get("stand_name"),
+                "role": d.get("role"),
+                "summary": summary,
+                "error": poll.get("error"),
+                "elapsed": poll.get("elapsed"),
+            })
+
+        merged_summary = self._merge_parallel_summary(tasks)
+        logger.info(
+            "dispatch_parallel 完成: %d 项 —— %s",
+            len(tasks),
+            ", ".join(str(t.get("status")) for t in tasks),
+        )
+        return {"tasks": tasks, "merged_summary": merged_summary}
+
+    def _merge_parallel_summary(self, tasks: list[dict]) -> str:
+        """把 dispatch_parallel 各任务结果汇总成一条 merged_summary 文本。
+
+        复用 aggregate_results：把每个 task 转成 aggregate 兼容条目
+        （status: completed→done，其余→blocked）。
+        """
+        entries: list[dict] = []
+        for t in tasks or []:
+            st = t.get("status")
+            agg_st = "done" if st == "completed" else "blocked"
+            result = t.get("result") or ""
+            first_line = next(
+                (ln.strip() for ln in result.splitlines() if ln.strip()),
+                "",
+            )[:80]
+            entries.append({
+                "room_id": t.get("room_id"),
+                "stand": t.get("stand_name") or "?",
+                "role": t.get("role") or "",
+                "status": agg_st,
+                "summary": t.get("summary") or first_line,
+                "files": [],
+                "questions": [],
+            })
+        return self.aggregate_results(entries)
+
 
 # ── 便捷函数（无状态调用）──────────────────────────────────────────
 
@@ -1160,13 +1890,13 @@ def dispatch(
 
 
 def dispatch_thinker(request: str, task_type: str | None = None, **kwargs) -> dict:
-    """派给 Thinker（默认 GLM-5.2）：规划/分析/判断/路由"""
+    """派给 Thinker（registry.default_thinker）：规划/分析/判断/路由"""
     caller = Caller()
     return caller.dispatch_thinker(request, task_type=task_type, **kwargs)
 
 
 def dispatch_worker(request: str, task_type: str | None = None, **kwargs) -> dict:
-    """派给 Worker（默认 Reasonix / DeepSeek-v4-flash）：执行型任务"""
+    """派给 Worker（registry.default_worker）：执行型任务"""
     caller = Caller()
     return caller.dispatch_worker(request, task_type=task_type, **kwargs)
 
@@ -1213,6 +1943,12 @@ def aggregate_results(results: list[dict]) -> str:
     """把多个 Stand 的并行结果/追问汇总成一条微信消息（创建临时 Caller 实例）"""
     caller = Caller()
     return caller.aggregate_results(results)
+
+
+def dispatch_parallel(requests: list[dict], **kwargs) -> dict:
+    """并行派发多个任务（创建临时 Caller 实例）。详见 Caller.dispatch_parallel"""
+    caller = Caller()
+    return caller.dispatch_parallel(requests, **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1343,10 +2079,28 @@ def release_processing_lock(task_id: str) -> None:
     pp.unlink(missing_ok=True)
 
 
-def send_callback_trigger(task_id: str, summary_hint: str = "") -> dict:
-    """发送极简触发消息到微信，告知 Hermes 去 inbox 取结果"""
-    status_hint = f"（{summary_hint}）" if summary_hint else ""
-    msg = f"任务 {task_id} 完成，Hermes 正在汇总{status_hint}…"
+def send_callback_trigger(
+    task_id: str, summary_hint: str = "", dry_run: bool = False
+) -> dict:
+    """发送极简触发消息到微信，告知 Hermes 去 inbox 取结果
+
+    dry_run=True 时只拼装不发送（测试用）；默认 False 真发 cc-send 触发消息。
+    返回里带 dry_run / stdout / returncode，便于上层落 state、status 可见是否真发——
+    避免「dry-run 未真发」误判掩盖真实的 cc-send 失败。
+    """
+    msg = f"任务 {summary_hint}（{task_id}）完成，Hermes 正在汇总…"
+
+    if dry_run:
+        logger.info("[dry-run] 回调触发消息未发送: task=%s", task_id)
+        return {
+            "ok": True,
+            "dry_run": True,
+            "task_id": task_id,
+            "message": msg,
+            "stdout": "",
+            "returncode": 0,
+        }
+
     try:
         proc = subprocess.run(
             [CC_SEND_BIN, "-s", WECHAT_TARGET, "-m", msg],
@@ -1358,11 +2112,30 @@ def send_callback_trigger(task_id: str, summary_hint: str = "") -> dict:
             },
         )
         ok = proc.returncode == 0
-        logger.info("回调触发消息已发: task=%s ok=%s", task_id, ok)
-        return {"ok": ok, "task_id": task_id, "message": msg}
+        if ok:
+            logger.info("回调触发消息已发: task=%s", task_id)
+        else:
+            logger.warning(
+                "回调触发消息发送失败: task=%s rc=%s out=%s",
+                task_id, proc.returncode, (proc.stdout or "")[-200:],
+            )
+        return {
+            "ok": ok,
+            "dry_run": False,
+            "task_id": task_id,
+            "message": msg,
+            "stdout": (proc.stdout or "").strip(),
+            "returncode": proc.returncode,
+        }
     except Exception as e:
         logger.warning("回调触发消息发送失败: %s", e)
-        return {"ok": False, "task_id": task_id, "error": str(e)}
+        return {
+            "ok": False,
+            "dry_run": False,
+            "task_id": task_id,
+            "message": msg,
+            "error": str(e),
+        }
 
 
 def summarize_inbox(payload: dict) -> str:
@@ -1463,6 +2236,8 @@ def _bg_worker(task_id: str) -> int:
         print(f"未找到任务状态 {task_id}", file=_sys.stderr)
         return 2
     spec = state.get("spec", {})
+    # 拉模式（2026-07-25 高律师定）：spec.dry_run 不再影响任何发送——触发消息链已废除
+    # （下方两处 send_callback_trigger 恒 dry_run=True 只拼不发），结果只落 inbox 等 Hermes 拉取。
     caller = Caller()
     state["status"] = "running"
     _write_state(task_id, state)
@@ -1473,8 +2248,8 @@ def _bg_worker(task_id: str) -> int:
                 task_type=spec.get("task_type") or "general",
                 request_summary=spec.get("summary"),
                 file_path=spec.get("file"),
-                poll_timeout=spec.get("timeout", 600),
-                dry_run=True,  # 后台不直接发完整结果
+                poll_timeout=0,  # 0 = 无限等待，直到 Stand 完成
+                dry_run=True,  # 后台不直接发完整结果（inbox 设计：Hermes 读 inbox 后代发）
             )
             exe = res.get("execute", {}) or {}
             result_text = res.get("result_text") or exe.get("result_text", "")
@@ -1490,7 +2265,7 @@ def _bg_worker(task_id: str) -> int:
                 room_id=spec.get("room_id"),
                 template_id=spec.get("template"),
                 file_path=spec.get("file"),
-                poll_timeout=spec.get("timeout", 600),
+                poll_timeout=0,  # 0 = 无限等待，直到 Stand 完成
                 dry_run=True,  # 后台不直接发完整结果 → 转 inbox + 触发消息
             )
             result_text = res.get("result_text", "")
@@ -1510,9 +2285,10 @@ def _bg_worker(task_id: str) -> int:
                 "stand_name": res.get("stand_name"),
                 "template_id": res.get("template_id"),
                 "role": res.get("role"),
-                "wechat_relayed": bool(res.get("relayed")),
-                "wechat_dry_run": (res.get("wechat") or {}).get("dry_run", False),
                 "error": res.get("error"),
+                # 注：完整结果不直接发（inbox 设计：Hermes 读 inbox 后由
+                # process_inbox_callback 代发）。wechat_relayed/wechat_dry_run 改由下方
+                # 触发消息结果决定，避免「dry-run 未真发」误判掩盖真实 cc-send 失败。
             }
         )
 
@@ -1530,8 +2306,18 @@ def _bg_worker(task_id: str) -> int:
             "error": state.get("error"),
         }
         write_inbox(task_id, inbox_payload)
-        send_callback_trigger(task_id, summary_hint="后台任务完成")
+        # 拉模式（2026-07-25 高律师定）：触发消息链废除，恒 dry_run=True 只拼不发——
+        # 结果只落 inbox，由 Hermes 下次被微信唤醒时拉取（SKILL.md「收信箱拉模式」）。
+        trigger = send_callback_trigger(
+            task_id, summary_hint=spec.get("summary", ""), dry_run=True
+        )
         state["callback_triggered"] = True
+        state["trigger"] = trigger
+        # wechat_relayed 只在触发消息真发成功时置 True；dry_run 或 cc-send 失败均置 False
+        state["wechat_relayed"] = bool(trigger.get("ok")) and not trigger.get(
+            "dry_run", False
+        )
+        state["wechat_dry_run"] = trigger.get("dry_run", False)
     except Exception as e:
         state.update({"status": "error", "error": str(e), "completed_at": _now_iso()})
         try:
@@ -1549,8 +2335,16 @@ def _bg_worker(task_id: str) -> int:
                 "error": str(e),
             }
             write_inbox(task_id, inbox_payload)
-            send_callback_trigger(task_id, summary_hint="异常")
+            # 拉模式：异常结果同样只落 inbox，触发消息恒不发（同上）
+            trigger = send_callback_trigger(
+                task_id, summary_hint=spec.get("summary", "") or "异常", dry_run=True
+            )
             state["callback_triggered"] = True
+            state["trigger"] = trigger
+            state["wechat_relayed"] = bool(trigger.get("ok")) and not trigger.get(
+                "dry_run", False
+            )
+            state["wechat_dry_run"] = trigger.get("dry_run", False)
             state["wechat_relayed_error"] = True
         except Exception:
             pass
@@ -1559,8 +2353,20 @@ def _bg_worker(task_id: str) -> int:
 
 
 def _cmd_run(args) -> int:
-    # ── 后台 ──
+    # 兜底扫描入口：scripts/room-inbox-sync.py（cron/常驻每 60s 扫漏写 inbox 的 room，补写 + 发房间内触发）
+    # --timeout 未显式给时：--wait/--bg 默认 0（无限等到 Stand 完成），普通前台默认 600
+    timeout = args.timeout if args.timeout is not None else (
+        0 if (getattr(args, "wait", False) or getattr(args, "bg", False)) else 600
+    )
+    # ── 后台（已弃用 2026-07-25）──
     if getattr(args, "bg", False):
+        print(
+            "⚠️ DEPRECATED: --bg 是 start_new_session 脱管进程，Hermes gateway 追踪不到，"
+            "唤醒链绕外网 cc-send。\n"
+            "   新姿势：Hermes 用 terminal 工具 background=true + notify_on_complete=true 跑 "
+            "`caller.py run --wait …`，进程退出由 gateway 自动回注微信（见 SKILL.md「唤醒与执行位置」）。",
+            file=_sys.stderr,
+        )
         task_id = _new_bg_task_id()
         spec = {
             "request": args.request,
@@ -1570,9 +2376,10 @@ def _cmd_run(args) -> int:
             "room_id": args.room_id,
             "summary": args.summary,
             "file": args.file,
-            "timeout": args.timeout,
+            "timeout": timeout,
             "plan": args.plan,
             "no_relay": args.no_relay,
+            "dry_run": args.dry_run,
         }
         log_path = TASKS_DIR / f"{task_id}.log"
         TASKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1603,19 +2410,143 @@ def _cmd_run(args) -> int:
         print(f"看日志: tail -f {log_path}")
         return 0
 
+    # ── 等待者模式（唤醒主链，2026-07-25 定案）──
+    # 前台阻塞 dispatch→poll；结果写 inbox + stdout 全文；不发微信、不发触发消息。
+    # 配合 Hermes gateway terminal 工具 background=true+notify_on_complete=true 使用：
+    # 本进程退出即触发 gateway watcher 回注原微信会话（零 cc-send、零 API key、零 chat_id 落盘）；
+    # 执行者（Stand）全程是 areco 会话，看板可见可接管——等待者只是轻量 poll，不是执行者。
+    if getattr(args, "wait", False):
+        task_id = f"wait-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        spec = {
+            "request": args.request,
+            "task_type": args.task_type,
+            "role": args.role,
+            "template": args.template,
+            "room_id": args.room_id,
+            "summary": args.summary,
+            "file": args.file,
+            "timeout": timeout,
+            "plan": args.plan,
+        }
+        state = {
+            "task_id": task_id,
+            "mode": "wait",
+            "spec": spec,
+            "status": "running",
+            "created_at": _now_iso(),
+            "pid": os.getpid(),
+        }
+        _write_state(task_id, state)
+        caller = Caller()
+        try:
+            # dry_run=True：relay_to_wechat 只拼不发——微信回复由 gateway notify 唤醒 Hermes 后自行组织
+            if args.plan:
+                res = caller.plan_and_execute(
+                    args.request, task_type=args.task_type, request_summary=args.summary,
+                    file_path=args.file, poll_timeout=timeout, dry_run=True,
+                )
+                exe = res.get("execute", {}) or {}
+                result_text = res.get("result_text") or exe.get("result_text", "")
+                status = exe.get("status", res.get("status", "completed"))
+                room_id = exe.get("room_id") or res.get("room_id")
+                session_id = exe.get("session_id") or res.get("session_id")
+            else:
+                res = caller.dispatch_and_relay(
+                    args.request, task_type=args.task_type, request_summary=args.summary,
+                    role=args.role, room_id=args.room_id, template_id=args.template,
+                    file_path=args.file, poll_timeout=timeout, dry_run=True,
+                )
+                result_text = res.get("result_text", "")
+                status = res.get("status", "completed")
+                room_id = res.get("room_id")
+                session_id = res.get("session_id")
+        except GatekeeperBlockedError as e:
+            state.update({"status": "blocked", "error": str(e), "completed_at": _now_iso()})
+            _write_state(task_id, state)
+            print(json.dumps(
+                {"mode": "wait", "task_id": task_id, "status": "blocked", "blocked": True,
+                 "error": str(e), "request_preview": (args.request or "")[:200]},
+                ensure_ascii=False, indent=2,
+            ))
+            return 2
+        except Exception as e:
+            state.update({"status": "error", "error": str(e), "completed_at": _now_iso()})
+            _write_state(task_id, state)
+            print(json.dumps(
+                {"mode": "wait", "task_id": task_id, "status": "error", "error": str(e)},
+                ensure_ascii=False, indent=2,
+            ))
+            return 1
+        state.update({
+            "status": status,
+            "result_text": result_text,
+            "result_preview": result_text[:500],
+            "elapsed": res.get("elapsed"),
+            "completed_at": res.get("completed_at") or _now_iso(),
+            "room_id": room_id,
+            "session_id": session_id,
+            "stand_name": res.get("stand_name"),
+            "template_id": res.get("template_id"),
+            "role": res.get("role"),
+            "error": res.get("error"),
+        })
+        _write_state(task_id, state)
+        # inbox 与 _bg_worker 同构：Hermes 醒来后凭 task_id 读全文（process_inbox_callback 兼容）
+        write_inbox(task_id, {
+            "task_id": task_id,
+            "room_id": room_id,
+            "stand": res.get("stand_name") or args.role or "?",
+            "role": res.get("role") or args.role or "",
+            "status": status,
+            "result_text": result_text,
+            "files": [args.file] if args.file else [],
+            "request_summary": args.summary,
+            "request": (args.request or "")[:200],
+            "error": res.get("error"),
+        })
+        print(json.dumps(
+            {
+                "mode": "wait",
+                "task_id": task_id,
+                "room_id": room_id,
+                "session_id": session_id,
+                "stand_name": res.get("stand_name"),
+                "template_id": res.get("template_id"),
+                "role": res.get("role"),
+                "status": status,
+                "elapsed": res.get("elapsed"),
+                "completed_at": res.get("completed_at"),
+                "inbox_path": str(_inbox_path(task_id)),
+                "result_text": result_text,
+                "error": res.get("error"),
+            },
+            ensure_ascii=False, indent=2,
+        ))
+        return 0 if status == "completed" else 1
+
     # ── 前台同步 ──
     caller = Caller()
-    if args.plan:
-        res = caller.plan_and_execute(
-            args.request, task_type=args.task_type, request_summary=args.summary,
-            file_path=args.file, poll_timeout=args.timeout, dry_run=bool(args.no_relay),
-        )
-    else:
-        res = caller.dispatch_and_relay(
-            args.request, task_type=args.task_type, request_summary=args.summary,
-            role=args.role, room_id=args.room_id, template_id=args.template,
-            file_path=args.file, poll_timeout=args.timeout, dry_run=bool(args.no_relay),
-        )
+    fg_dry_run = bool(args.no_relay) or bool(args.dry_run)
+    try:
+        if args.plan:
+            res = caller.plan_and_execute(
+                args.request, task_type=args.task_type, request_summary=args.summary,
+                file_path=args.file, poll_timeout=timeout, dry_run=fg_dry_run,
+            )
+        else:
+            res = caller.dispatch_and_relay(
+                args.request, task_type=args.task_type, request_summary=args.summary,
+                role=args.role, room_id=args.room_id, template_id=args.template,
+                file_path=args.file, poll_timeout=timeout, dry_run=fg_dry_run,
+            )
+    except GatekeeperBlockedError as e:
+        # BLOCKED 拒绝：审计已在 dispatch 内写过，此处只优雅回执，不抛 traceback。
+        print(json.dumps(
+            {"status": "blocked", "blocked": True, "error": str(e),
+             "request_preview": (args.request or "")[:200]},
+            ensure_ascii=False, indent=2,
+        ))
+        return 2
     print(json.dumps(
         {
             "task_id": res.get("task_id"),
@@ -1634,6 +2565,14 @@ def _cmd_run(args) -> int:
         ensure_ascii=False, indent=2,
     ))
     return 0 if res.get("status") == "completed" else 1
+
+
+def _cmd_check(args) -> int:
+    """Gatekeeper CLI：核查一个任务 / 命令是否必须派发（check_should_dispatch）"""
+    verdict = check_should_dispatch(args.task)
+    print(json.dumps(verdict, ensure_ascii=False, indent=2))
+    # 退出码恒 0：Hermes 直接读 json 的 should_dispatch 字段分流，无需按退出码判断。
+    return 0
 
 
 def _cmd_status(args) -> int:
@@ -1664,6 +2603,12 @@ def _cmd_status(args) -> int:
         f"wechat_relayed: {state.get('wechat_relayed')}"
         + ("（dry-run，未真发）" if _dr else "")
     )
+    _tg = state.get("trigger")
+    if _tg:
+        _tg_rc = _tg.get("returncode", _tg.get("error", ""))
+        print(
+            f"trigger       : ok={_tg.get('ok')} dry_run={_tg.get('dry_run')} rc={_tg_rc}"
+        )
     if state.get("error"):
         print(f"error         : {state.get('error')}")
     if state.get("result_text"):
@@ -1723,18 +2668,28 @@ def _build_parser():
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pr = sub.add_parser("run", help="派发+主动轮询+代发微信（默认前台；--bg 后台）")
+    pr = sub.add_parser("run", help="派发+主动轮询（--wait 等待者模式=唤醒主链；--bg 已弃用）")
     pr.add_argument("request", help="任务描述")
+    pr.add_argument("--wait", action="store_true",
+                    help="等待者模式（2026-07-25 定案唤醒主链）：前台阻塞到 Stand 完成，结果写 inbox + stdout 全文，"
+                         "不发微信、不发触发消息。供 Hermes terminal 工具 background=true+notify_on_complete=true 调用，"
+                         "进程退出由 gateway 自动回注原微信会话；执行者 Stand 全程留在 areco 看板可见")
     pr.add_argument("--bg", "--background", dest="bg", action="store_true",
-                    help="后台运行（立刻返回 task_id，caller 自己轮询并回微信）")
+                    help="[已弃用→用 --wait] shell 级脱管后台（start_new_session，gateway 追踪不到，唤醒靠 cc-send 外网绕行）")
     pr.add_argument("--task-type", default="general", help="任务类型（默认 general）")
     pr.add_argument("--role", choices=["thinker", "worker"], default=None, help="角色分派")
     pr.add_argument("--template", default=None, help="指定模板 id")
     pr.add_argument("--room-id", default=None, help="复用现有房间")
     pr.add_argument("--summary", default=None, help="一句话结论（代发微信用）")
     pr.add_argument("--file", "--file-path", dest="file", default=None, help="产物文件路径")
-    pr.add_argument("--timeout", type=int, default=600, help="轮询超时秒数（默认 600）")
+    pr.add_argument("--timeout", type=int, default=None,
+                    help="轮询超时秒数（未显式给时：--wait/--bg 0=无限等，普通前台 600）")
     pr.add_argument("--no-relay", action="store_true", help="不代发微信，只取结果")
+    pr.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="测试用：前台模式不真发微信（拉模式下 --bg 触发消息已恒不发，本开关只影响裸前台 relay）",
+    )
     pr.add_argument("--plan", action="store_true", help="两段式：Thinker 出计划 → Worker 执行")
     pr.set_defaults(func=_cmd_run)
 
@@ -1742,6 +2697,13 @@ def _build_parser():
     ps.add_argument("task_id", help="任务 id")
     ps.add_argument("--json", action="store_true", help="输出原始 json")
     ps.set_defaults(func=_cmd_status)
+
+    pc = sub.add_parser(
+        "check",
+        help="Gatekeeper：核查一个任务/命令是否必须派发（check_should_dispatch）",
+    )
+    pc.add_argument("task", help="任务描述或即将执行的 terminal 命令")
+    pc.set_defaults(func=_cmd_check)
 
     pl = sub.add_parser("list", help="列出所有后台任务")
     pl.set_defaults(func=_cmd_list)
