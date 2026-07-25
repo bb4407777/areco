@@ -90,7 +90,15 @@ SWEEP_IDLE_MIN = float(
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
 # STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
-AUDIT_LOG_PATH = os.environ.get("STANDCODE_AUDIT_LOG", "/tmp/standcode-audit.jsonl")
+# 审计日志落 HOME 而非 /tmp：macOS 会清 /tmp，而这是「直干率审计」唯一的证据基础——
+# 证据在分析脚本读到它之前就蒸发，等于审计不存在（2026-07-26 审计指出）。
+AUDIT_LOG_PATH = os.environ.get("STANDCODE_AUDIT_LOG") or str(
+    Path(HOME_DIR) / ".standcode" / "audit.jsonl"
+)
+try:
+    Path(AUDIT_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
+except Exception:  # 建不出目录也不能拖垮主流程——log_audit 自己还有一层兜底
+    pass
 
 # ── 会话可靠性 / 工作区隔离（docs/architecture-optimization.md 建议 4）─────────
 # 心跳目录：Caller 只「读」这里的 {session_id}.hb；「写」应由 Stand 宿主进程
@@ -3379,6 +3387,18 @@ def _cmd_run(args) -> int:
 def _cmd_check(args) -> int:
     """Gatekeeper CLI：核查一个任务 / 命令是否必须派发（check_should_dispatch）"""
     verdict = check_should_dispatch(args.task)
+    # 记账：operator 车道的决策只在这里留痕——Caller 直干不走 dispatch，审计日志里
+    # 唯一能看到「Caller 判了自己能干」的地方就是这条。没有它，跟进率算不出来。
+    log_audit("gatekeeper_check", {
+        "mode": {"operator": "operator", "blocked": "blocked"}.get(
+            verdict.get("category", ""), "worker"
+        ),
+        "category": verdict.get("category", ""),
+        "should_dispatch": verdict.get("should_dispatch"),
+        "blocked": verdict.get("blocked", False),
+        "reason": verdict.get("reason", ""),
+        "task_preview": (args.task or "")[:200],
+    })
     print(json.dumps(verdict, ensure_ascii=False, indent=2))
     # 退出码恒 0：Hermes 直接读 json 的 should_dispatch 字段分流，无需按退出码判断。
     return 0
