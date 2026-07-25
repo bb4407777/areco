@@ -19,6 +19,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import requests
@@ -318,6 +319,107 @@ def _is_operator_invocation(text: str) -> tuple[bool, str]:
     return (False, "")
 
 
+class ModeConflictError(ValueError):
+    """--mode 与旧 --role/--plan/--plan-only/--sub 组合矛盾时抛出（CLI 侧优雅回执）。"""
+
+
+def resolve_mode(
+    mode: str | None = None,
+    *,
+    role: str | None = None,
+    plan: bool = False,
+    plan_only: bool = False,
+    subs: list[str] | None = None,
+) -> dict:
+    """把 CLI 参数收敛成唯一的模式决策（docs/work-modes.md P0-1）。
+
+    模式是一等字段，但旧参数 `--role` / `--plan` 得继续能用——本函数是两代参数的
+    唯一收敛点：显式 `--mode` 优先，未给则从旧参数推导；矛盾组合直接报错，
+    **不做「猜用户想干什么」的静默兜底**（静默兜底会让审计里的 mode 撒谎）。
+
+    参数:
+        mode:       显式 --mode，取值见 MODES；None=从旧参数推导
+        role:       旧 --role（thinker/worker）
+        plan:       旧 --plan（两段式）
+        plan_only:  --plan-only（只出结构化计划，不执行）
+        subs:       --sub 子任务列表（fanout 用）
+
+    返回:
+        {"mode", "plan_only", "role", "subs", "reason", "source"}
+        role 为 dispatch() 用的角色；plan/fanout 模式下为 None（由各自流程内部定角色）。
+        source = "explicit"（用户显式给了 --mode）| "legacy"（从旧参数推导）
+
+    抛出:
+        ModeConflictError — 组合矛盾或 fanout 缺子任务
+    """
+    subs = [s for s in (subs or []) if (s or "").strip()]
+
+    # ── 显式 --mode ──
+    if mode:
+        m = mode.strip().lower()
+        if m not in MODES:
+            raise ModeConflictError(
+                f"未知 --mode『{mode}』；可选：{'/'.join(MODES)}"
+            )
+        # 与旧参数的矛盾组合
+        if plan and m != "plan":
+            raise ModeConflictError(f"--plan 是 --mode plan 的旧写法，不能与 --mode {m} 并用")
+        if role == "thinker" and m not in ("think",):
+            raise ModeConflictError(f"--role thinker 与 --mode {m} 矛盾（thinker 对应 --mode think）")
+        if role == "worker" and m not in ("worker", "fanout"):
+            raise ModeConflictError(f"--role worker 与 --mode {m} 矛盾")
+        if plan_only and m != "think":
+            raise ModeConflictError(
+                f"--plan-only 只用于 --mode think（只出计划不执行）；"
+                f"--mode {m} 会执行，两者矛盾"
+                + ("。要「先出计划再执行」请用 --mode plan（不加 --plan-only）" if m == "plan" else "")
+            )
+        if subs and m != "fanout":
+            raise ModeConflictError(f"--sub 只用于 --mode fanout；--mode {m} 不拆子任务")
+        if m == "fanout" and len(subs) < 2:
+            raise ModeConflictError(
+                "--mode fanout 需要至少 2 个 --sub 子任务（1 个直接用 --mode worker 即可）"
+            )
+        return {
+            "mode": m,
+            "plan_only": bool(plan_only),
+            "role": {"think": "thinker", "worker": "worker"}.get(m),
+            "subs": subs,
+            "reason": f"显式 --mode {m}" + ("（只出计划）" if plan_only else ""),
+            "source": "explicit",
+        }
+
+    # ── 从旧参数推导 ──
+    if plan:
+        if plan_only:
+            raise ModeConflictError(
+                "--plan（两段式，含执行）与 --plan-only（只出计划）矛盾；"
+                "要计划就 --plan-only，要执行就 --plan"
+            )
+        if subs:
+            raise ModeConflictError("--sub 只用于 --mode fanout，不能与 --plan 并用")
+        return {"mode": "plan", "plan_only": False, "role": None, "subs": [],
+                "reason": "旧参数 --plan → mode=plan", "source": "legacy"}
+    if subs:
+        if role == "thinker":
+            raise ModeConflictError("--sub（fanout 派 Worker）与 --role thinker 矛盾")
+        if len(subs) < 2:
+            raise ModeConflictError("--sub 需要至少 2 个子任务才构成 fanout")
+        return {"mode": "fanout", "plan_only": False, "role": None, "subs": subs,
+                "reason": f"给了 {len(subs)} 个 --sub → mode=fanout", "source": "legacy"}
+    if plan_only:
+        if role == "worker":
+            raise ModeConflictError("--plan-only（只规划）与 --role worker（只执行）矛盾")
+        # --plan-only 单独出现，意图无歧义：要计划 → 提升为 think
+        return {"mode": "think", "plan_only": True, "role": "thinker", "subs": [],
+                "reason": "--plan-only → mode=think（只出结构化计划）", "source": "legacy"}
+    if role == "thinker":
+        return {"mode": "think", "plan_only": False, "role": "thinker", "subs": [],
+                "reason": "旧参数 --role thinker → mode=think", "source": "legacy"}
+    return {"mode": "worker", "plan_only": False, "role": role or "worker", "subs": [],
+            "reason": "未指定 → 默认 mode=worker", "source": "legacy"}
+
+
 class GatekeeperBlockedError(RuntimeError):
     """dispatch 因 Gatekeeper BLOCKED 分级拒绝执行时抛出。
 
@@ -330,12 +432,17 @@ class GatekeeperBlockedError(RuntimeError):
 def log_audit(event: str, detail: dict | None = None) -> None:
     """审计日志：每行一条 JSON 追加写入 AUDIT_LOG_PATH（默认 /tmp/standcode-audit.jsonl）。
 
-    固定字段：timestamp / event / task_id / role / template / blocked；
+    固定字段：timestamp / event / mode / task_id / role / template / blocked；
     detail 中的其余字段（reason / room_id / verdict 等）透传追加，便于追溯。
     写入失败只 warning、永不抛——审计不得阻塞主流程。
 
+    `mode` 是工作模式一等字段（docs/work-modes.md P0-1）：operator / worker / think /
+    plan / fanout。有了它，直干率审计（scripts/audit-direct-work.py）就从「猜哪些
+    terminal 调用算直干」变成「数 mode 分布」——可数，而不是可估。
+    poll_* 事件不单独带 mode（同一 task_id 可 join 到它的 dispatch 行，不重复存）。
+
     参数:
-        event:  事件名（如 "dispatch" / "dispatch_blocked" /
+        event:  事件名（如 "dispatch" / "dispatch_blocked" / "gatekeeper_check" /
                 "poll_completed" / "poll_lost" / "poll_timeout"）
         detail: 审计上下文；至少应含 task_id / role / template / blocked，
                 其余键原样并入记录。
@@ -344,6 +451,7 @@ def log_audit(event: str, detail: dict | None = None) -> None:
     record = {
         "timestamp": _now_iso(),
         "event": event,
+        "mode": d.get("mode", ""),
         "task_id": d.get("task_id", ""),
         "role": d.get("role", ""),
         "template": d.get("template", ""),
@@ -1026,10 +1134,14 @@ class Caller:
         isolated: bool = False,
         workspace_repo: str | None = None,
         request_summary: str | None = None,
+        mode: str = "",
     ) -> dict:
         """向 Stand 派发任务
 
         参数:
+            mode:       工作模式一等字段（operator/worker/think/plan/fanout，见 MODES）。
+                        只进审计与结果回填，不影响选模板——模板由 template_id/role/
+                        task_type 决定。为空表示调用方没声明（老代码路径）。
             request:    任务描述（自然语言）
             request_summary: 一句话摘要——用作新建房间名前缀（边栏识别度）；None 时取 request 前 16 字
             task_type:  任务类型（search/coding/writing/analysis/general）；None=不按类型分派
@@ -1074,6 +1186,7 @@ class Caller:
             blocked_task_id = f"task-{uuid.uuid4().hex[:12]}"
             log_audit("dispatch_blocked", {
                 "task_id": blocked_task_id,
+                "mode": mode,
                 "role": role or "",
                 "template": "",
                 "blocked": True,
@@ -1146,6 +1259,7 @@ class Caller:
             "task_type": effective_task_type,
             "template_id": tid,
             "role": effective_role,
+            "mode": mode,
             "workspace": (workspace_info or {}).get("path"),
             "workspace_cwd": bool((workspace_info or {}).get("applied", False)),
         }
@@ -1159,16 +1273,18 @@ class Caller:
             )
         log_audit("dispatch", {
             "task_id": task_id,
+            "mode": mode,
             "role": effective_role,
             "template": tid,
             "blocked": False,
             "task_type": effective_task_type,
             "room_id": rid,
             "stand_name": stand_name,
+            "room_reused": not room_created,
         })
         logger.info(
-            "派发任务: session=%s room=%s stand=%s role=%s task_type=%s tid=%s",
-            team, rid, stand_name, effective_role, effective_task_type, tid,
+            "派发任务: session=%s room=%s stand=%s mode=%s role=%s task_type=%s tid=%s",
+            team, rid, stand_name, mode or "-", effective_role, effective_task_type, tid,
         )
         return result
 
@@ -1181,12 +1297,18 @@ class Caller:
         room_id: str | None = None,
         template_id: str | None = None,
         plan_only: bool = False,
+        request_summary: str | None = None,
+        mode: str = "think",
     ) -> dict:
         """派给 Thinker（registry.default_thinker）：规划、分析、判断、路由
 
         plan_only=True 时强制「只规划不执行」：把 request 包进 PLAN_TEMPLATE，
         要求 Thinker 按「目标/上下文/步骤/约束/判据/落点」结构化产出可执行计划，
-        供 Worker（registry.default_worker）直接执行。用于 plan_and_execute 的 Thinker 阶段。
+        供 Worker（registry.default_worker）直接执行。用于 plan_and_execute 的 Thinker 阶段，
+        以及 `run --mode think --plan-only`（模式 4 只要计划、执行另议）。
+
+        plan_only=False 则原文直派——这是模式 4 的默认形态：要的是判断（结论/取舍），
+        自由格式回答正合适，不该被六段模板逼成待办清单（见 presets.thinker_only）。
         """
         if plan_only:
             request = PLAN_TEMPLATE.format(request=request)
@@ -1196,6 +1318,8 @@ class Caller:
             room_id=room_id,
             template_id=template_id,
             role="thinker",
+            request_summary=request_summary,
+            mode=mode,
         )
 
     def dispatch_worker(
@@ -1204,6 +1328,8 @@ class Caller:
         task_type: str | None = None,
         room_id: str | None = None,
         template_id: str | None = None,
+        request_summary: str | None = None,
+        mode: str = "worker",
     ) -> dict:
         """派给 Worker（registry.default_worker）：代码、搜索、文书、下载、总结"""
         return self.dispatch(
@@ -1212,6 +1338,8 @@ class Caller:
             room_id=room_id,
             template_id=template_id,
             role="worker",
+            request_summary=request_summary,
+            mode=mode,
         )
 
     def poll_result(
@@ -1657,6 +1785,8 @@ class Caller:
         file_path: str | None = None,
         poll_timeout: int = 600,
         dry_run: bool = False,
+        plan_only: bool = False,
+        mode: str = "",
     ) -> dict:
         """一键派发 → 主动轮询 → 代发微信
 
@@ -1665,10 +1795,15 @@ class Caller:
             task_type:        任务类型
             request_summary: 一句话结论（代发微信用）；None 时从结果正文自动提炼
             role:             'thinker' | 'worker' | None（按角色选默认模板）
+            plan_only:        role='thinker' 时把 request 包进 PLAN_TEMPLATE（只出结构化计划）；
+                              其他角色下无意义（PLAN_TEMPLATE 是给 Thinker 的），会被忽略
+            mode:             工作模式一等字段，落审计（见 MODES / log_audit）
             room_id/template_id/file_path/poll_timeout/dry_run: 见 dispatch/poll_result/relay_to_wechat
 
         返回: dispatch() + poll_result() + {relay_summary, wechat, relayed}
         """
+        if plan_only and role == "thinker":
+            request = PLAN_TEMPLATE.format(request=request)
         dispatch_result = self.dispatch(
             request=request,
             task_type=task_type,
@@ -1676,6 +1811,7 @@ class Caller:
             template_id=template_id,
             role=role,
             request_summary=request_summary,
+            mode=mode,
         )
         poll = self.poll_result(
             room_id=dispatch_result["room_id"],
@@ -2215,6 +2351,8 @@ class Caller:
                     room_id=spec.get("room_id"),
                     template_id=spec.get("template_id"),
                     role=spec.get("role"),
+                    request_summary=summary,
+                    mode=spec.get("mode", "fanout"),
                 )
                 poll = self.poll_result(
                     room_id=d.get("room_id"),
@@ -2667,36 +2805,31 @@ def _bg_worker(task_id: str) -> int:
     state["status"] = "running"
     _write_state(task_id, state)
     try:
-        if spec.get("plan"):
-            res = caller.plan_and_execute(
-                spec.get("request", ""),
-                task_type=spec.get("task_type") or "general",
-                request_summary=spec.get("summary"),
-                file_path=spec.get("file"),
-                poll_timeout=0,  # 0 = 无限等待，直到 Stand 完成
-                dry_run=True,  # 后台不直接发完整结果（inbox 设计：Hermes 读 inbox 后代发）
-            )
-            exe = res.get("execute", {}) or {}
-            result_text = res.get("result_text") or exe.get("result_text", "")
-            poll_status = exe.get("status", "completed")
-            room_id = exe.get("room_id")
-            session_id = exe.get("session_id")
-        else:
-            res = caller.dispatch_and_relay(
-                spec.get("request", ""),
-                task_type=spec.get("task_type") or "general",
-                request_summary=spec.get("summary"),
-                role=spec.get("role"),
-                room_id=spec.get("room_id"),
-                template_id=spec.get("template"),
-                file_path=spec.get("file"),
-                poll_timeout=0,  # 0 = 无限等待，直到 Stand 完成
-                dry_run=True,  # 后台不直接发完整结果 → 转 inbox + 触发消息
-            )
-            result_text = res.get("result_text", "")
-            poll_status = res.get("status", "completed")
-            room_id = res.get("room_id")
-            session_id = res.get("session_id")
+        # 模式回放：新 spec 带 mode，老 spec（本次改动前落盘的）只有 plan/role —— 都交给
+        # resolve_mode 推导，保证重启续跑的老任务行为不变。
+        decision = resolve_mode(
+            spec.get("mode"),
+            role=spec.get("role"),
+            plan=bool(spec.get("plan")),
+            plan_only=bool(spec.get("plan_only")),
+            subs=spec.get("subs"),
+        )
+        bg_args = SimpleNamespace(
+            request=spec.get("request", ""),
+            task_type=spec.get("task_type") or "general",
+            summary=spec.get("summary"),
+            file=spec.get("file"),
+            room_id=spec.get("room_id"),
+            template=spec.get("template"),
+        )
+        # dry_run=True：后台不直接发完整结果（inbox 设计：Hermes 读 inbox 后代发）
+        # poll_timeout=0：无限等待，直到 Stand 完成
+        res = _run_by_mode(caller, decision, bg_args, 0, dry_run=True)
+        result_text = res.get("result_text", "")
+        poll_status = res.get("status", "completed")
+        room_id = res.get("room_id")
+        session_id = res.get("session_id")
+        state["work_mode"] = res.get("mode")
 
         state.update(
             {
@@ -2777,12 +2910,145 @@ def _bg_worker(task_id: str) -> int:
     return 0 if state.get("status") == "completed" else 1
 
 
+def _run_by_mode(
+    caller: "Caller",
+    decision: dict,
+    args,
+    timeout: int,
+    dry_run: bool,
+) -> dict:
+    """按模式跑一次「派发 + 轮询」，把四种模式的返回归一成同一形状。
+
+    存在的理由：_cmd_run 有三个调用点（--wait / 裸前台 / _bg_worker 的 spec 回放），
+    四种模式 × 三个调用点 = 十二份分支。归一到这里，调用点各自只管 dry_run 与输出格式。
+
+    归一后的键：mode / status / result_text / room_id / session_id / stand_name /
+    template_id / role / task_id / elapsed / completed_at / error，
+    外加各模式自己的原始结果（plan/execute/tasks/degraded…）原样透传。
+
+    status 口径：
+        completed  全部成功（fanout 要求每个子任务都 completed）
+        partial    fanout 部分成功——刻意不算 completed，退出码非 0，避免「半成功」被
+                   当全成功记账（漏报比误报更贵）
+        其余       沿用 poll_result 的 timeout / lost / error / plan_failed
+    """
+    mode = decision["mode"]
+    common = dict(
+        task_type=args.task_type,
+        request_summary=args.summary,
+        file_path=args.file,
+        poll_timeout=timeout,
+        dry_run=dry_run,
+    )
+
+    if mode == "plan":
+        res = caller.plan_and_execute(args.request, **common)
+        exe = res.get("execute", {}) or {}
+        return {
+            **res,
+            "mode": mode,
+            "status": exe.get("status", res.get("stage") if res.get("stage") == "plan_failed" else "error"),
+            "result_text": res.get("result_text") or exe.get("result_text", ""),
+            "room_id": exe.get("room_id") or (res.get("plan", {}) or {}).get("room_id"),
+            "session_id": exe.get("session_id") or (res.get("plan", {}) or {}).get("session_id"),
+            "stand_name": exe.get("stand_name"),
+            "template_id": exe.get("template_id"),
+            "role": exe.get("role"),
+            "task_id": exe.get("task_id"),
+            "elapsed": exe.get("elapsed"),
+            "completed_at": exe.get("completed_at"),
+            "error": res.get("error") or exe.get("error"),
+        }
+
+    if mode == "fanout":
+        preamble = (args.request or "").strip()
+        requests = [
+            {
+                "request": (f"{preamble}\n\n【本子任务】\n{s}" if preamble else s),
+                "task_type": args.task_type,
+                "role": "worker",
+                "template_id": args.template,
+                "summary": s[:40],
+                "mode": mode,
+            }
+            for s in decision["subs"]
+        ]
+        res = caller.dispatch_parallel(requests, poll_timeout=timeout)
+        tasks = res.get("tasks", [])
+        done = [t for t in tasks if t.get("status") == "completed"]
+        status = "completed" if tasks and len(done) == len(tasks) else (
+            "partial" if done else "error"
+        )
+        return {
+            **res,
+            "mode": mode,
+            "status": status,
+            "result_text": res.get("merged_summary", ""),
+            "room_id": None,
+            "session_id": None,
+            "stand_name": f"{len(done)}/{len(tasks)} Worker",
+            "template_id": args.template,
+            "role": "worker",
+            "task_id": None,
+            "elapsed": max((t.get("elapsed") or 0) for t in tasks) if tasks else None,
+            "completed_at": _now_iso(),
+            "error": None if status == "completed" else
+                     "; ".join(f"{t.get('summary') or '?'}: {t.get('error')}"
+                               for t in tasks if t.get("error")) or f"{len(tasks) - len(done)} 个子任务未完成",
+        }
+
+    # think / worker：单段派发
+    res = caller.dispatch_and_relay(
+        args.request,
+        role=decision["role"],
+        room_id=args.room_id,
+        template_id=args.template,
+        plan_only=decision["plan_only"],
+        mode=mode,
+        **common,
+    )
+    return {**res, "mode": mode}
+
+
 def _cmd_run(args) -> int:
     # 兜底扫描入口：scripts/room-inbox-sync.py（cron/常驻每 60s 扫漏写 inbox 的 room，补写 + 发房间内触发）
     # --timeout 未显式给时：--wait/--bg 默认 0（无限等到 Stand 完成），普通前台默认 600
     timeout = args.timeout if args.timeout is not None else (
         0 if (getattr(args, "wait", False) or getattr(args, "bg", False)) else 600
     )
+
+    # ── 模式决策（P0-1：模式是一等字段，两代参数在 resolve_mode 唯一收敛）──
+    try:
+        decision = resolve_mode(
+            getattr(args, "mode", None),
+            role=args.role,
+            plan=args.plan,
+            plan_only=getattr(args, "plan_only", False),
+            subs=getattr(args, "subs", None),
+        )
+    except ModeConflictError as e:
+        print(json.dumps(
+            {"status": "mode_conflict", "error": str(e)},
+            ensure_ascii=False, indent=2,
+        ), file=_sys.stderr)
+        return 2
+
+    # operator 车道不派发：run 的语义就是「派」，受理它等于让审计里的 mode 撒谎。
+    if decision["mode"] == "operator":
+        log_audit("mode_rejected", {
+            "mode": "operator", "reason": "run 不受理 operator 车道",
+            "request_preview": (args.request or "")[:200],
+        })
+        print(json.dumps({
+            "status": "not_dispatchable",
+            "mode": "operator",
+            "error": "operator 是 Caller 自持车道，run 不受理——这类动作核对白名单后自己跑。",
+            "suggested": f"python3 {Path(__file__).name} check '<命令或任务>'  # 核查并记账",
+        }, ensure_ascii=False, indent=2), file=_sys.stderr)
+        return 2
+
+    args.plan = decision["mode"] == "plan"  # 供下方 bg spec 回放沿用旧字段
+
     # ── 后台（已弃用 2026-07-25）──
     if getattr(args, "bg", False):
         print(
@@ -2803,6 +3069,9 @@ def _cmd_run(args) -> int:
             "file": args.file,
             "timeout": timeout,
             "plan": args.plan,
+            "mode": decision["mode"],
+            "plan_only": decision["plan_only"],
+            "subs": decision["subs"],
             "no_relay": args.no_relay,
             "dry_run": args.dry_run,
         }
@@ -2852,10 +3121,14 @@ def _cmd_run(args) -> int:
             "file": args.file,
             "timeout": timeout,
             "plan": args.plan,
+            "mode": decision["mode"],
+            "plan_only": decision["plan_only"],
+            "subs": decision["subs"],
         }
         state = {
             "task_id": task_id,
             "mode": "wait",
+            "work_mode": decision["mode"],
             "spec": spec,
             "status": "running",
             "created_at": _now_iso(),
@@ -2865,26 +3138,19 @@ def _cmd_run(args) -> int:
         caller = Caller()
         try:
             # dry_run=True：relay_to_wechat 只拼不发——微信回复由 gateway notify 唤醒 Hermes 后自行组织
-            if args.plan:
-                res = caller.plan_and_execute(
-                    args.request, task_type=args.task_type, request_summary=args.summary,
-                    file_path=args.file, poll_timeout=timeout, dry_run=True,
-                )
-                exe = res.get("execute", {}) or {}
-                result_text = res.get("result_text") or exe.get("result_text", "")
-                status = exe.get("status", res.get("status", "completed"))
-                room_id = exe.get("room_id") or res.get("room_id")
-                session_id = exe.get("session_id") or res.get("session_id")
-            else:
-                res = caller.dispatch_and_relay(
-                    args.request, task_type=args.task_type, request_summary=args.summary,
-                    role=args.role, room_id=args.room_id, template_id=args.template,
-                    file_path=args.file, poll_timeout=timeout, dry_run=True,
-                )
-                result_text = res.get("result_text", "")
-                status = res.get("status", "completed")
-                room_id = res.get("room_id")
-                session_id = res.get("session_id")
+            res = _run_by_mode(caller, decision, args, timeout, dry_run=True)
+            result_text = res.get("result_text", "")
+            status = res.get("status", "completed")
+            room_id = res.get("room_id")
+            session_id = res.get("session_id")
+        except ModeConflictError as e:
+            state.update({"status": "mode_conflict", "error": str(e), "completed_at": _now_iso()})
+            _write_state(task_id, state)
+            print(json.dumps(
+                {"mode": "wait", "task_id": task_id, "status": "mode_conflict", "error": str(e)},
+                ensure_ascii=False, indent=2,
+            ))
+            return 2
         except GatekeeperBlockedError as e:
             state.update({"status": "blocked", "error": str(e), "completed_at": _now_iso()})
             _write_state(task_id, state)
@@ -2931,7 +3197,8 @@ def _cmd_run(args) -> int:
         })
         print(json.dumps(
             {
-                "mode": "wait",
+                "mode": "wait",           # 执行方式（等待者模式），非工作模式
+                "work_mode": res.get("mode"),  # 工作模式（worker/think/plan/fanout）
                 "task_id": task_id,
                 "room_id": room_id,
                 "session_id": session_id,
@@ -2939,6 +3206,7 @@ def _cmd_run(args) -> int:
                 "template_id": res.get("template_id"),
                 "role": res.get("role"),
                 "status": status,
+                "degraded": res.get("degraded"),
                 "elapsed": res.get("elapsed"),
                 "completed_at": res.get("completed_at"),
                 "inbox_path": str(_inbox_path(task_id)),
@@ -2953,17 +3221,13 @@ def _cmd_run(args) -> int:
     caller = Caller()
     fg_dry_run = bool(args.no_relay) or bool(args.dry_run)
     try:
-        if args.plan:
-            res = caller.plan_and_execute(
-                args.request, task_type=args.task_type, request_summary=args.summary,
-                file_path=args.file, poll_timeout=timeout, dry_run=fg_dry_run,
-            )
-        else:
-            res = caller.dispatch_and_relay(
-                args.request, task_type=args.task_type, request_summary=args.summary,
-                role=args.role, room_id=args.room_id, template_id=args.template,
-                file_path=args.file, poll_timeout=timeout, dry_run=fg_dry_run,
-            )
+        res = _run_by_mode(caller, decision, args, timeout, dry_run=fg_dry_run)
+    except ModeConflictError as e:
+        print(json.dumps(
+            {"status": "mode_conflict", "error": str(e)},
+            ensure_ascii=False, indent=2,
+        ), file=_sys.stderr)
+        return 2
     except GatekeeperBlockedError as e:
         # BLOCKED 拒绝：审计已在 dispatch 内写过，此处只优雅回执，不抛 traceback。
         print(json.dumps(
@@ -2974,6 +3238,7 @@ def _cmd_run(args) -> int:
         return 2
     print(json.dumps(
         {
+            "mode": res.get("mode"),
             "task_id": res.get("task_id"),
             "room_id": res.get("room_id"),
             "session_id": res.get("session_id"),
@@ -2981,6 +3246,7 @@ def _cmd_run(args) -> int:
             "template_id": res.get("template_id"),
             "role": res.get("role"),
             "status": res.get("status"),
+            "degraded": res.get("degraded"),
             "elapsed": res.get("elapsed"),
             "completed_at": res.get("completed_at"),
             "relayed": res.get("relayed"),
@@ -3254,7 +3520,25 @@ def _build_parser():
         action="store_true",
         help="测试用：前台模式不真发微信（拉模式下 --bg 触发消息已恒不发，本开关只影响裸前台 relay）",
     )
-    pr.add_argument("--plan", action="store_true", help="两段式：Thinker 出计划 → Worker 执行")
+    pr.add_argument("--plan", action="store_true", help="[= --mode plan] 两段式：Thinker 出计划 → Worker 执行")
+    pr.add_argument(
+        "--mode", choices=list(MODES), default=None,
+        help="工作模式（docs/work-modes.md）：worker=直派 Worker（单步、要东西）｜"
+             "think=派 Thinker（要判断，不要东西；+--plan-only 则只出结构化计划）｜"
+             "plan=两段式 Thinker→Worker（多步有依赖、要东西）｜"
+             "fanout=多 Worker 并行（配 --sub，N 个互不依赖子任务）｜"
+             "operator=Caller 自持车道（run 不受理，见 `caller.py check`）。"
+             "不给则由旧 --role/--plan 推导",
+    )
+    pr.add_argument(
+        "--plan-only", dest="plan_only", action="store_true",
+        help="只出六段结构化计划、不执行（自动按 --mode think 走；与 --plan 互斥）",
+    )
+    pr.add_argument(
+        "--sub", dest="subs", action="append", default=[], metavar="子任务",
+        help="fanout 子任务，可重复给（≥2 个）。positional request 作为共享前置上下文拼到每个子任务前。"
+             "⚠️ 当前无文件隔离，多 Worker 并发写同一文件会互相覆盖——只适合只读或互不相干的子任务",
+    )
     pr.set_defaults(func=_cmd_run)
 
     ps = sub.add_parser("status", help="查看后台任务状态/结果")

@@ -19,7 +19,9 @@
 
 ```
 角色层   Caller / Thinker / Worker
-  = 「该角色默认用哪个 areco 模板」的映射（stand/registry.json），不是配置体系
+  = 「该角色默认用哪个 areco 模板」的映射，不是配置体系
+  编辑面 = areco 设置页「StandCode 默认角色」（GET/PUT /api/standcode/defaults）
+  回落   = stand/registry.json（areco 未设置/不可达时）
       ↓ 选择（直接引用 areco 现有模板 id，不在 areco 里新建模板）
 模板层   areco Template（执行配置唯一落点，areco config.json / 设置页维护）
   可带 harness / model / preset 三个可选字段 = 模板的深度自定义
