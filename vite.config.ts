@@ -4,6 +4,8 @@ import type { ProxyOptions } from 'vite'
 import { readFileSync } from 'node:fs'
 
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8'))
+// 每次构建唯一：即使业务代码没变，也能让已打开的 SPA 识别「服务器已换前端产物」。
+const buildId = new Date().toISOString()
 
 const CLIENT_PORT = Number(process.env.ARECO_CLIENT_PORT || process.env.AGENT_REMOTE_CLIENT_PORT || 8791)
 const SERVER_PORT = Number(process.env.ARECO_SERVER_PORT || process.env.AGENT_REMOTE_SERVER_PORT || 8790)
@@ -34,6 +36,7 @@ export default defineConfig({
   plugins: [vue()],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+    __BUILD_ID__: JSON.stringify(buildId),
   },
   build: {
     outDir: '../../dist/client',

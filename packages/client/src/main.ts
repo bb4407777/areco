@@ -6,6 +6,7 @@ import { wsClient } from './ws'
 import { useSessionsStore } from './stores/sessions'
 import { useRoomsStore } from './stores/rooms'
 import { useUiStore } from './stores/ui'
+import { startFrontendUpdateWatcher } from './utils/frontendUpdate'
 import hljsDark from 'highlight.js/styles/github-dark-dimmed.css?inline'
 import hljsLight from 'highlight.js/styles/github.css?inline'
 import './styles/main.css'
@@ -21,6 +22,13 @@ rooms.loadReadState()
 const ui = useUiStore(pinia)
 ui.applyTheme() // mount 前先定主题，防闪白/闪黑
 ui.watchViewport()
+startFrontendUpdateWatcher({
+  hasUnsavedWork: () => {
+    if (Object.values(ui.drafts).some((text) => text.trim())) return true
+    return [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('.composer input[type="text"], .composer textarea, textarea.prompt-input, .n-modal input')]
+      .some((el) => el.value.trim())
+  },
+})
 
 // 代码高亮主题跟随亮暗切换（hljs 样式表整张换）
 const hljsStyle = document.createElement('style')

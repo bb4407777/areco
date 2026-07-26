@@ -6,6 +6,7 @@ import type { GlobalThemeOverrides } from 'naive-ui'
 import { useSessionsStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
 import { wsClient } from './ws'
+import { frontendUpdateAvailable, frontendUpdateBlocked, reloadFrontendNow } from './utils/frontendUpdate'
 
 const store = useSessionsStore()
 const ui = useUiStore()
@@ -38,6 +39,11 @@ const overrides = computed(() => (ui.theme === 'light' ? lightOverrides : darkOv
 // 座舱页/历史正文页寸土寸金，手机上隐藏顶栏；桌面端有导航栏始终显示
 const inSession = computed(() => ui.isMobile && (route.path.startsWith('/session/') || route.path.startsWith('/history/')))
 const connected = wsClient.connected
+
+function forceUpdate() {
+  if (frontendUpdateBlocked.value && !window.confirm('当前有未发送内容，立即更新会丢失这些文字。仍要更新吗？')) return
+  reloadFrontendNow(true)
+}
 </script>
 
 <template>
@@ -63,6 +69,12 @@ const connected = wsClient.connected
           </header>
           <Transition name="fade">
             <div v-if="!connected && store.ready" class="conn-banner">连接已断开，正在重连…</div>
+          </Transition>
+          <Transition name="fade">
+            <div v-if="frontendUpdateAvailable" class="update-banner">
+              <span>{{ frontendUpdateBlocked ? '新版本已就绪；发送或清空未提交内容后将自动更新。' : '新版本已就绪，正在安全更新…' }}</span>
+              <button v-if="frontendUpdateBlocked" type="button" @click="forceUpdate">立即更新</button>
+            </div>
           </Transition>
           <router-view />
         </div>
@@ -136,5 +148,34 @@ const connected = wsClient.connected
   color: var(--danger);
   font-size: 12px;
   text-align: center;
+}
+.update-banner {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: min(640px, calc(100vw - 24px));
+  padding: 7px 12px;
+  border: 1px solid #e8c75b;
+  border-radius: 8px;
+  background: #fff3cd;
+  color: #785900;
+  font-size: 12px;
+  text-align: center;
+  box-shadow: 0 4px 16px #0002;
+}
+.update-banner button {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
 </style>
