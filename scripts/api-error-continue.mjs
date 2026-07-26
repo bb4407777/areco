@@ -104,10 +104,14 @@ const RE_PROMPT_TYPED = /^\s*│?\s*❯\s+\S/
 // ◯/○ 是后台任务/workflow 状态栏（「◯ skills-bug-sweep 21/88 agents done」），也是家具——
 // 2026-07-27 实战漏判：该行被当实质内容致 Connection closed 停摆误判 stale
 const RE_CHROME_TRAILER = /^\s*[✻✽✶✳※·◯○◎]\s?/
-// 冻结尾注检测（2026-07-27 高律师截图定）：✻ Cogitated/Worked/Waiting for Xs 秒数不变 = 卡死。
-// 跨 tick 比较尾注原文，连续 ≥90 秒不变 + 空输入框 → 视同 stalled 注入 continue。
+// 冻结尾注检测（2026-07-27 高律师截图定）：✻ Cogitated/Worked for X 秒数不变 = 卡死。
+// 只认过去时已完成计时（Cogitated/Worked for Xm Ys）——秒数不动说明已完成在那干等；
+// 「Waiting for N dynamic workflow」是等后台 workflow（属 busy，进度在 ◯ 行），不算卡死，
+// 否则会往正在跑的 workflow 会话里误注 continue 打断它（2026-07-27 实战 80527f8e/4f0dda53）。
 const FROZEN_TRAILER_MS = 90_000
-const RE_TRAILER_TIME = /[✻✽✶✳]\s?(Cogitated|Worked|Waiting)\s+for\s+\d+/
+const RE_TRAILER_TIME = /[✻✽✶✳]\s?(Cogitated|Worked)\s+for\s+\d+/
+// 后台任务状态栏：「◯ skills-bug-sweep 27/88 agents done」——有此线说明 workflow 在跑=忙，不判冻死
+const RE_BACKGROUND_TASK = /^\s*◯\s+.*agents?\s+/i
 function extractTrailer(lines) {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (RE_TRAILER_TIME.test(lines[i])) return lines[i].trim()
@@ -287,13 +291,19 @@ function selfTest() {
     st.ep.gaveUp = true
     check('give-up 后不再切', !episodeWantsSwitch(st.ep, 30 * M))
   }
-  for (const [name, cond] of epCases) {
+  // 冻结尾注提取：Cogitated/Worked 已完成计时算卡死信号；Waiting-for-workflow 不算（busy 不打断）
+  const trCases = []
+  const trCheck = (name, cond) => trCases.push([name, cond])
+  trCheck('Cogitated 计时尾注被提取', extractTrailer(['✻ Cogitated for 2m 38s']) !== null)
+  trCheck('Worked 计时尾注被提取', extractTrailer(['✻ Worked for 20m 10s']) !== null)
+  trCheck('Waiting-for-workflow 不被提取(避免误判busy)', extractTrailer(['✻ Waiting for 1 dynamic workflow to finish']) === null)
+  for (const [name, cond] of trCases) {
     if (!cond) {
       fail++
-      console.error(`FAIL episode :: ${name}`)
+      console.error(`FAIL trailer :: ${name}`)
     }
   }
-  console.log(fail === 0 ? `self-test PASS (${cases.length + epCases.length} cases)` : `self-test ${fail} FAIL`)
+  console.log(fail === 0 ? `self-test PASS (${cases.length + epCases.length + trCases.length} cases)` : `self-test ${fail} FAIL`)
   process.exit(fail === 0 ? 0 : 1)
 }
 
@@ -530,7 +540,9 @@ async function main() {
         } else if (now - st.trailer.firstTs >= FROZEN_TRAILER_MS) {
           const hasEmptyPrompt = screenLines.some((l) => RE_PROMPT_EMPTY.test(l))
           const hasTypedPrompt = screenLines.some((l) => RE_PROMPT_TYPED.test(l))
-          if (hasEmptyPrompt && !hasTypedPrompt) {
+          const hasBackgroundTask = screenLines.some((l) => RE_BACKGROUND_TASK.test(l))
+          // 空输入框 + 无未发文字 + 无后台 workflow 在跑 → 才判冻死（有 ◯ 任务=在忙，别打断）
+          if (hasEmptyPrompt && !hasTypedPrompt && !hasBackgroundTask) {
             cls = { verdict: 'stalled', errorLine: trailer + '（秒数不变，判定卡死）' }
           }
         }
