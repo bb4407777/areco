@@ -15,17 +15,23 @@
 //
 // 用法：
 //   node scripts/api-error-continue.mjs               扫描全部 → 注入 → 验证 → 紧凑报告
+//   node scripts/api-error-continue.mjs --patrol      巡检模式（cc-connect cron 每 5 分钟跑）：
+//                                                     自动 continue；只有「救活/救不活/反复报错/
+//                                                     卡确认框超 8 分钟/进程 error 态」才 cc-send
+//                                                     推微信，干净则只写日志一行零打扰
 //   node scripts/api-error-continue.mjs --dry-run     只识别不注入
 //   node scripts/api-error-continue.mjs --session <id前缀> [--force]
 //                                                     只处理指定会话；--force 跳过 API Error
 //                                                     匹配要求（仍拒绝工作中/权限框/未发送文字）
 //   node scripts/api-error-continue.mjs --json        机器可读输出
 //   node scripts/api-error-continue.mjs --self-test   识别状态机纯函数自测（不联网）
+//   --no-send（配 --patrol 调试：通知只打印不发微信） --test-notify（发一条通道测试消息）
 // 冷却：同一会话 10 分钟内不重复注入（--cooldown-min 调，--force 忽略）；24h 超 6 次标记需人工。
 
 import WebSocket from 'ws'
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const BASE = process.env.ARECO_BASE || 'http://127.0.0.1:8790'
@@ -43,9 +49,17 @@ const opt = (f, dflt) => {
 const DRY = has('--dry-run')
 const JSON_OUT = has('--json')
 const FORCE = has('--force')
+const PATROL = has('--patrol')
+const NO_SEND = has('--no-send')
 const ONLY = opt('--session', null)
 const COOLDOWN_MS = Number(opt('--cooldown-min', '10')) * 60_000
 const MAX_PER_DAY = 6
+// 卡在权限/信任框连续可见超此时长才告警（约两个巡检周期，瞬时确认框不打扰）
+const DIALOG_PERSIST_MS = 8 * 60_000
+// 微信通知走 cc-connect 出站（与 deadline-patrol 同口径：显式会话键，裸 -m 会依赖活跃指针静默失败）
+const CC_SEND = '/Users/gao/scripts/cc-send.sh'
+const WEIXIN_SESSION = 'weixin:dm:o9cq802pfYrkgul79flJor4d7uQs@im.wechat'
+const LOCK_FILE = path.join(ROOT, 'data', 'api-error-continue.lock')
 
 // ---- 识别状态机（纯函数，--self-test 可测）----------------------------------
 
@@ -235,10 +249,57 @@ function audit(entry) {
   } catch { /* 审计失败不阻断主流程 */ }
 }
 
+/** 单实例锁：巡检 5 分钟一跑，与手动运行重叠时防对同一会话双发 continue。陈锁（>2min）视为死进程接管 */
+function acquireLock() {
+  fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, ts: Date.now() }), { flag: 'wx' })
+      process.on('exit', () => {
+        try { fs.unlinkSync(LOCK_FILE) } catch { /* noop */ }
+      })
+      return true
+    } catch {
+      try {
+        const prev = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf-8'))
+        if (Date.now() - prev.ts < 120_000) return false
+        fs.unlinkSync(LOCK_FILE)
+      } catch {
+        try { fs.unlinkSync(LOCK_FILE) } catch { return false }
+      }
+    }
+  }
+  return false
+}
+
+/** 推微信（返回是否成功）。--no-send 时只打印，便于调试巡检文案 */
+function notifyWeixin(text) {
+  if (NO_SEND) {
+    console.log(`[no-send] ${text}`)
+    return true
+  }
+  const r = spawnSync(CC_SEND, ['-s', WEIXIN_SESSION, '-m', text], {
+    env: { ...process.env, HOME: '/Users/gao' },
+    timeout: 120_000,
+    encoding: 'utf-8',
+  })
+  const ok = r.status === 0
+  audit({ action: 'notify', ok, text: text.slice(0, 300), err: ok ? undefined : String(r.stderr || r.stdout || r.error || '').slice(0, 200) })
+  return ok
+}
+
 // ---- 主流程 -----------------------------------------------------------------
 
 async function main() {
   if (has('--self-test')) selfTest()
+  if (has('--test-notify')) {
+    notifyWeixin('🩺 areco 会话巡检通道测试：每 5 分钟自动体检 claude 系会话，API Error 卡死自动 continue，异常才提醒。')
+    return
+  }
+  if (PATROL && (DRY || FORCE || ONLY)) {
+    console.error('--patrol 不与 --dry-run/--force/--session 组合')
+    process.exit(2)
+  }
   const state = loadState()
   const now = Date.now()
   const all = await api('/sessions')
@@ -253,17 +314,56 @@ async function main() {
     console.error('--force 必须配合 --session 使用（拒绝全量强注）')
     process.exit(2)
   }
+  if (!DRY && !acquireLock()) {
+    console.log('另一实例运行中（锁未过期），本次跳过')
+    return
+  }
 
   const results = []
+  if (PATROL) {
+    // 状态剪枝：会话已从看板删除的条目不再保留
+    for (const key of Object.keys(state)) if (!all.some((s) => s.id === key)) delete state[key]
+    // 进程 error 态（pty 级异常，非 API Error）：只通报不动手——生命周期操作归人
+    for (const s of all) {
+      if (!isClaudeFamily(s) || s.archived) continue
+      const st = state[s.id]
+      if (s.status === 'error') {
+        if (!st?.errNotified) {
+          ;(state[s.id] = st || { times: [] }).errNotified = true
+          results.push({ id: s.id.slice(0, 8), name: s.name.slice(0, 24), action: 'crashed', why: '进程 error 态，需到看板处理' })
+          audit({ sessionId: s.id, name: s.name, action: 'crashed' })
+        }
+      } else if (st?.errNotified) {
+        delete st.errNotified
+      }
+    }
+  }
   for (const s of targets) {
     const short = s.id.slice(0, 8)
     const name = s.name.slice(0, 24)
+    const st = state[s.id] || (state[s.id] = { times: [] })
+    st.times = (st.times || []).filter((t) => now - t < 86_400_000)
+    if (st.gaveUp && st.times.length < MAX_PER_DAY) delete st.gaveUp // 24h 窗滚动，重新放行
     let cls
     try {
       cls = classifyScreen(await screenOf(s.id))
     } catch (err) {
       results.push({ id: short, name, action: 'skip', why: `读屏失败 ${err.message}` })
       continue
+    }
+    // 巡检：确认框滞留跟踪——瞬时权限框不吵，连续可见超 DIALOG_PERSIST_MS 才告警一次，消失即复位
+    if (PATROL) {
+      if (cls.verdict === 'dialog') {
+        if (!st.dialog) {
+          st.dialog = { firstTs: now, notified: false }
+        } else if (!st.dialog.notified && now - st.dialog.firstTs >= DIALOG_PERSIST_MS) {
+          st.dialog.notified = true
+          results.push({ id: short, name, action: 'dialog-stuck', why: `卡在确认框 ${Math.round((now - st.dialog.firstTs) / 60000)} 分钟` })
+          audit({ sessionId: s.id, name: s.name, action: 'dialog-stuck' })
+        }
+      } else if (st.dialog) {
+        delete st.dialog
+      }
     }
     if (cls.verdict !== 'stalled' && !FORCE) {
       if (cls.verdict !== 'clean' && cls.verdict !== 'busy') {
@@ -275,15 +375,18 @@ async function main() {
       results.push({ id: short, name, action: 'skip', why: `${cls.verdict}（--force 也不注入）` })
       continue
     }
-    const st = state[s.id] || { times: [] }
-    st.times = (st.times || []).filter((t) => now - t < 86_400_000)
     if (!FORCE && st.times.length && now - st.times[st.times.length - 1] < COOLDOWN_MS) {
       results.push({ id: short, name, action: 'skip', why: '冷却期内（10 分钟）' })
       continue
     }
     if (!FORCE && st.times.length >= MAX_PER_DAY) {
-      results.push({ id: short, name, action: 'skip', why: `24h 已注入 ${st.times.length} 次，反复报错需人工` })
-      audit({ sessionId: s.id, name: s.name, action: 'give-up', errorLine: cls.errorLine })
+      if (!st.gaveUp) {
+        st.gaveUp = true
+        results.push({ id: short, name, action: 'give-up', why: `24h 已注入 ${st.times.length} 次仍反复 API Error，需人工` })
+        audit({ sessionId: s.id, name: s.name, action: 'give-up', errorLine: cls.errorLine })
+      } else if (!PATROL) {
+        results.push({ id: short, name, action: 'skip', why: '24h 上限已达（此前已提醒）' })
+      }
       continue
     }
     if (DRY) {
@@ -303,6 +406,28 @@ async function main() {
     }
   }
   if (!DRY) saveState(state)
+
+  if (PATROL) {
+    const vmapW = { resumed: '已恢复运行', 'screen-changed': '已响应，观察中', 'still-stalled': '注入后仍卡着', 'verify-failed': '验证读屏失败' }
+    const noteworthy = results.filter((r) => ['sent', 'send-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
+    const stamp = new Date().toISOString()
+    if (!noteworthy.length) {
+      console.log(`${stamp} 巡检 clean（${targets.length} 个 claude 系会话）`)
+      return
+    }
+    const L = ['🩺 areco 会话巡检']
+    for (const r of noteworthy) {
+      if (r.action === 'sent') L.push(`✅ ${r.name}：API Error 已注入 continue → ${vmapW[r.verify] || r.verify}`)
+      else if (r.action === 'send-failed') L.push(`❌ ${r.name}：注入失败（${r.why}）`)
+      else if (r.action === 'give-up') L.push(`🆘 ${r.name}：${r.why}`)
+      else if (r.action === 'dialog-stuck') L.push(`⚠️ ${r.name}：${r.why}，请到看板处理`)
+      else if (r.action === 'crashed') L.push(`💥 ${r.name}：${r.why}`)
+    }
+    const text = L.join('\n')
+    console.log(`${stamp}\n${text}`)
+    if (!notifyWeixin(text)) console.log('（微信通知发送失败，见审计日志）')
+    return
+  }
 
   if (JSON_OUT) {
     console.log(JSON.stringify({ scanned: targets.length, results }, null, 1))
