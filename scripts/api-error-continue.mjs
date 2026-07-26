@@ -2,9 +2,13 @@
 // api-error-continue.mjs — 一键识别 API Error 卡住的 claude 系会话并自动注入 continue
 // （2026-07-26 高律师点名建设：微信里对 Hermes 说「续跑」即触发本脚本，Hermes 白名单直干。）
 //
-// 只做一件事：running 的 claude 系会话，尾屏停在错误上（API Error/Connection error/
-// 超时/Please run \/login/限流/网络错误码等，见 RE_ERROR）且已回到空闲输入框
-// （非 Retrying、非工作中、非权限框、输入框无未发送文字）→ 注入字面量 "continue" + 回车。
+// 两类停摆，两种固定载荷（2026-07-26 高律师定）：
+// 1. 尾屏停在错误上（API Error/Connection error/超时/Please run \/login/限流/网络
+//    错误码等，见 RE_ERROR）且已回到空闲输入框（非 Retrying、非工作中、输入框无
+//    未发送文字）→ 注入字面量 "continue" + 回车。
+// 2. 停在权限/信任确认框 → 只注入回车（Enter 选默认项，通常是 Yes；不发任何文字，
+//    高律师 2026-07-26「权限确认栏也帮我 enter」）。连环框靠逐分钟一跳清完；
+//    Enter 清不掉的框才走 8 分钟 dialog-stuck 告警。
 //
 // 通道说明（为什么走 WS input 而不是 room / sendline）：
 // - room 投递只覆盖项目内成员，卡住的多是游离会话；
@@ -17,13 +21,14 @@
 // 用法：
 //   node scripts/api-error-continue.mjs               扫描全部 → 注入 → 验证 → 紧凑报告
 //   node scripts/api-error-continue.mjs --patrol      巡检模式（cc-connect cron 每 1 分钟跑，2026-07-26 高律师定）：
-//                                                     stalled 即注 continue（冷却 50s）；同一故障片段
-//                                                     持续 ≥5 分钟 → `freemodel-key next --probe` 切
-//                                                     key×节点组合（探活选通的那个），切完立刻再注
-//                                                     continue；仍不救 → 每 5 分钟再跳一个组合，全局
-//                                                     每小时最多 6 跳；片段注满 15 次 give-up 通知人工。
-//                                                     微信只报「切换/救不活/卡确认框/进程 error」，
-//                                                     干净或普通续跑只写日志。
+//                                                     报错停摆即注 continue（冷却 50s）；确认框自动
+//                                                     Enter 选默认项（静默，Enter 清不掉超 8 分钟才告警）；
+//                                                     同一报错片段持续 ≥5 分钟 → `freemodel-key next
+//                                                     --probe` 切 key×节点组合（探活选通，运行中会话
+//                                                     吃得到新配置），切完立刻再注 continue；仍不救 →
+//                                                     每 5 分钟再跳一个组合，全局每小时最多 6 跳；
+//                                                     片段注满 15 次 give-up 通知人工。
+//                                                     微信只报「切换/救不活/卡确认框/进程 error」。
 //   node scripts/api-error-continue.mjs --dry-run     只识别不注入
 //   node scripts/api-error-continue.mjs --session <id前缀> [--force]
 //                                                     只处理指定会话；--force 跳过 API Error
@@ -278,7 +283,7 @@ async function screenOf(id) {
 
 // ---- 注入（WS input，不 attach）---------------------------------------------
 
-function sendContinue(sessionId) {
+function sendKeys(sessionId, data) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/ws`)
     const timer = setTimeout(() => {
@@ -286,7 +291,7 @@ function sendContinue(sessionId) {
       reject(new Error('ws timeout'))
     }, 8000)
     ws.on('open', () => {
-      ws.send(JSON.stringify({ type: 'input', sessionId, data: 'continue\r' }))
+      ws.send(JSON.stringify({ type: 'input', sessionId, data }))
       // write() 服务端拆帧：文本即写、\r 延迟 300ms。等 700ms 保证两段都已写入 pty 再断开。
       setTimeout(() => {
         clearTimeout(timer)
@@ -310,6 +315,10 @@ function sendContinue(sessionId) {
     })
   })
 }
+
+// 载荷白名单只有这两个：错误停摆 → "continue"+回车；确认框 → 裸回车（选默认项）
+const sendContinue = (sessionId) => sendKeys(sessionId, 'continue\r')
+const sendEnter = (sessionId) => sendKeys(sessionId, '\r')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -475,15 +484,16 @@ async function main() {
     }
     updateEpisode(st, cls.verdict, now)
     scans.push({ s, short, name, st, cls })
-    // 巡检：确认框滞留跟踪——瞬时权限框不吵，连续可见超 DIALOG_PERSIST_MS 才告警一次，消失即复位
+    // 巡检：确认框滞留跟踪——pass2 会自动 Enter，这里只记时长；连续可见超 DIALOG_PERSIST_MS
+    // 说明 Enter 也清不掉（真需要人选的框），告警一次，消失即复位
     if (PATROL) {
       if (cls.verdict === 'dialog') {
         if (!st.dialog) {
           st.dialog = { firstTs: now, notified: false }
         } else if (!st.dialog.notified && now - st.dialog.firstTs >= DIALOG_PERSIST_MS) {
           st.dialog.notified = true
-          results.push({ id: short, name, action: 'dialog-stuck', why: `卡在确认框 ${Math.round((now - st.dialog.firstTs) / 60000)} 分钟` })
-          audit({ sessionId: s.id, name: s.name, action: 'dialog-stuck' })
+          results.push({ id: short, name, action: 'dialog-stuck', why: `卡在确认框 ${Math.round((now - st.dialog.firstTs) / 60000)} 分钟（自动 Enter ${st.dialog.enters || 0} 次未清）` })
+          audit({ sessionId: s.id, name: s.name, action: 'dialog-stuck', enters: st.dialog.enters || 0 })
         }
       } else if (st.dialog) {
         delete st.dialog
@@ -531,13 +541,47 @@ async function main() {
   for (const scan of scans) {
     const { s, short, name, st } = scan
     let cls = scan.cls
+    // 确认框：自动 Enter 选默认项（2026-07-26 高律师「权限确认栏也帮我 enter」）。
+    // 连环框每分钟清一层；Enter 无效的框由普查段的 dialog-stuck 8 分钟告警兜底。
+    if (cls.verdict === 'dialog') {
+      if (DRY) {
+        results.push({ id: short, name, action: 'would-enter' })
+        continue
+      }
+      if (!FORCE && st.times.length && now - st.times[st.times.length - 1] < COOLDOWN_MS) {
+        continue
+      }
+      if (PATROL) {
+        // 普查到现在隔了一段，框可能已被人点掉，注前复核
+        try {
+          cls = classifyScreen(await screenOf(s.id))
+        } catch {
+          continue
+        }
+        if (cls.verdict !== 'dialog') continue
+      }
+      try {
+        await sendEnter(s.id)
+        st.times.push(now)
+        if (st.dialog) st.dialog.enters = (st.dialog.enters || 0) + 1
+        await sleep(1500)
+        let after = 'verify-failed'
+        try { after = classifyScreen(await screenOf(s.id)).verdict } catch { /* noop */ }
+        results.push({ id: short, name, action: 'dialog-enter', verify: after })
+        audit({ sessionId: s.id, name: s.name, action: 'dialog-enter', after })
+      } catch (err) {
+        results.push({ id: short, name, action: 'send-failed', why: `确认框 Enter 失败 ${err.message}` })
+        audit({ sessionId: s.id, name: s.name, action: 'send-failed', error: err.message, kind: 'dialog-enter' })
+      }
+      continue
+    }
     if (cls.verdict !== 'stalled' && !FORCE) {
       if (cls.verdict !== 'clean' && cls.verdict !== 'busy') {
         results.push({ id: short, name, action: 'skip', why: cls.verdict, errorLine: cls.errorLine })
       }
       continue
     }
-    if (FORCE && (cls.verdict === 'busy' || cls.verdict === 'dialog' || cls.verdict === 'pending-input')) {
+    if (FORCE && (cls.verdict === 'busy' || cls.verdict === 'pending-input')) {
       results.push({ id: short, name, action: 'skip', why: `${cls.verdict}（--force 也不注入）` })
       continue
     }
@@ -582,24 +626,26 @@ async function main() {
 
   if (PATROL) {
     const vmapW = { resumed: '已恢复运行', 'screen-changed': '已响应，观察中', 'still-stalled': '注入后仍卡着', 'verify-failed': '验证读屏失败' }
+    const dmapW = { dialog: '仍有确认框（可能连环，下轮再清）', busy: '已继续工作', clean: '已清', stale: '已清' }
     const line = (r) =>
-      r.action === 'sent' ? `✅ ${r.name}：API Error 已注入 continue → ${vmapW[r.verify] || r.verify}`
+      r.action === 'sent' ? `✅ ${r.name}：报错停摆已注入 continue → ${vmapW[r.verify] || r.verify}`
+      : r.action === 'dialog-enter' ? `⏎ ${r.name}：确认框已自动 Enter → ${dmapW[r.verify] || r.verify}`
       : r.action === 'send-failed' ? `❌ ${r.name}：注入失败（${r.why}）`
       : r.action === 'key-switch' ? `🔑 ${r.why}`
       : r.action === 'switch-failed' ? `🆘 ${r.why}`
       : r.action === 'give-up' ? `🆘 ${r.name}：${r.why}`
       : r.action === 'dialog-stuck' ? `⚠️ ${r.name}：${r.why}，请到看板处理`
       : `💥 ${r.name}：${r.why}`
-    const logworthy = results.filter((r) => ['sent', 'send-failed', 'key-switch', 'switch-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
+    const logworthy = results.filter((r) => ['sent', 'dialog-enter', 'send-failed', 'key-switch', 'switch-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
     const stamp = new Date().toISOString()
     if (!logworthy.length) {
       console.log(`${stamp} 巡检 clean（${targets.length} 个 claude 系会话）`)
       return
     }
     console.log(`${stamp}\n${logworthy.map(line).join('\n')}`)
-    // 成功续跑静默不报（高律师 2026-07-26「continue 其实不用汇报」）；注入后仍卡的也不单独吵，
-    // 反复失败会走 give-up 聚合成一条。只有需要人出手的才推微信。
-    const alerts = logworthy.filter((r) => r.action !== 'sent')
+    // 成功续跑/自动 Enter 静默不报（高律师 2026-07-26「continue 其实不用汇报」，确认框同理）；
+    // 注入后仍卡的也不单独吵，反复失败会走 give-up/dialog-stuck 聚合。只有需要人出手的才推微信。
+    const alerts = logworthy.filter((r) => r.action !== 'sent' && r.action !== 'dialog-enter')
     if (alerts.length) {
       const text = ['🩺 areco 会话巡检', ...alerts.map(line)].join('\n')
       if (!notifyWeixin(text)) console.log('（微信通知发送失败，见审计日志）')
@@ -617,12 +663,15 @@ async function main() {
   const failed = results.filter((r) => r.action === 'send-failed')
   console.log(`扫描 ${targets.length} 个运行中 claude 系会话${DRY ? '（dry-run）' : ''}`)
   if (!results.length) {
-    console.log('未发现 API Error 卡住的会话')
+    console.log('未发现卡住的会话（报错停摆/确认框）')
     return
   }
   const vmap = { resumed: '已恢复运行', 'screen-changed': '屏幕已变化', 'still-stalled': '⚠️ 注入后仍卡着', 'verify-failed': '验证读屏失败' }
+  const dmap = { dialog: '仍有确认框（可能连环）', busy: '已继续工作', clean: '已清', stale: '已清' }
   for (const r of sent)
     console.log(`${DRY ? '🔎 识别到' : '✅ 已注入 continue'} ${r.id} ${r.name}${r.verify ? ` → ${vmap[r.verify] || r.verify}` : ''}\n   ${r.errorLine || ''}`)
+  for (const r of results.filter((x) => x.action === 'dialog-enter' || x.action === 'would-enter'))
+    console.log(`${r.action === 'would-enter' ? '🔎 识别到确认框' : '⏎ 确认框已自动 Enter'} ${r.id} ${r.name}${r.verify ? ` → ${dmap[r.verify] || r.verify}` : ''}`)
   for (const r of skipped) console.log(`⏭️ 跳过 ${r.id} ${r.name}：${r.why}`)
   for (const r of failed) console.log(`❌ 注入失败 ${r.id} ${r.name}：${r.why}`)
 }
