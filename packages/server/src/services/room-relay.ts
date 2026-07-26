@@ -23,7 +23,9 @@ import { readHistoryAllMessages } from './history'
 
 const log = createLogger('room-relay')
 
-const POLL_MS = 2000
+// 2026-07-26 StandCode 提速批件：2000→1000，消息从落库到投递的平均等待 ~1s→~0.5s。
+// 扫的是本地 SQLite 增量 + captureTick 读屏，1s 一轮成本可忽略；env 可调回。
+const POLL_MS = Math.max(250, Number(process.env.ARECO_RELAY_POLL_MS ?? 1000) || 1000)
 const MAX_DEPTH = 3
 /** 注入回显验证：重试次数与单次等待（回显标记为每次注入的唯一 nonce，见 injectNote） */
 const ECHO_VERIFY_MS = 8000

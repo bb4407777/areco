@@ -433,6 +433,17 @@ export class Session extends EventEmitter {
    *  quiet 若在此期间 fire，注入文本会落在 TUI 接管 tty（raw mode）之前——canonical 模式下
    *  \r 被 ICRNL 转成 \n，只换行不提交，agent 一直等用户手动回车（2026-07-21 实锤） */
   private static readonly MIN_BOOT_MS = 8000
+  /** 启动下限按 harness 分档（2026-07-26 StandCode 提速批件）：8s 一刀切是给 codex 的
+   *  zsh -ilc 冷启动定的；claude TUI 实测 1-2s 内接管 tty，降到 4s——每单派发少等 4s。
+   *  就算注入真落在 TUI 接管前（\r 不提交），StandCode 投递层的空转自愈会重投一次
+   *  （IDLE_STALL_PROBES），风险有底。env ARECO_MIN_BOOT_MS 全局覆盖（毫秒）。 */
+  private minBootMs(): number {
+    const env = Number(process.env.ARECO_MIN_BOOT_MS)
+    if (Number.isFinite(env) && env > 0) return env
+    const base = (this.command ?? '').split('/').pop() ?? ''
+    if (base === 'claude' || base.startsWith('claude')) return 4000
+    return Session.MIN_BOOT_MS
+  }
   /** 提交回车的安静窗口：跨过 TUI 粘贴合帧窗口即可（实测数十 ms），取 120ms 留裕量 */
   private static readonly ENTER_QUIET_MS = 120
   /** 提交回车兜底上限：持续输出的会话不让回车无限拖着；到点无条件补 \r */
@@ -444,8 +455,9 @@ export class Session extends EventEmitter {
       if (done) return
       // 启动下限未满足则延后重试，不消耗这次 fire（maxTimer 早 fire 同理被兜住）
       const bootElapsed = Date.now() - (this.startedAt ?? this.createdAt)
-      if (bootElapsed < Session.MIN_BOOT_MS) {
-        quietTimer = setTimeout(fire, Session.MIN_BOOT_MS - bootElapsed)
+      const minBoot = this.minBootMs()
+      if (bootElapsed < minBoot) {
+        quietTimer = setTimeout(fire, minBoot - bootElapsed)
         return
       }
       done = true
