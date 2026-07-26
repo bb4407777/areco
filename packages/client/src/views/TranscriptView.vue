@@ -295,7 +295,7 @@ function jumpToLatest() {
 }
 
 function switchMode(mode: SessionViewMode) {
-  ui.setSessionView(mode)
+  // 只换本次路由，不写回默认（默认显示模式由设置页统一管，重进按默认，2026-07-24 维护者定）
   if (mode === 'terminal') router.push(`/session/${sessionId.value}`)
 }
 

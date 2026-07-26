@@ -47,10 +47,10 @@ function toggleGroup(id: string) {
   expandedGroups.value = next
 }
 
-// 新建会话落点按设置页「新建会话默认显示模式」偏好（无落盘的 shell 类仍进终端）；
+// 新建会话落点与打开存量同口径：按设置页「默认显示模式」（无落盘的 shell 类仍进终端）；
 // 直接用 spawn 返回的会话对象——store 靠 ws 推送，此刻 byId 还查不到
 function openSpawned(s: SessionSummary) {
-  router.push(sessionEntryPath(s.id, store.byId(s.id) ?? s, store.templates, ui.newSessionView))
+  router.push(sessionEntryPath(s.id, store.byId(s.id) ?? s, store.templates, ui.sessionView))
 }
 
 onMounted(() => {

@@ -142,7 +142,7 @@ export function chatCapable(
 
 /**
  * 按显示偏好算会话落点路由：view 为 chat 且会话有落盘 transcript 可读 → /chat，否则终端页。
- * 看板/侧栏点卡片（sessionView）与新建会话（newSessionView）共用这一份判断，别在调用处复制
+ * 看板/侧栏点卡片与新建会话共用这一份判断（都是设置页「默认显示模式」），别在调用处复制
  */
 export function sessionEntryPath(
   id: string,

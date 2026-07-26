@@ -86,9 +86,8 @@ async function run(action: () => Promise<unknown>) {
   }
 }
 
-// 终端/对话切换：记住偏好，看板点卡片时按偏好进入
+// 终端/对话切换：只换本次路由，不写回默认（默认显示模式由设置页统一管，重进按默认，2026-07-24 维护者定）
 function switchMode(mode: SessionViewMode) {
-  ui.setSessionView(mode)
   if (mode === 'chat') router.push(`/session/${sessionId.value}/chat`)
 }
 

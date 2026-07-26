@@ -22,6 +22,7 @@ import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 import { fmtUptime, trafficColor } from '../utils/format'
+import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import type { TrafficState } from '../../../shared/traffic'
 import { clearInputLog, getInputLog, type InputLogEntry } from '../utils/inputLog'
 
@@ -39,10 +40,6 @@ interface SystemInfo {
 const store = useSessionsStore()
 const ui = useUiStore()
 
-/** 设置项「新建会话默认进入对话模式」：true=对话，false=终端 */
-function setNewSessionDefault(v: boolean) {
-  ui.setNewSessionView(v ? 'chat' : 'terminal')
-}
 const message = useMessage()
 const dialog = useDialog()
 
@@ -476,10 +473,10 @@ function clearLog() {
       <template #header>对话模式</template>
       <div class="pref-row">
         <div>
-          <div class="pref-label">新建会话默认进入对话模式</div>
-          <div class="pref-hint">默认关闭（新建先进终端看启动画面）；shell 等无落盘会话始终进终端</div>
+          <div class="pref-label">默认显示模式</div>
+          <div class="pref-hint">点开会话按此进入；会话内切换只当次有效，重新进入仍按这里。shell 等无落盘会话始终进终端</div>
         </div>
-        <n-switch :value="ui.newSessionView === 'chat'" @update:value="setNewSessionDefault" />
+        <ViewModeSwitch :mode="ui.sessionView" @switch="ui.setSessionView" />
       </div>
       <div class="pref-row">
         <div>
