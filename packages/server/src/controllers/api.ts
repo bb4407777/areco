@@ -269,6 +269,67 @@ export class ApiControllers {
       ok(ctx, { lines: session.screenTail(16) } satisfies ScreenTailPayload)
     })
 
+  // 独立会话程序化注入（2026-07-26 #2wlt 高律师批）：给 roomId=None 的会话一个带审计的
+  // REST 写入口。WS 直写仍是浏览器键盘专属（审计红线不动）——agent 侧注入一律走这里，
+  // 每次落 data/session-input-audit.jsonl 一行（署名 + 文本前 120 字），比临时建房挂
+  // relay 干净：不搅房间台账/自动归档/mention 语义，审计还是显式的。
+  // body: { from: 必填署名, text, submit=true（sendline 安静窗补回车，过 permission
+  // prompt 用 {text:"continue"} 或裸回车 {text:""}）, quiet=false（true 时 onceQuiet
+  // 等输出安静 1.2s 再注入，busy 会话防插花） }
+  sessionInput = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as {
+        from?: string
+        text?: string
+        submit?: boolean
+        quiet?: boolean
+      }
+      const from = String(body.from ?? '').trim()
+      if (!from) throw new Error('from 不能为空（审计要求：注入必须署名）')
+      const session = this.manager.get(ctx.params.id)
+      if (session.status !== 'running' && session.status !== 'spawning') {
+        throw new Error(`会话未在运行（status=${session.status}），拒绝注入`)
+      }
+      const text = String(body.text ?? '')
+      const submit = body.submit !== false
+      const quiet = Boolean(body.quiet)
+      const doWrite = () => {
+        try {
+          if (submit) session.sendline(text, { autoName: false })
+          else if (text) session.write(text)
+        } catch {
+          /* 会话可能在 quiet 等待期间退出；审计行已落，注入自然失效 */
+        }
+      }
+      if (quiet) session.onceQuiet(doWrite)
+      else doWrite()
+      try {
+        fs.appendFileSync(
+          path.join(DATA_DIR, 'session-input-audit.jsonl'),
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            sessionId: session.id,
+            sessionName: session.name,
+            from,
+            submit,
+            quiet,
+            text: text.slice(0, 120),
+          }) + '\n',
+        )
+      } catch {
+        /* 审计写失败不阻塞注入结果返回，但绝不静默：落服务日志 */
+        console.error('[session-input] 审计行写入失败', session.id)
+      }
+      ok(ctx, {
+        injected: true,
+        sessionId: session.id,
+        from,
+        submit,
+        quiet,
+        textPreview: text.slice(0, 80),
+      })
+    })
+
   // ---- Phase 2：transcript + telemetry-lite ----
 
   transcript = (ctx: Context) =>

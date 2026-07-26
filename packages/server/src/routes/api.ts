@@ -40,6 +40,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
 
   router.get('/sessions/:id/transcript', c.transcript)
   router.get('/sessions/:id/screen', c.screen)
+  router.post('/sessions/:id/input', c.sessionInput)
   router.get('/stats', c.stats)
 
   router.get('/history', c.historyList)
