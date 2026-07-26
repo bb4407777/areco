@@ -593,7 +593,9 @@ watch(kind, (k) => {
   const cur = rooms.byId(activeId.value)
   if (!cur || roomKindOf(cur) !== k) activeId.value = activeRooms.value[0]?.id ?? ''
   showArchived.value = false
-  mobileRoomsOpen.value = false
+  // 手机项目页首次通常还没有按需创建的房间；若侧栏关闭，主区也没有 header 的 ☰，
+  // 会形成「目录册有内容但无入口」的死锁。切到项目 tab 时直接展开目录册。
+  mobileRoomsOpen.value = ui.isMobile && k === 'project' && !activeId.value
   msgQuery.value = ''
   if (k === 'project') loadCatalog()
 })
@@ -604,6 +606,7 @@ onMounted(async () => {
     await rooms.refresh()
     if (!activeId.value && activeRooms.value.length) activeId.value = activeRooms.value[0].id
     if (kind.value === 'project') await loadCatalog()
+    if (ui.isMobile && kind.value === 'project' && !activeId.value) mobileRoomsOpen.value = true
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -717,6 +720,12 @@ onMounted(async () => {
     <div v-if="ui.isMobile && mobileRoomsOpen" class="rooms-mask" @click="mobileRoomsOpen = false" />
 
     <main class="main">
+      <button
+        v-if="ui.isMobile && !room && !mobileRoomsOpen"
+        class="mobile-list-open"
+        type="button"
+        @click="mobileRoomsOpen = true"
+      >☰ 打开{{ kindLabel }}列表</button>
       <NSpin v-if="loading" class="center" />
       <NEmpty
         v-else-if="rooms.stale"
@@ -1227,6 +1236,18 @@ onMounted(async () => {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+.mobile-list-open {
+  align-self: flex-start;
+  margin: 10px 12px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bar);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
 }
 .head {
   display: flex;
