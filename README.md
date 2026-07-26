@@ -8,8 +8,8 @@
 
 | 组件 | 位置 | 是什么 | npm |
 |---|---|---|---|
-| **StandCode**（主） | `standcode/` | 三层编排框架：派单 CLI `caller.py` + 收信箱 + 角色/harness/preset 配置 | [`standcode`](https://www.npmjs.com/package/standcode)（已发布） |
-| **areco**（辅·底座） | `packages/` | 多 agent 会话座舱：pty 服务端、transcript、项目房间、设备接管 | `areco`（未发布） |
+| **StandCode**（主） | `standcode/` | 三层编排框架：派单 CLI `caller.py` + 收信箱 + 角色/harness/preset 配置 | [`standcode`](https://www.npmjs.com/package/standcode) |
+| **areco**（辅·底座） | `packages/` | 多 agent 会话座舱：pty 服务端、transcript、项目房间、设备接管 | [`areco`](https://www.npmjs.com/package/areco) |
 
 StandCode 的用法见 [standcode/README.md](standcode/README.md)；以下为底座 areco 的文档。
 
