@@ -1,11 +1,13 @@
 // /api/rooms/* 控制器：项目协作项目 CRUD + 成员管理 + 消息收发。
 // 独立文件（不进 controllers/api.ts）：参数校验 + service 调用 + 统一 {ok,data|error} 响应。
+import fs from 'node:fs'
 import path from 'node:path'
 import type { Context } from 'koa'
-import type { RoomMessage, RoomInfo } from '../../../shared/protocol'
+import type { RoomMessage, RoomInfo, RoomKind } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { RoomStore } from '../services/rooms'
+import { CHARTER_FILE } from '../services/rooms'
 import type { RoomRelay } from '../services/room-relay'
 import * as projectDb from '../services/project-db'
 import { MSG_CLI_PATH } from '../config'
@@ -30,6 +32,35 @@ function guard(ctx: Context, fn: () => void) {
 
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 
+/** 建项目时在根目录脚手架驻留上下文骨架。只补缺，绝不覆盖已有文件（案件目录等已有 README/资料）。 */
+function scaffoldCharter(root: string, name: string) {
+  const file = path.join(root, CHARTER_FILE)
+  if (fs.existsSync(file)) return
+  const skeleton = `# 项目宪章：${name}
+
+> 本文件是项目「${name}」的驻留上下文（SoT）。进驻的每个 agent：动手前先读完本文件；
+> 做完实质动作把结论回写「工作纪要」。会话上下文会压缩、会丢，这个文件不会。
+
+## 这个项目是什么
+
+（一句话说清此域的范围与目标——建项目后尽快补上）
+
+## SoT 与关键路径
+
+- 项目根：${root}
+
+## 行为约定
+
+- 重要结论/进展回写本文件「工作纪要」节，新条目在最上面、带日期。
+- 其余照全局章程执行。
+
+## 工作纪要
+
+（暂无）
+`
+  fs.writeFileSync(file, skeleton, 'utf8')
+}
+
 export class RoomControllers {
   constructor(
     private rooms: RoomStore,
@@ -46,8 +77,13 @@ export class RoomControllers {
 
   create = (ctx: Context) =>
     guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { name?: string }
-      const room = this.rooms.create(body.name ?? '')
+      const body = (ctx.request.body ?? {}) as { name?: string; kind?: string; rootPath?: string }
+      const kind: RoomKind = body.kind === 'project' ? 'project' : 'task'
+      // 项目必须绑根目录（驻留上下文的落点）；用与 setRoot 同一条校验路（realpath + 存在性）
+      const requested = body.rootPath?.trim() || null
+      const canonical = requested ? this.projectFiles.bindRoot(requested) : null
+      const room = this.rooms.create(body.name ?? '', kind, canonical)
+      if (room.kind === 'project' && room.rootPath) scaffoldCharter(room.rootPath, room.name)
       this.relay.broadcastRooms()
       ok(ctx, room)
     })
@@ -124,7 +160,9 @@ export class RoomControllers {
       if (SHELLS.has(path.basename(template.command))) throw new Error('shell 模板不能进项目（没有 agent 可回话）')
       // 先校验后 spawn：归档项目 addMember 必抛，不能让 spawn 先发生留下孤儿会话
       if (room.archivedAt !== null) throw new Error(`项目「${room.name}」已归档，只能查看或恢复`)
-      const cwd = body.cwd?.trim() || undefined
+      // 项目房间成员默认驻进项目根：claude 系 CLI 会原生自动加载该目录的 CLAUDE.md 链，
+      // 文件工具也天然落在域内；显式传 cwd（如 StandCode worktree 隔离）仍优先。
+      const cwd = body.cwd?.trim() || (room.kind === 'project' ? (room.rootPath ?? undefined) : undefined)
       const summary = this.manager.spawn(template.id, { roomId: room.id, cwd })
       const member = this.rooms.addMember(room.id, { name: template.name, kind: 'session', sessionId: summary.id })
       this.relay.broadcastRooms()

@@ -303,11 +303,16 @@ export interface RoomMember {
   sessionId: string | null
 }
 
+/** 房间类型（2026-07-26）：task=有完结、会归档的流水；project=驻扎在文件夹里的常驻域（rootPath 必填，PROJECT.md 为驻留上下文） */
+export type RoomKind = 'task' | 'project'
+
 export interface RoomInfo {
   id: string
   name: string
   /** 消息库的 team 段（room-<id>，与项目 id 对应，改名不受影响） */
   team: string
+  /** 旧 rooms.json 无此字段，读取时补 'task'（迁移方式同 dispatchMode） */
+  kind: RoomKind
   createdAt: number
   /** 归档时间；null = 当前项目。归档项目保留成员快照和消息，只读且不参与消息投递。 */
   archivedAt: number | null

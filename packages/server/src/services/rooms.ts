@@ -4,13 +4,19 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { RoomInfo, RoomMember } from '../../../shared/protocol'
+import type { RoomInfo, RoomKind, RoomMember } from '../../../shared/protocol'
 import { DATA_DIR } from '../config'
 import { createLogger } from '../logger'
 
 const log = createLogger('rooms')
 
 const ROOMS_PATH = path.join(DATA_DIR, 'rooms.json')
+
+/** 报错文案按房间类型措辞（任务/项目两个 tab 共用同一套存储与接口） */
+export const KIND_LABEL: Record<RoomKind, string> = { task: '任务', project: '项目' }
+
+/** 项目驻留上下文文件名（rootPath 下）：建项目时脚手架、投递简报指路、成员回写，三处同源 */
+export const CHARTER_FILE = 'PROJECT.md'
 
 /** 人类成员默认名（config.humanName 可覆盖；@mention 与花名册身份） */
 export const DEFAULT_HUMAN_NAME = 'Owner'
@@ -81,8 +87,10 @@ export class RoomStore {
       // 旧 rooms.json 没有 archivedAt：读取时补 null，下一次保存自然完成迁移。
       // 旧 rooms.json 同样没有 dispatchMode：补 'serial'（当前默认），迁移方式同 archivedAt。
       // rootPath（项目 Files 根）缺省补 null，同上。
+      // kind（2026-07-26 项目/任务分家）缺省补 'task'：既有房间全是任务，项目须显式创建。
       return (parsed as Partial<RoomInfo>[]).map((room) => ({
         ...(room as RoomInfo),
+        kind: room.kind === 'project' ? 'project' : 'task',
         archivedAt: typeof room.archivedAt === 'number' ? room.archivedAt : null,
         // claim 调度模式已砍掉（2026-07-25），旧 rooms.json 里残留的 'claim' 视为默认 'serial'
         dispatchMode: room.dispatchMode === 'parallel' ? 'parallel' : 'serial',
@@ -138,19 +146,22 @@ export class RoomStore {
     return room
   }
 
-  create(name: string): RoomInfo {
+  create(name: string, kind: RoomKind = 'task', rootPath: string | null = null): RoomInfo {
     const trimmed = name.trim()
-    if (!trimmed) throw new Error('项目名不能为空')
-    if (this.rooms.some((r) => r.name === trimmed)) throw new Error(`项目「${trimmed}」已存在`)
+    if (!trimmed) throw new Error(`${KIND_LABEL[kind]}名不能为空`)
+    if (this.rooms.some((r) => r.name === trimmed)) throw new Error(`「${trimmed}」已存在`)
+    // 项目 = 驻扎在文件夹里的常驻域，没有根目录就没有 PROJECT.md 落点，直接拦下
+    if (kind === 'project' && !rootPath) throw new Error('项目必须绑定根目录（驻留上下文 PROJECT.md 的落点）')
     const id = crypto.randomUUID().slice(0, 8)
     const room: RoomInfo = {
       id,
       name: trimmed,
       team: `room-${id}`,
+      kind,
       createdAt: Date.now(),
       archivedAt: null,
       dispatchMode: 'serial', // 默认串行轮转（2026-07-22 调转）：一次只放行一位成员
-      rootPath: null,
+      rootPath,
       members: [{ name: this.humanName, kind: 'human', sessionId: null }],
     }
     this.rooms.push(room)

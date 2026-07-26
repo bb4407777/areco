@@ -115,3 +115,20 @@ test('归档项目禁止改成员', () => {
     /已归档/
   )
 })
+
+test('kind：默认 task；project 必须带根目录；旧数据缺字段迁移为 task', () => {
+  const rooms = new RoomStore('Owner')
+  const task = rooms.create('kind默认测试')
+  assert.equal(task.kind, 'task')
+
+  assert.throws(() => rooms.create('缺根项目', 'project'), /根目录/)
+
+  const project = rooms.create('带根项目', 'project', '/tmp/proj-root')
+  assert.equal(project.kind, 'project')
+  assert.equal(project.rootPath, '/tmp/proj-root')
+  assert.equal(new RoomStore('Owner').get(project.id).kind, 'project', 'kind 应持久化')
+
+  const legacyPath = path.join(root, 'data', 'rooms.json')
+  fs.writeFileSync(legacyPath, JSON.stringify([{ ...task, kind: undefined }]), 'utf8')
+  assert.equal(new RoomStore('Owner').get(task.id).kind, 'task', '旧数据缺 kind 应迁移为 task')
+})

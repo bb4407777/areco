@@ -15,7 +15,7 @@ import type { Session } from './session'
 import { DATA_DIR, MSG_CLI_PATH } from '../config'
 import { createLogger } from '../logger'
 import * as projectDb from './project-db'
-import { ALL_MENTION, parseMentions, RoomStore } from './rooms'
+import { ALL_MENTION, CHARTER_FILE, parseMentions, RoomStore } from './rooms'
 import { shellQuote } from './templates'
 import { agentKindOf, readAgentTranscript } from './agent-transcript'
 import { transcriptPath } from './transcript'
@@ -133,6 +133,8 @@ export class RoomRelay {
   private chainDepth = new Map<string, number>()
   /** auto-recall 注入块缓存：root message id → 注入块（null=无命中/失败）。同一根消息投多个成员复用，不重复起子进程 */
   private recallMemo = new Map<number, string | null>()
+  /** 项目驻场简报账本：sessionId → 已简报的进程代际（epoch）。每代首条投递带一次 PROJECT.md 指路；内存态，重启后重发一次无害 */
+  private briefedEpochs = new Map<string, number>()
   /** 注入后待捕获 agent 回复：sessionId → 锚点（注入前消息数 + 来源）。agent 主动回执或自动捕获后清除 */
   private pendingCapture = new Map<
     string,
@@ -171,6 +173,7 @@ export class RoomRelay {
 
   /** 会话被删除：联动移除所有项目里指向它的 member（避免悬空 member 发消息静默失效） */
   private onSessionRemoved(sessionId: string) {
+    this.briefedEpochs.delete(sessionId)
     let changed = false
     for (const room of this.rooms.list()) {
       if (room.archivedAt !== null) continue // 归档项目保留成员快照，不随会话删除而改写
@@ -451,12 +454,22 @@ export class RoomRelay {
       // 不影响其他投递与游标推进。
       const ctx = senderKind === 'human' ? buildContextPreview(room.team, currentId) : null
       const recall = this.recallBlock(currentId, from, flat, senderKind)
+      // 项目房间驻场简报：每个进程代际（epoch）首条投递带一次。resume 链会被压缩/截断，
+      // 驻留上下文的 SoT 是项目根下的 PROJECT.md——指过去让成员自己读，不塞正文防 note 膨胀。
+      // epoch 现读现取：上面 restart 分支刚拉起过的会话，手里的 summary 还是旧代际。
+      // 末位 ?? 0 兜底 epoch 缺失（测试桩等）：undefined !== undefined 恒假会让简报永不触发。
+      const epoch = (this.manager.list().find((s) => s.id === session.id)?.epoch ?? session.epoch) ?? 0
+      const brief =
+        room.kind === 'project' && room.rootPath && this.briefedEpochs.get(session.id) !== epoch
+          ? `（你是项目「${room.name}」的驻场成员，项目根：${room.rootPath}。动手前先读 ${path.join(room.rootPath, CHARTER_FILE)}（项目宪章=驻留上下文），实质结论回写该文件「工作纪要」节。）`
+          : null
       const replyCmd = `node ${shellQuote(MSG_CLI)} ${room.team} ${shellQuote(m.name)} ${shellQuote(from)} '<你的回复>'`
       const note =
         `[项目·${room.name}] ${from}: ${flat}` +
         (directive ? `（${directive}）` : '') +
         (ctx ? `（共享上下文 ${ctx.path}；最近：${ctx.preview}）` : '') +
         (recall ? `\n${recall}\n` : '') +
+        (brief ? `\n${brief}\n` : '') +
         `（⚠️你在终端里的回复${this.rooms.humanName}在项目里看不到，必须执行下面命令把回复发回项目，否则等于没回：${replyCmd}）`
       const nonce = this.injectNote(session.id, note, (sess) => {
         const beforeCount = this.sessionMessageCount(sess) // 注入前消息数（note 尚未落盘）
@@ -471,6 +484,8 @@ export class RoomRelay {
           injectedAt: Date.now(),
         })
       })
+      // 注入成功才记账：失败让下一条投递继续带简报，宁重发不漏发
+      if (nonce && brief) this.briefedEpochs.set(session.id, epoch)
       log.info(`项目「${room.name}」投递 ${from} → ${m.name}`)
       return nonce
     } catch (err) {

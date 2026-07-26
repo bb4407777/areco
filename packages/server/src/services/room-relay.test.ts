@@ -381,3 +381,26 @@ test('human_relay：名单外 agent 打标无效——不广播、不清零、�
   relay.postMessage(roomId, 'A', '@B 三', { humanRelay: true })
   assert.ok((sent['sb']?.length ?? 0) < 3, '名单外打标不清零链深，防环仍生效')
 })
+
+test('项目房间驻场简报：每个进程代际只带一次 PROJECT.md 指路；任务房不带', () => {
+  const rooms = new RoomStore('Owner')
+  const proj = rooms.create(`areco-proj${++seq}`, 'project', '/tmp/proj-root')
+  rooms.addMember(proj.id, { name: 'A', kind: 'session', sessionId: 'sa' })
+  rooms.setDispatchMode(proj.id, 'parallel')
+  const { manager, sent } = mockManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  relay.postMessage(proj.id, 'Owner', '先熟悉一下环境')
+  assert.match(sent['sa'][0], /驻场成员/, '首条投递应带驻场简报')
+  assert.match(sent['sa'][0], /\/tmp\/proj-root\/PROJECT\.md/, '简报应指向项目宪章')
+  relay.postMessage(proj.id, 'Owner', '再看看这个')
+  assert.equal(sent['sa'].length, 2)
+  assert.doesNotMatch(sent['sa'][1], /驻场成员/, '同代际第二条不再重复简报')
+
+  // 任务房（kind 默认 task）即便绑了 rootPath 也不带简报——PROJECT.md 是项目专属约定
+  const task = rooms.create(`areco-task${++seq}`)
+  rooms.setRootPath(task.id, '/tmp/task-root')
+  rooms.addMember(task.id, { name: 'B', kind: 'session', sessionId: 'sb' })
+  rooms.setDispatchMode(task.id, 'parallel')
+  relay.postMessage(task.id, 'Owner', '看下报错')
+  assert.doesNotMatch(sent['sb'][0], /驻场成员/, '任务房不带驻场简报')
+})

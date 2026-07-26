@@ -2,8 +2,9 @@
 // 项目协作：项目 = 人 + 多个 agent 成员。@成员/@all 的消息由服务端注入目标终端，
 // agent 用仓内 areco-msg.mjs 回执；消息 SoT 在服务端 projects.db，本页经 WS（rooms/roomMessage）实时更新，不轮询。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { NButton, NEmpty, NInput, NModal, NPopconfirm, NPopover, NSelect, NSpin, useMessage } from 'naive-ui'
-import type { DeliveryStatus, DispatchMode, RoomMember, SessionSummary } from '../../../shared/protocol'
+import type { DeliveryStatus, DispatchMode, RoomInfo, RoomKind, RoomMember, SessionSummary } from '../../../shared/protocol'
 import type { TrafficState } from '../../../shared/traffic'
 import { useRoomsStore } from '../stores/rooms'
 import { useSessionsStore } from '../stores/sessions'
@@ -25,12 +26,23 @@ const rooms = useRoomsStore()
 const sessionsStore = useSessionsStore()
 const ui = useUiStore()
 const message = useMessage()
+const route = useRoute()
+const router = useRouter()
+
+// 任务/项目双 tab 共用本组件（路由 meta 区分）：task=有完结会归档的流水；
+// project=驻扎在文件夹里的常驻域（必绑 rootPath，PROJECT.md 承接驻留上下文）。
+const kind = computed<RoomKind>(() => (route.meta.roomKind === 'project' ? 'project' : 'task'))
+const kindLabel = computed(() => (kind.value === 'project' ? '项目' : '任务'))
+// 兼容 8790 未重启的窗口：旧服务端不落 kind，一律按任务展示（项目 tab 给待重启提示）
+const roomKindOf = (r: RoomInfo): RoomKind => (r.kind === 'project' ? 'project' : 'task')
+const kindSupported = computed(() => !rooms.rooms.length || rooms.rooms.some((r) => r.kind !== undefined))
 
 const loading = ref(false)
 const activeId = ref('')
 const limit = ref(100)
 const showCreate = ref(false)
 const newRoomName = ref('')
+const newRoomRoot = ref('')
 const mobileRoomsOpen = ref(false)
 const showArchived = ref(false)
 const previewPath = ref<string | null>(null)
@@ -99,7 +111,7 @@ const spawnableTemplates = computed(() => {
 const addOptions = computed(() => {
   const groups: { type: string; label: string; key: string; children: { label: string; value: string }[] }[] = []
   if (spawnableTemplates.value.length)
-    groups.push({ type: 'group', label: '新建 agent 进任务', key: 'g-spawn', children: spawnableTemplates.value })
+    groups.push({ type: 'group', label: `新建 agent 进${kindLabel.value}`, key: 'g-spawn', children: spawnableTemplates.value })
   return groups
 })
 
@@ -107,7 +119,7 @@ async function onAddMember(value: string | null) {
   if (!value || !room.value) return
   try {
     await rooms.addMember(room.value.id, value)
-    message.success('已拉起新 agent 并加入任务')
+    message.success(`已拉起新 agent 并加入${kindLabel.value}`)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -115,13 +127,20 @@ async function onAddMember(value: string | null) {
 
 // ---- 项目 CRUD ----
 
+const createReady = computed(() => Boolean(newRoomName.value.trim() && (kind.value !== 'project' || newRoomRoot.value.trim())))
+
 async function createRoom() {
-  const name = newRoomName.value.trim()
-  if (!name) return
+  if (!createReady.value) return
+  // 旧服务端不认 kind：此刻建“项目”会落成无 kind 的任务房，拦下等重启
+  if (kind.value === 'project' && !kindSupported.value) {
+    message.warning('项目功能需 8790 重启后生效，先别建')
+    return
+  }
   try {
-    const r = await rooms.create(name)
+    const r = await rooms.create(newRoomName.value.trim(), kind.value, newRoomRoot.value.trim() || undefined)
     showCreate.value = false
     newRoomName.value = ''
+    newRoomRoot.value = ''
     activeId.value = r.id
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
@@ -133,8 +152,8 @@ async function archiveRoom() {
   const archivedId = room.value.id
   try {
     await rooms.archive(archivedId)
-    activeId.value = rooms.rooms.find((r) => r.archivedAt === null && r.id !== archivedId)?.id ?? ''
-    message.success('任务已归档，消息和成员快照均已保留')
+    activeId.value = activeRooms.value.find((r) => r.id !== archivedId)?.id ?? ''
+    message.success(`${kindLabel.value}已归档，消息和成员快照均已保留`)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -146,11 +165,12 @@ async function removeRoom() {
   const removedName = room.value.name
   try {
     await rooms.remove(removedId)
-    const next = rooms.rooms.find((r) => r.id !== removedId && r.archivedAt === null)
-      ?? rooms.rooms.find((r) => r.id !== removedId)
+    const inKind = rooms.rooms.filter((r) => roomKindOf(r) === kind.value)
+    const next = inKind.find((r) => r.id !== removedId && r.archivedAt === null)
+      ?? inKind.find((r) => r.id !== removedId)
     activeId.value = next?.id ?? ''
     if (next && typeof next.archivedAt === 'number') showArchived.value = true
-    message.success(`任务「${removedName}」已删除`)
+    message.success(`${kindLabel.value}「${removedName}」已删除`)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -160,16 +180,20 @@ async function unarchiveRoom() {
   if (!room.value) return
   try {
     await rooms.unarchive(room.value.id)
-    message.success('任务已恢复')
+    message.success(`${kindLabel.value}已恢复`)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
 }
 
 function openRoom(id: string) {
-  if (typeof rooms.byId(id)?.archivedAt === 'number') showArchived.value = true
+  const target = rooms.byId(id)
+  if (typeof target?.archivedAt === 'number') showArchived.value = true
   activeId.value = id
   mobileRoomsOpen.value = false
+  // 跨 kind 跳转（消息搜索结果可能落在另一个 tab 的房间）：先定 activeId 再切路由，
+  // kind watcher 看到当前房与新 kind 匹配就不会重置选择
+  if (target && roomKindOf(target) !== kind.value) router.push(roomKindOf(target) === 'project' ? '/projects' : '/tasks')
 }
 
 function locateProjectFile(path: string) {
@@ -408,8 +432,9 @@ async function send() {
 
 // ---- 搜索：左栏项目名过滤 + 主区跨项目消息搜索 ----
 const nameFilter = ref('')
-const activeRooms = computed(() => rooms.sortedRooms.filter((r) => typeof r.archivedAt !== 'number'))
-const archivedRooms = computed(() => rooms.sortedRooms.filter((r) => typeof r.archivedAt === 'number'))
+const kindRooms = computed(() => rooms.sortedRooms.filter((r) => roomKindOf(r) === kind.value))
+const activeRooms = computed(() => kindRooms.value.filter((r) => typeof r.archivedAt !== 'number'))
+const archivedRooms = computed(() => kindRooms.value.filter((r) => typeof r.archivedAt === 'number'))
 const filteredRooms = computed(() => {
   const q = nameFilter.value.trim().toLowerCase()
   return q ? activeRooms.value.filter((r) => r.name.toLowerCase().includes(q)) : activeRooms.value
@@ -452,6 +477,15 @@ function openFromSearch(roomId: string) {
   openRoom(roomId)
 }
 
+// 任务↔项目切 tab（同组件复用，路由变了实例不换）：当前选中房不属于新 kind 才重置选择
+watch(kind, (k) => {
+  const cur = rooms.byId(activeId.value)
+  if (!cur || roomKindOf(cur) !== k) activeId.value = activeRooms.value[0]?.id ?? ''
+  showArchived.value = false
+  mobileRoomsOpen.value = false
+  msgQuery.value = ''
+})
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -470,10 +504,10 @@ onMounted(async () => {
     <!-- 项目栏：桌面常驻侧栏，手机为浮层 -->
     <aside class="rooms" :class="{ overlay: ui.isMobile, open: !ui.isMobile || mobileRoomsOpen }">
       <div class="rooms-head">
-        <span class="rooms-title">当前任务</span>
-        <button class="icon-btn" title="新建任务" @click="showCreate = true">＋</button>
+        <span class="rooms-title">当前{{ kindLabel }}</span>
+        <button class="icon-btn" :title="`新建${kindLabel}`" @click="showCreate = true">＋</button>
       </div>
-      <NInput v-model:value="nameFilter" placeholder="搜任务名" size="tiny" clearable class="rooms-search" />
+      <NInput v-model:value="nameFilter" :placeholder="`搜${kindLabel}名`" size="tiny" clearable class="rooms-search" />
       <div class="rooms-list">
         <button
           v-for="r in filteredRooms"
@@ -487,7 +521,7 @@ onMounted(async () => {
           <span class="room-count">{{ r.members.filter((m) => m.kind === 'session').length }} agent</span>
           <span v-if="rooms.unread(r.id)" class="badge">{{ rooms.unread(r.id) }}</span>
         </button>
-        <NEmpty v-if="!activeRooms.length && rooms.loaded" description="当前没有任务，点右上角 ＋ 建一个" class="rooms-empty" />
+        <NEmpty v-if="!activeRooms.length && rooms.loaded" :description="`当前没有${kindLabel}，点右上角 ＋ 建一个`" class="rooms-empty" />
         <button v-if="archivedRooms.length" class="archive-toggle" @click="showArchived = !showArchived">
           <span>已归档</span>
           <span>{{ archivedRooms.length }} {{ showArchived ? '▾' : '▸' }}</span>
@@ -513,14 +547,25 @@ onMounted(async () => {
       <NSpin v-if="loading" class="center" />
       <NEmpty
         v-else-if="rooms.stale"
-        description="任务协作需要新版服务端：8790 重启后可用（前端已就绪）"
+        :description="`${kindLabel}协作需要新版服务端：8790 重启后可用（前端已就绪）`"
         class="center"
       />
-      <NEmpty v-else-if="!room" description="建一个任务，把 agent 拉进来协作" class="center" />
+      <NEmpty
+        v-else-if="kind === 'project' && !kindSupported"
+        description="项目功能需要新版服务端：8790 重启后可用（前端已就绪）"
+        class="center"
+      />
+      <NEmpty
+        v-else-if="!room"
+        :description="kind === 'project'
+          ? '项目 = 驻扎在文件夹里的常驻域：绑定根目录，PROJECT.md 承接长期上下文，agent 随叫随醒'
+          : '建一个任务，把 agent 拉进来协作'"
+        class="center"
+      />
 
       <template v-else>
         <header class="head">
-          <button v-if="ui.isMobile" class="icon-btn" title="任务列表" @click="mobileRoomsOpen = true">☰</button>
+          <button v-if="ui.isMobile" class="icon-btn" :title="`${kindLabel}列表`" @click="mobileRoomsOpen = true">☰</button>
           <h2 class="title">{{ room.name }}</h2>
           <span v-if="viewingArchived" class="archived-label">已归档 · 只读</span>
           <div class="members">
@@ -534,8 +579,8 @@ onMounted(async () => {
               <span class="mname" :style="{ color: memberColor(m) }">{{ m.name }}</span>
               <em v-if="memberWorking(m)" class="working">工作中</em>
               <NPopconfirm v-if="m.kind === 'session' && !viewingArchived" @positive-click="rooms.removeMember(room.id, m.name)">
-                <template #trigger><button class="chip-x" title="移出任务">×</button></template>
-                把 {{ m.name }} 移出任务？
+                <template #trigger><button class="chip-x" :title="`移出${kindLabel}`">×</button></template>
+                把 {{ m.name }} 移出{{ kindLabel }}？
               </NPopconfirm>
             </span>
             <NSelect
@@ -553,25 +598,25 @@ onMounted(async () => {
           <NPopover v-if="!viewingArchived" trigger="click" placement="bottom-end" style="max-width: 420px">
             <template #trigger><button class="icon-btn" title="邀请外部终端的 agent">⇗</button></template>
             <div class="invite">
-              <p>本机任何终端都可向本任务发消息（team：<code>{{ room.team }}</code>）：</p>
+              <p>本机任何终端都可向本{{ kindLabel }}发消息（team：<code>{{ room.team }}</code>）：</p>
               <code class="invite-cmd">node {{ rooms.msgCli || 'scripts/areco-msg.mjs' }} {{ room.team }} '&lt;名字&gt;' '&lt;收件人或 all&gt;' '&lt;消息&gt;'</code>
               <p>消息会实时出现在这里；房里 @成员 的消息会投递到对应会话终端（外部终端的名字仅作显示，收不到投递）。</p>
             </div>
           </NPopover>
-          <NButton v-if="viewingArchived" size="tiny" secondary @click="unarchiveRoom">恢复任务</NButton>
+          <NButton v-if="viewingArchived" size="tiny" secondary @click="unarchiveRoom">恢复{{ kindLabel }}</NButton>
           <NButton
             v-else
             size="tiny"
             secondary
             :disabled="!rooms.archiveSupported"
-            :title="rooms.archiveSupported ? '归档任务' : '重启 8790 后可归档'"
+            :title="rooms.archiveSupported ? `归档${kindLabel}` : '重启 8790 后可归档'"
             @click="archiveRoom"
-          >归档任务</NButton>
+          >归档{{ kindLabel }}</NButton>
           <NPopconfirm v-if="viewingArchived" @positive-click="removeRoom">
             <template #trigger>
-              <NButton size="tiny" secondary type="error">删除任务</NButton>
+              <NButton size="tiny" secondary type="error">删除{{ kindLabel }}</NButton>
             </template>
-            确定删除任务「{{ room.name }}」？任务及其任务内会话将一并删除（多任务共享的会话保留），此操作不可恢复。
+            确定删除{{ kindLabel }}「{{ room.name }}」？{{ kindLabel }}及其内部会话将一并删除（多房共享的会话保留），此操作不可恢复。
           </NPopconfirm>
         </header>
 
@@ -635,7 +680,7 @@ onMounted(async () => {
         </div>
 
         <!-- 消息搜索固定钉在消息流顶部（不随滚动走），结果仍在流内展示 -->
-        <NInput v-model:value="msgQuery" placeholder="搜消息内容（跨所有任务）" size="small" clearable class="msg-search" />
+        <NInput v-model:value="msgQuery" placeholder="搜消息内容（跨任务与项目）" size="small" clearable class="msg-search" />
         <div ref="scroller" class="stream">
           <template v-if="msgQuery.trim()">
             <div v-if="searching" class="search-hint">搜索中…</div>
@@ -690,7 +735,7 @@ onMounted(async () => {
           @locate="locateProjectFile"
         />
 
-        <div v-if="viewingArchived" class="archived-notice">该任务已归档：消息和成员快照仅供查看，恢复后才能继续协作。</div>
+        <div v-if="viewingArchived" class="archived-notice">该{{ kindLabel }}已归档：消息和成员快照仅供查看，恢复后才能继续协作。</div>
         <div v-else class="composer">
           <div v-if="mentionOpen" class="mention-pop">
             <button
@@ -725,10 +770,20 @@ onMounted(async () => {
 
     <FileDropOverlay :visible="dragging" />
     <FilePreview :path="previewPath" @close="previewPath = null" />
-    <NModal v-model:show="showCreate" preset="card" title="新建任务" style="max-width: 360px">
-      <NInput v-model:value="newRoomName" placeholder="任务名（如：官网改版攻坚组）" @keyup.enter="createRoom" />
+    <NModal v-model:show="showCreate" preset="card" :title="`新建${kindLabel}`" style="max-width: 400px">
+      <div class="create-form">
+        <NInput
+          v-model:value="newRoomName"
+          :placeholder="kind === 'project' ? '项目名（如：全量案卷）' : '任务名（如：官网改版攻坚组）'"
+          @keyup.enter="createRoom"
+        />
+        <template v-if="kind === 'project'">
+          <NInput v-model:value="newRoomRoot" placeholder="根目录绝对路径（如 /Users/gao/skills）" @keyup.enter="createRoom" />
+          <p class="create-hint">项目驻扎在这个文件夹里：进驻的 agent 以它为工作目录，长期上下文落在其中的 PROJECT.md（没有会自动创建骨架，绝不覆盖已有文件）。</p>
+        </template>
+      </div>
       <template #footer>
-        <NButton type="primary" :disabled="!newRoomName.trim()" @click="createRoom">创建</NButton>
+        <NButton type="primary" :disabled="!createReady" @click="createRoom">创建</NButton>
       </template>
     </NModal>
   </div>
@@ -1379,5 +1434,18 @@ onMounted(async () => {
 .mention-hint {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* ---- 新建任务/项目弹窗 ---- */
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.create-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 </style>

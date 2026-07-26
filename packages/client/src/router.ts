@@ -20,8 +20,11 @@ export const router = createRouter({
         { path: ':source/:project/:id', component: () => import('./views/HistoryTranscriptView.vue') },
       ],
     },
-    { path: '/projects', component: () => import('./views/GroupChatView.vue') },
-    { path: '/messages', redirect: '/projects' },
+    // 任务/项目分家（2026-07-26）：同一房间体系按 kind 分两个 tab。「项目」拿回 /projects
+    // （项目=驻扎在文件夹里的常驻域），原任务房迁 /tasks；旧 /projects 书签落到项目 tab，属预期。
+    { path: '/tasks', component: () => import('./views/GroupChatView.vue'), meta: { roomKind: 'task' } },
+    { path: '/projects', component: () => import('./views/GroupChatView.vue'), meta: { roomKind: 'project' } },
+    { path: '/messages', redirect: '/tasks' },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
