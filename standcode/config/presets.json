@@ -1,0 +1,42 @@
+{
+  "version": "1.1.0",
+  "comment": "参数层：角色/行为预设，可被不同 stands 复用。",
+  "_WIRING_WARNING": [
+    "2026-07-26 查证：本文件当前几乎完全没有生效，别把这里写的当成实际行为。",
+    "areco 侧 services/standcode-resolver.ts 只在 harness === 'openclaw' 时读 preset，",
+    "且只读 preset.timeout 一个字段；system 与 thinking 在任何分支下都从未被读取。",
+    "而本机 config/harnesses.json 里根本没有 openclaw（只有 reasonix / zcode / workbuddy），",
+    "12 个 areco 模板里设了 harness/model/preset 的也是 0 个 —— 所以连 timeout 也是死的。",
+    "",
+    "角色约束的**真实**落点是 caller.py 的三个模板（走 dispatch 的 request 正文，实际生效）：",
+    "  PLAN_TEMPLATE   两段式的 Thinker 段：六段结构化计划",
+    "  THINK_TEMPLATE  模式 4：给判断、不给待办清单",
+    "  exec_request    Worker 段：只执行不决策（在 _execute_with_plan 里拼）",
+    "改角色行为请改那三处，改这里没有任何效果。",
+    "",
+    "保留本文件的理由：models.json（model_id → --model）那条链是真在用的，presets 与它同层，",
+    "删掉会让配置分层缺一块；且 resolver 未来把 timeout 接全时这里就是现成的数据源。"
+  ],
+  "presets": {
+    "thinker": {
+      "role": "thinker",
+      "timeout": 600,
+      "_note": "两段式 Thinker 段。角色提示词的真身在 caller.py PLAN_TEMPLATE。"
+    },
+    "worker": {
+      "role": "worker",
+      "timeout": 900,
+      "_note": "Worker 段。角色提示词的真身在 _execute_with_plan 的 exec_request。"
+    },
+    "direct": {
+      "role": "worker",
+      "timeout": 600,
+      "_note": "模式 2 直派 Worker，需求明确直接执行。"
+    },
+    "thinker_only": {
+      "role": "thinker",
+      "timeout": 600,
+      "_note": "模式 4（→Thinker，无下游 Worker）。角色提示词的真身在 caller.py THINK_TEMPLATE —— 它刻意不含『产出计划供 Worker 执行』，那句会让 Thinker 把结论写成待办清单，而用户要的是结论。"
+    }
+  }
+}
