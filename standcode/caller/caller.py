@@ -530,6 +530,85 @@ class GatekeeperBlockedError(RuntimeError):
     """
 
 
+# ── 审计脱敏（2026-07-26 借 openworker coworker/audit.py 的 _SECRET_KEYS 思路）──
+# audit.jsonl 存 request_preview/task_preview 原文——用户消息里贴过的 key 会原样进台账。
+# 模式宁多勿少（与 chatlog REDACTION 同哲学）。
+_AUDIT_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    r"|glpat-[A-Za-z0-9_\-]{8,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._\-]{8,}"
+    r"|(?:api[_-]?key|token|secret|password|access[_-]?token)\s*[=:]\s*[^\s'\"，。]{6,})",
+    re.IGNORECASE,
+)
+
+
+def _audit_redact(value):
+    """字符串字段脱敏；非字符串原样返回。"""
+    if isinstance(value, str):
+        return _AUDIT_SECRET_RE.sub("***REDACTED***", value)
+    return value
+
+
+# ── 失败码类型化（2026-07-26 借 open-kritt harnesses 的码表 + retryable 位）──
+# 此前 status 字符串 + 自由文本 error 混用，重试逻辑只认 'lost'——限流类可重试
+# 失败与真异常在审计里不可区分。码表让「哪类失败该自动重派」成为数据而非猜测。
+ERROR_CODE_MESSAGES = {
+    "timeout": "轮询超时（Stand 未在时限内回话）",
+    "lost_session_exited": "Stand 会话已退出",
+    "lost_heartbeat": "Stand 心跳超时失联",
+    "rate_limited": "模型配额/限流（402/429/quota）",
+    "blocked": "Gatekeeper 红线拒绝",
+    "mode_conflict": "参数模式矛盾",
+    "dispatch_failed": "派发中途失败",
+    "error": "未分类异常",
+}
+# 仅这三类自动重派有意义：换个新 Stand 大概率能好。timeout 不重试（真慢任务重派
+# 只会烧双份额度），error 不重试（未知因重试大概率复现）。
+RETRYABLE_ERROR_CODES = {"lost_session_exited", "lost_heartbeat", "rate_limited"}
+_RATE_LIMIT_RE = re.compile(r"(?:\b402\b|\b429\b|rate.?limit|quota|限流|配额|exceeded)", re.IGNORECASE)
+
+
+def classify_error_code(status: str, error_text: str = "", lost_reason: str = "") -> str | None:
+    """把 (status, 自由文本) 收敛成 ERROR_CODE_MESSAGES 里的码；completed 返回 None。"""
+    if status == "completed":
+        return None
+    text = f"{error_text or ''} {lost_reason or ''}"
+    if _RATE_LIMIT_RE.search(text):
+        return "rate_limited"
+    if status == "lost":
+        return "lost_session_exited" if "session_exited" in text else "lost_heartbeat"
+    if status in ("timeout", "blocked", "mode_conflict", "dispatch_failed"):
+        return status
+    return "error"
+
+
+# ── 机检收口（2026-07-26 借 agentacct 的 Verified / Agent reported 证据分级）──
+# PLAN_TEMPLATE 一直要求「完成判据尽量可机检」，但收口从来没人真跑——Worker 说完成
+# 就算完成。本函数把可机检的部分真跑一遍，回执按级别标注：
+#   verified       全部机检项通过（✅已验证）
+#   check_failed   有机检项没过（❌判据未过——Worker 说完成但产物对不上）
+#   agent_reported 无可机检项（⚠️自述——不是贬义，是诚实标注证据等级）
+def verify_completion(files: list | None = None, output_path: str | None = None) -> dict:
+    checks = []
+    paths = [str(p) for p in (files or []) if p]
+    op = str(output_path or "").strip()
+    # plan 的「最终产物落点」可能写「无」；只有像路径的才检
+    if op and op not in ("无", "None", "-") and (op.startswith("/") or op.startswith("~")):
+        if op not in paths:
+            paths.append(op)
+    for p in paths:
+        try:
+            fp = Path(os.path.expanduser(p))
+            passed = fp.exists() and (fp.is_dir() or fp.stat().st_size > 0)
+        except OSError:
+            passed = False
+        checks.append({"check": f"file:{p}", "passed": bool(passed)})
+    if not checks:
+        return {"level": "agent_reported", "checks": [],
+                "note": "无可机检判据（未给产物路径）"}
+    level = "verified" if all(c["passed"] for c in checks) else "check_failed"
+    return {"level": level, "checks": checks}
+
+
 def log_audit(event: str, detail: dict | None = None) -> None:
     """审计日志：每行一条 JSON 追加写入 AUDIT_LOG_PATH（默认 /tmp/standcode-audit.jsonl）。
 
@@ -562,6 +641,8 @@ def log_audit(event: str, detail: dict | None = None) -> None:
     for k, v in d.items():
         if k not in record:
             record[k] = v
+    # 全字段脱敏（用户消息原文进 preview 字段，贴过的 key 不能进台账）
+    record = {k: _audit_redact(v) for k, v in record.items()}
     try:
         with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -1767,6 +1848,7 @@ class Caller:
                             "completed_at": None,
                             "messages_count": last_id,
                             "lost_reason": lost_reason,
+                            "error_code": classify_error_code("lost", lost_reason=lost_reason),
                             "error": f"Stand 失联：{lost_reason}",
                         }
 
@@ -1916,6 +1998,7 @@ class Caller:
             "elapsed": elapsed,
             "completed_at": None,
             "messages_count": last_id,
+            "error_code": "timeout",
             "error": f"轮询超时（{timeout}s）",
         }
 
@@ -1941,6 +2024,43 @@ class Caller:
         """[兼容薄壳] 只要 status 字段时用；新代码用 _session_info。"""
         info = self._session_info(session_id)
         return info.get("status") if info else None
+
+    def collect_stand_cost(self, stand_session_id: str) -> dict | None:
+        """每单 token 成本（2026-07-26 借 agentacct「usage truth from client logs」）。
+
+        只信客户端自己落盘的数字：读该 Stand 的 claude transcript JSONL 汇总
+        message.usage，结果标 source=client_reported；任何一环拿不到就返回 None——
+        **绝不估算编数**（agentacct 的纪律：cost 是 estimate 要明标，拿不到就没有）。
+        非 claude harness（workbuddy/reasonix 等）无此 transcript → None，回执自然省略。
+        """
+        if not stand_session_id:
+            return None
+        try:
+            info = self._session_info(stand_session_id) or {}
+            csid = info.get("claudeSessionId") or ""
+            tdir = info.get("transcriptDir") or ""
+            if not csid or not tdir:
+                return None
+            tp = Path(tdir) / f"{csid}.jsonl"
+            if not tp.exists():
+                return None
+            inp = outp = cread = 0
+            with tp.open(encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    try:
+                        u = (json.loads(line).get("message") or {}).get("usage") or {}
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                    inp += int(u.get("input_tokens") or 0)
+                    outp += int(u.get("output_tokens") or 0)
+                    cread += int(u.get("cache_read_input_tokens") or 0)
+            if not (inp or outp or cread):
+                return None
+            return {"input_tokens": inp, "output_tokens": outp,
+                    "cache_read_tokens": cread, "source": "client_reported"}
+        except Exception as e:
+            logger.debug("collect_stand_cost 失败（best-effort，忽略）: %s", e)
+            return None
 
     # ── 工作区隔离（建议 4b）────────────────────────────────────
 
@@ -2053,15 +2173,21 @@ class Caller:
                 role=dispatch_result.get("role", ""),
                 template=dispatch_result.get("template_id", ""),
             )
-            if poll.get("status") == "lost" and retries < max_retries:
+            # 重试判据升级为码驱动（2026-07-26）：lost 之外，限流类（rate_limited）
+            # 换个新 Stand 大概率能好也纳入；timeout/error 仍不重试（见 RETRYABLE 注释）。
+            code = poll.get("error_code") or classify_error_code(
+                poll.get("status", ""), poll.get("error", ""), poll.get("lost_reason", "")
+            )
+            if code in RETRYABLE_ERROR_CODES and retries < max_retries:
                 retries += 1
-                logger.warning("lost → 重派发 %d/%d", retries, max_retries)
+                logger.warning("%s → 重派发 %d/%d", code, retries, max_retries)
                 dispatch_result = self.redispatch(
                     dispatch_result, request,
                     task_type=task_type, template_id=template_id,
                 )
                 continue
             poll["redispatch_count"] = retries
+            poll.setdefault("error_code", code)
             return {**dispatch_result, **poll}
 
     # ── 微信代发（Caller 主动把 Stand 结果发回 Client）─────────
@@ -2398,11 +2524,18 @@ class Caller:
             logger.warning("Thinker 计划未通过结构化校验（缺步骤段），重申模板再要一次")
             retry_text = ""
             try:
-                # 降级 1：同房间、同 Stand 重申格式（不新建房、不新起 Stand，只多一轮对话）
+                # 降级 1：同房间、同 Stand 重申格式（不新建房、不新起 Stand，只多一轮对话）。
+                # 重申带上具体校验缺陷（_parse_plan.issues）——只念格式模板不指出错处，
+                # Thinker 大概率原样再错一遍。
+                issues = plan.get("issues") or []
+                retry_body = PLAN_RETRY_TEMPLATE + (
+                    ("\n【本次校验具体缺陷】\n" + "\n".join(f"- {i}" for i in issues))
+                    if issues else ""
+                )
                 retry_msg_id = self.send_message(
                     plan_dispatch["session_id"],
                     plan_dispatch["stand_name"],
-                    PLAN_RETRY_TEMPLATE,
+                    retry_body,
                 )
                 retry_poll = self.poll_result(
                     room_id=plan_dispatch["room_id"],
@@ -2725,6 +2858,20 @@ class Caller:
             if ln.strip() and ln.strip()[0].isdigit()
         ]
         valid = len(steps) > 0 and bool(goal or steps_raw)
+        # 校验缺陷明细（2026-07-26 借 open-kritt post_processing 的 validation-error
+        # 回喂思路）：重申时告诉 Thinker 具体缺什么，而不是把整个格式模板再念一遍——
+        # 带具体错误的重试一次命中率远高于泛重申。
+        issues: list[str] = []
+        if not steps_raw:
+            issues.append("整个「步骤」段缺失")
+        elif not steps:
+            issues.append("「步骤」段有内容但没有一行以「数字. 」开头（无法拆成可执行步骤）")
+        if not goal:
+            issues.append("「目标」段缺失")
+        if not done_when:
+            issues.append("「完成判据」段缺失（收口无法机检）")
+        if not output_path:
+            issues.append("「最终产物落点」段缺失（写绝对路径或『无』）")
         return {
             "goal": goal,
             "context": context,
@@ -2733,6 +2880,7 @@ class Caller:
             "done_when": done_when,
             "output_path": output_path,
             "valid": valid,
+            "issues": issues,
         }
 
     def auto_dispatch(
@@ -3449,13 +3597,34 @@ def summarize_inbox(payload: dict) -> str:
         if len(bullets) >= 5:
             break
 
-    msg_parts = [f"✅ {conclusion}"]
+    # 证据分级标注（2026-07-26 agentacct 借鉴）：机检过的才配 ✅；只有 Worker 自述
+    # 用 ⚠️ 诚实标注；机检没过必须 ❌ 醒目——「说完成但产物对不上」恰是最需要人看的。
+    ver = payload.get("verification") or {}
+    level = ver.get("level")
+    if status == "completed":
+        if level == "verified":
+            head = f"✅ {conclusion}（已验证：产物机检通过）"
+        elif level == "check_failed":
+            failed = [c["check"] for c in ver.get("checks", []) if not c.get("passed")]
+            head = f"❌ {conclusion}（判据未过：{'、'.join(failed[:3]) or '机检失败'}——Worker 自称完成但产物对不上）"
+        else:
+            head = f"⚠️ {conclusion}（Worker 自述，无可机检判据）"
+    else:
+        head = f"✅ {conclusion}" if status == "completed" else f"⚠️ {conclusion}"
+    msg_parts = [head]
     if files:
         msg_parts.append(f"📄 文件：{files[0] if len(files) == 1 else ', '.join(files[:3])}")
     if bullets:
         msg_parts.append("核心要点：")
         for i, b in enumerate(bullets, 1):
             msg_parts.append(f"{i}. {b}")
+    # 每单成本（client_reported，拿不到就不显示——绝不编数）
+    cost = payload.get("cost") or {}
+    if cost.get("source") == "client_reported":
+        total = int(cost.get("input_tokens", 0)) + int(cost.get("output_tokens", 0))
+        msg_parts.append(
+            f"💰 本单 ~{total/1000:.1f}k tok（输出 {int(cost.get('output_tokens',0))/1000:.1f}k，client_reported）"
+        )
     # 附注
     if payload.get("room_id"):
         msg_parts.append(f"   房间: {payload['room_id']}")
@@ -3935,6 +4104,26 @@ def _cmd_run(args) -> int:
             "error": res.get("error"),
         })
         _write_state(task_id, state)
+        # ── 机检收口 + 每单成本（2026-07-26 全量学习优化，agentacct 借鉴件）──
+        # verification：completed 时把可机检判据（产物文件存在且非空）真跑一遍，
+        # 回执按 verified/check_failed/agent_reported 分级标注——Worker 说完成
+        # ≠ 完成，机器过一遍才算数。cost：从 Stand 自己的 transcript 读 usage，
+        # 标 client_reported，拿不到就 None（绝不估算编数）。
+        verification = None
+        if status == "completed":
+            plan_parsed = res.get("plan_parsed") if isinstance(res.get("plan_parsed"), dict) else {}
+            verification = verify_completion(
+                files=[args.file] if args.file else [],
+                output_path=(plan_parsed or {}).get("output_path"),
+            )
+        cost = caller.collect_stand_cost(
+            res.get("stand_session_id")
+            or (res.get("execute") or {}).get("stand_session_id")
+            or ""
+        )
+        state["verification"] = verification
+        state["cost"] = cost
+        _write_state(task_id, state)
         # inbox 与 _bg_worker 同构：Hermes 醒来后凭 task_id 读全文（process_inbox_callback 兼容）
         write_inbox(task_id, {
             "task_id": task_id,
@@ -3946,6 +4135,8 @@ def _cmd_run(args) -> int:
             "files": [args.file] if args.file else [],
             "request_summary": args.summary,
             "request": (args.request or "")[:200],
+            "verification": verification,
+            "cost": cost,
             "error": res.get("error"),
         })
         inbox_final = _inbox_path(task_id)
@@ -3986,6 +4177,10 @@ def _cmd_run(args) -> int:
                 "inbox_path": str(inbox_final),
                 "result_text": out_text,
                 "result_truncated": truncated,
+                "verification": verification,
+                "cost": cost,
+                "error_code": res.get("error_code") or classify_error_code(
+                    status, str(res.get("error") or "")),
                 "error": res.get("error"),
             },
             ensure_ascii=False, indent=2,
@@ -4534,7 +4729,17 @@ def _cmd_inbox(args) -> int:
                     (l.strip() for l in body.splitlines() if l.strip()), "（无结论）"
                 )
             print(f"── {p.stem} [{status}]")
-            print(f"✅ {concl[:120]}")
+            # 证据分级（agentacct 借鉴，与 summarize_inbox 同口径）
+            ver = d.get("verification") or {}
+            if status == "completed" and ver.get("level") == "verified":
+                print(f"✅ {concl[:120]}（已验证）")
+            elif status == "completed" and ver.get("level") == "check_failed":
+                failed = [c["check"] for c in ver.get("checks", []) if not c.get("passed")]
+                print(f"❌ {concl[:120]}（判据未过:{'、'.join(failed[:2]) or '机检失败'}）")
+            elif status == "completed" and ver.get("level") == "agent_reported":
+                print(f"⚠️ {concl[:120]}（自述）")
+            else:
+                print(f"✅ {concl[:120]}")
             pts = []
             for line in body.splitlines():
                 s = line.strip()
@@ -4550,6 +4755,10 @@ def _cmd_inbox(args) -> int:
                 files = [files]
             if files:
                 print(f"📄 {files[0] if len(files) == 1 else '; '.join(files[:3])}")
+            cost = d.get("cost") or {}
+            if cost.get("source") == "client_reported":
+                total = int(cost.get("input_tokens", 0)) + int(cost.get("output_tokens", 0))
+                print(f"💰 ~{total/1000:.1f}k tok（client_reported）")
             if d.get("error"):
                 print(f"⚠️ {str(d.get('error'))[:120]}")
             print(f"   （房间 {d.get('room_id') or '-'} · 全文 {p.name}）")
