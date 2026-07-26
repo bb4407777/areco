@@ -4,7 +4,11 @@
   "description": "Caller/Thinker/Worker agent orchestration on top of areco — dispatch tasks to CLI agent Stands, results land in a pull-based inbox (zero polling)",
   "license": "Apache-2.0",
   "author": "bb4407777",
-  "repository": "github:bb4407777/standcode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bb4407777/areco.git",
+    "directory": "standcode"
+  },
   "keywords": ["agent", "orchestration", "multi-agent", "areco", "cli", "dispatcher"],
   "bin": { "standcode": "bin/standcode.js" },
   "files": [

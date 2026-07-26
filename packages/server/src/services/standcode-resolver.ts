@@ -1,11 +1,13 @@
 import type { Template } from '../../../shared/protocol'
 import fs from 'node:fs'
 import path from 'node:path'
+import { ROOT_DIR } from '../config'
 
-// 配置目录可覆盖：写死绝对路径的话，换一台机器 / 仓库挪位置就整层失效，
-// 而失效方式是静默的（见下面 resolveStandCode 的抛错说明）。
+// 配置目录可覆盖：2026-07-26 StandCode 已 subtree 并入本仓 standcode/，默认直接读
+// 仓内 standcode/config（ROOT_DIR 与 config.json 同源：env ARECO_ROOT > cwd），
+// 不再依赖仓外物理路径——那正是此前「换台机器整层静默失效」的根源。
 const STANDCODE_CONFIG_DIR =
-  process.env.STANDCODE_CONFIG_DIR || '/Users/gao/Code/StandCode/config'
+  process.env.STANDCODE_CONFIG_DIR || path.join(ROOT_DIR, 'standcode', 'config')
 
 interface HarnessSpec {
   command: string

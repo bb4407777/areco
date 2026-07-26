@@ -3,6 +3,8 @@
 > 替身使者不亲自战斗——它召唤替身。
 > Caller / Thinker / Worker 三层 agent 编排框架，跑在 [areco](https://github.com/bb4407777/areco) 会话底座之上。
 
+> **仓库布局（2026-07-26 起）**：StandCode 在 [areco](https://github.com/bb4407777/areco) monorepo 的 `standcode/` 目录内开发（与底座同仓演进）；独立仓 [bb4407777/standcode](https://github.com/bb4407777/standcode) 是每日 `git subtree push` 的自动同步镜像。Issue / PR 请提到 areco 主仓。npm 包 `standcode` 照常从本目录发布。
+
 **StandCode 解决一个问题**：让一个常驻入口 agent（Caller，例如接微信的 Hermes）把活派给各种 CLI agent（Claude Code / Kimi / DeepSeek / 任意 TUI harness），任务全程在 areco 看板可见，做完结果落收信箱——不轮询、不推送、零多余 token。
 
 ## 三层角色

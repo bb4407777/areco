@@ -46,7 +46,20 @@ CC_SEND_BIN = os.environ.get("CC_SEND_BIN") or _LOCAL_CONF.get("cc_send_bin") or
 WECHAT_TARGET = os.environ.get("WECHAT_TARGET") or _LOCAL_CONF.get("wechat_target") or ""
 HOME_DIR = os.environ.get("STANDCODE_HOME") or _LOCAL_CONF.get("home_dir") or str(Path.home())
 
-ARECO_ROOT = os.environ.get("ARECO_ROOT") or str(Path(HOME_DIR) / "Code" / "areco")
+def _detect_areco_root() -> str | None:
+    # 2026-07-26 subtree 并入后 caller.py 位于 <areco仓根>/standcode/caller/，向上两级
+    # 即仓根——同仓自证，彻底免疫隔离 HOME 分裂（见上）。npm 安装场景
+    # （node_modules/standcode/caller/）向上两级是 node_modules，靠 areco 源码仓
+    # 特有的 packages/server 标志排除，防止把别人的目录误认成 areco。
+    root = Path(__file__).resolve().parents[2]
+    return str(root) if (root / "packages" / "server").is_dir() else None
+
+
+ARECO_ROOT = (
+    os.environ.get("ARECO_ROOT")
+    or _detect_areco_root()
+    or str(Path(HOME_DIR) / "Code" / "areco")
+)
 PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
 REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
 
