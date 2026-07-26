@@ -9,7 +9,7 @@ import type { ScreenTailPayload, StandCodeConfig, StatsSummary, Template, Transc
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
-import { DATA_DIR, saveConfig } from '../config'
+import { DATA_DIR, ROOT_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
 import { agentKindOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseQclaw, readAgentAllMessages, readAgentTranscript } from '../services/agent-transcript'
 import {
@@ -35,9 +35,9 @@ const execFileAsync = promisify(execFile)
 
 // StandCode caller.py 集成（任务管理 API）：
 //   - 任务状态目录与 caller.py 的 STANDCODE_TASKS_DIR 同口径（默认 ~/.standcode/tasks）
-//   - caller 脚本默认绝对路径 /Users/gao/Code/StandCode/caller/caller.py，可用 STANDCODE_CALLER 覆盖
+//   - caller 脚本默认读仓内 standcode/caller/caller.py（2026-07-26 subtree 并入后同仓自证），可用 STANDCODE_CALLER 覆盖
 const STANDCODE_TASKS_DIR = process.env.STANDCODE_TASKS_DIR || path.join(os.homedir(), '.standcode', 'tasks')
-const STANDCODE_CALLER = process.env.STANDCODE_CALLER || '/Users/gao/Code/StandCode/caller/caller.py'
+const STANDCODE_CALLER = process.env.STANDCODE_CALLER || path.join(ROOT_DIR, 'standcode', 'caller', 'caller.py')
 
 function ok(ctx: Context, data: unknown) {
   ctx.body = { ok: true, data }
