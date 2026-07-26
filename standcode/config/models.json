@@ -41,6 +41,26 @@
       "provider": "workbuddy",
       "model_id": "hy3",
       "description": "WorkBuddy 混元3"
+    },
+    "glm-5.2-bigmodel": {
+      "provider": "bigmodel",
+      "model_id": "glm-5.2",
+      "description": "GLM-5.2 智谱开放平台直连（claude CLI 用户 settings 同款端点）"
+    },
+    "kimi-k3": {
+      "provider": "kimi-code",
+      "model_id": "kimi-code/k3",
+      "description": "Kimi K3（kimi CLI）"
+    },
+    "gpt-5.6-sol": {
+      "provider": "freemodel",
+      "model_id": "gpt-5.6-sol",
+      "description": "GPT-5.6-sol（codex，FreeModel 网关，config.toml 默认同款）"
+    },
+    "qwen3.8-max-preview": {
+      "provider": "qoder",
+      "model_id": "Qwen3.8-Max-Preview",
+      "description": "Qwen3.8-Max-Preview（qoder CLI 默认）"
     }
   }
 }
