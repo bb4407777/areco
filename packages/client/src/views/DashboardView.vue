@@ -271,7 +271,11 @@ function handoff(id: string, templateId: string) {
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
-  gap: 12px;
+  gap: 4px;
+}
+/* 活动中与后续散卡的衔接间距 = grid gap，全板统一紧凑（2026-07-26 高律师定） */
+.active-section {
+  margin-bottom: 4px;
 }
 .cards-move {
   transition: transform 220ms var(--ease-in-out);
@@ -295,7 +299,7 @@ function handoff(id: string, templateId: string) {
   color: var(--faint);
 }
 .archived-section {
-  margin-top: 18px;
+  margin-top: 10px;
   border-top: 1px solid var(--border);
   padding-top: 10px;
 }
@@ -323,7 +327,7 @@ function handoff(id: string, templateId: string) {
   margin-top: 8px;
 }
 .group-section {
-  margin-top: 10px;
+  margin-top: 4px;
 }
 .group-toggle {
   width: 100%;
