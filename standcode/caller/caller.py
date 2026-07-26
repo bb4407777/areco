@@ -4022,13 +4022,18 @@ def _cmd_route(args) -> int:
     输出刻意单行紧凑（indent=None）：它会进 Hermes 会话历史，每个字节都随
     后续每次 API 调用回放，缩进就是持续付费的空白。
     """
+    import shlex
+
     r = Caller.route_mode(args.request)
     gk = check_should_dispatch(args.request)
     mode = r["mode"]
+    # suggest 直出成品命令（2026-07-26 二阶）：任务原文 shlex.quote 嵌入、summary 自动取
+    # 压缩空白后的前 24 字——Hermes 拿到即可原样执行，省掉一轮「往骨架里填参数」的组装。
+    summary = " ".join((args.request or "").split())[:24]
     suggest = (
         f"python3 {Path(__file__).resolve()} run --wait --brief --mode {mode}"
         + (" --plan-only" if r.get("plan_only") else "")
-        + " '<任务原文>' --summary '<一句话>'"
+        + f" {shlex.quote(args.request)} --summary {shlex.quote(summary)}"
     )
     if gk.get("category") == "blocked":
         suggest = "拒绝执行（BLOCKED 红线，勿派发勿直干）"
