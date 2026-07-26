@@ -14,14 +14,33 @@ interface HarnessSpec {
   args?: string[]
   env?: Record<string, string>
   cwd?: string
+  /** exec 前的 shell 前置命令（原样拼进登录 shell，如 reasonix 的 config auto-plan on） */
+  pre?: string[]
+  description?: string
+}
+
+/**
+ * 通道（供应商）层：一条 API 通道所需的整包 env（网关地址/凭证/隔离 HOME 等）。
+ * models.json 每个条目的 provider 字段引用这里；providers.json 里查无此键 = 该通道
+ * 不需要 env 包（凭证在 CLI 自己的配置里），静默跳过——这是常态而非错误。
+ */
+interface ProviderSpec {
+  env?: Record<string, string>
+  /** 解析时每个键都被填成 model_id：FreeModel 网关要把主/子/快模型全钉在同一模型上防回落 */
+  model_env_keys?: string[]
+  /** true = 渲染成 `env -i`（完全替换环境，rc 也拦不住）；env 包必须自带 PATH */
+  clean_env?: boolean
   description?: string
 }
 
 export interface StandCodeResolved {
   command: string
   args: string[]
+  /** env 一律渲染成命令行 `env [-i] K=V …` 前缀（登录 shell rc 之后生效，rc 覆盖不了），
+   *  不走 spawn env 通道——此字段保留仅为兼容 SpawnSpec 组装方，恒为空对象。 */
   env: NodeJS.ProcessEnv
   cwd?: string
+  pre?: string[]
 }
 
 function loadJson<T>(name: string): T | null {
@@ -34,7 +53,10 @@ function loadJson<T>(name: string): T | null {
 }
 
 /**
- * 把 template 的 harness/model/preset 声明解析成可 spawn 的 command/args/env。
+ * 把 template 的 harness/model/preset 声明解析成可 spawn 的 command/args/pre。
+ *
+ * 分层：harness（怎么起 CLI）→ provider（走哪条通道：env 包，经 model 的 provider 字段
+ * 间接引用）→ model（哪个模型：--model 旗标 + model_env_keys 钉扎）→ preset（参数旋钮）。
  *
  * 失败语义（2026-07-26 改）：**抛错，不再静默返回 null**。
  * 原先读不到配置或 harness 名字打错都返回 null，调用方 buildSpawnSpec 于是回落到
@@ -48,8 +70,9 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
   if (!template.harness) return null
 
   const harnesses = loadJson<{ harnesses?: Record<string, HarnessSpec> }>('harnesses')
-  const models = loadJson<{ models?: Record<string, { model_id?: string }> }>('models')
+  const models = loadJson<{ models?: Record<string, { model_id?: string; provider?: string }> }>('models')
   const presets = loadJson<{ presets?: Record<string, { timeout?: number }> }>('presets')
+  const providers = loadJson<{ providers?: Record<string, ProviderSpec> }>('providers')
 
   if (!harnesses) {
     throw new Error(
@@ -70,13 +93,17 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
   const preset = presets?.presets?.[template.preset ?? '']
 
   const args = [...(harness.args ?? [])]
-  const env: NodeJS.ProcessEnv = { ...(harness.env ?? {}) }
+  let modelId: string | undefined
 
-  // 模型：openclaw/workbuddy 走 models.json 的 model_id；reasonix 直接用字面量。
+  // 模型：openclaw/workbuddy/claude 等走 models.json 的 model_id；reasonix 直接用字面量。
   if (template.harness === 'reasonix') {
-    if (template.model) args.push('--model', template.model)
+    if (template.model) {
+      modelId = template.model
+      args.push('--model', modelId)
+    }
   } else if (model?.model_id) {
-    args.push('--model', model.model_id)
+    modelId = model.model_id
+    args.push('--model', modelId)
   } else if (template.model) {
     // 声明了 model 但字典里查不到 —— 静默忽略会让人以为换了模型其实没换
     throw new Error(
@@ -91,20 +118,45 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
     args.push('--timeout', String(preset.timeout))
   }
 
-  return {
-    command: harness.command,
-    args,
-    env,
-    cwd: harness.cwd,
+  // 通道层 env 包：harness.env 在底、provider.env 叠上、model_env_keys 钉扎最后。
+  const provider = model?.provider ? providers?.providers?.[model.provider] : undefined
+  const merged: Record<string, string> = { ...(harness.env ?? {}), ...(provider?.env ?? {}) }
+  if (provider?.model_env_keys?.length) {
+    if (!modelId) {
+      throw new Error(
+        `模板 ${template.id} 经 provider="${model?.provider}" 要求 model_env_keys 钉扎，但未解析出 model_id（model 字段留空？）`,
+      )
+    }
+    for (const key of provider.model_env_keys) merged[key] = modelId
   }
-}
 
-export function expandStandCodeEnv(): NodeJS.ProcessEnv {
-  // 继承用户登录 shell 环境变量，但由 buildCleanEnv 控制白名单
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']) {
-    const v = process.env[key]
-    if (v !== undefined) env[key] = v
+  const clean = Boolean(provider?.clean_env)
+  if (clean && !merged.PATH) {
+    throw new Error(
+      `provider="${model?.provider}" 声明了 clean_env（env -i 完全替换环境）但 env 包里没有 PATH，子进程将找不到任何命令`,
+    )
   }
-  return env
+
+  // env 渲染成 `env [-i] K=V … <cmd> <args>` 命令行前缀：在登录 shell rc **之后**生效，
+  // rc 的 export 覆盖不了（spawn env 通道会被 rc 覆盖，正是 bin/c5 用 env -i 的原因）。
+  let command = harness.command
+  let finalArgs = args
+  const pairs = Object.entries(merged)
+  if (pairs.length || clean) {
+    finalArgs = [
+      ...(clean ? ['-i'] : []),
+      ...pairs.map(([k, v]) => `${k}=${v}`),
+      command,
+      ...args,
+    ]
+    command = 'env'
+  }
+
+  return {
+    command,
+    args: finalArgs,
+    env: {},
+    cwd: harness.cwd,
+    pre: harness.pre?.length ? [...harness.pre] : undefined,
+  }
 }

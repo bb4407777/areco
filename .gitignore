@@ -6,3 +6,8 @@ config.json
 bin/
 *.log
 .DS_Store
+
+# StandCode 本机私有配置（真身含凭证/本机路径，仓里只放 *.example.json）
+standcode/config/harnesses.json
+standcode/config/providers.json
+standcode/config/local.json

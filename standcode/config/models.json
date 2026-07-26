@@ -61,6 +61,16 @@
       "provider": "qoder",
       "model_id": "Qwen3.8-Max-Preview",
       "description": "Qwen3.8-Max-Preview（qoder CLI 默认）"
+    },
+    "claude-fable-5": {
+      "provider": "freemodel-cc",
+      "model_id": "claude-fable-5",
+      "description": "Claude Fable 5（FreeModel 网关，bin/c5 同款整包 env）"
+    },
+    "claude-opus-5": {
+      "provider": "freemodel-cc",
+      "model_id": "claude-opus-5",
+      "description": "Claude Opus 5（FreeModel 网关，bin/cfm 同款整包 env）"
     }
   }
 }

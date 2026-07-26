@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "comment": "通道（供应商）层示例。真身 providers.json 含凭证，不入库。models.json 条目的 provider 字段引用此处的键；查无此键 = 该通道凭证在 CLI 自己的配置里，无需 env 包（这是常态，不是错误）。",
+  "providers": {
+    "my-gateway": {
+      "clean_env": true,
+      "env": {
+        "HOME": "/Users/you/.homes/claude-isolated",
+        "USER": "you",
+        "LOGNAME": "you",
+        "SHELL": "/bin/zsh",
+        "TERM": "xterm-256color",
+        "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "CLAUDE_CONFIG_DIR": "/Users/you/.homes/claude-isolated/.claude",
+        "ANTHROPIC_BASE_URL": "https://your-gateway.example.com",
+        "ANTHROPIC_AUTH_TOKEN": "sk-…",
+        "DISABLE_AUTOUPDATER": "1"
+      },
+      "model_env_keys": [
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL"
+      ],
+      "description": "示例：自建 Claude 兼容网关。clean_env=true 渲染为 `env -i K=V … claude …`（在登录 shell rc 之后生效，rc 覆盖不了；env 包必须自带 PATH）。model_env_keys 把主/子/快模型全钉在同一 model_id 上，防网关上没有的模型被回落选中。"
+    },
+    "native-cli": {
+      "description": "示例：CLI 自带凭证（~/.kimi-code、~/.codex 之类）——只留 description 作台账，无 env 包"
+    }
+  }
+}

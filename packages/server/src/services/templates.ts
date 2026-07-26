@@ -140,9 +140,14 @@ export function buildSpawnSpec(
       if (v !== undefined) env[k] = v
     }
   }
+  // harness.pre：exec 前的前置命令（如 reasonix 的 config auto-plan on），
+  // 原样拼接——来源是本机 standcode/config 配置文件，与 command 同信任级。
+  const script = resolved?.pre?.length
+    ? `${resolved.pre.join('; ')}; ${buildShellCommand(command, args)}`
+    : buildShellCommand(command, args)
   return {
     file: '/bin/zsh',
-    args: ['-ilc', buildShellCommand(command, args)],
+    args: ['-ilc', script],
     cwd: fs.existsSync(cwd) ? cwd : os.homedir(),
     env,
   }
