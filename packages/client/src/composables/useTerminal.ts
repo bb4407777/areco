@@ -396,6 +396,38 @@ export function useTerminal(sessionId: string) {
   // 大块 write 期间 xterm 会按时间片分段渲染出中间帧（快进感）：超过此阈值套用
   // 快照同款的 visibility 隐藏，写完回底再亮，整场只呈现最终一帧
   const FLUSH_HIDE_MIN_BYTES = 64 * 1024
+  const RIS = '\x1bc'
+
+  // pi-mono 系 TUI 在 resize 重绘时会发 CSI 3 J 清除 scrollback。对真实 PTY 这是合理的，
+  // 但 Areco 把终端历史作为会话记录保留；让 3J 进入 xterm 会同步把 viewport 钳到 0，
+  // 造成「跳到会话开头再拉回」。只移除 3J，保留同批次的 2J + H 当前屏清理/重绘。
+  function preserveScrollback(data: string) {
+    return data.replaceAll('\x1b[3J', '')
+  }
+
+  // 大块/RIS 重印后 xterm 的 DOM 渲染滞后于 write 回调：回调时数据已入缓冲，但 DOM scrollHeight
+  // 还没撑开，此刻亮屏 = 可见顶闪（DOM scrollTop 停在 0 长达数百毫秒，2026-07-27「查下freemodel余额」
+  // 会话 MutationObserver 实锤：flush 回调时 scrollHeight≈clientHeight 误判贴底提前亮屏，DOM 直到
+  // t=840 才真正贴底，中间 16 帧可见地停在会话开头）。逐帧 scrollToBottom，等 scrollHeight 连续两帧
+  // 不再增长（=渲染完成）且贴底再亮；600ms 时间兜底防极端慢机。
+  function settleUnhide(el: HTMLElement, start = performance.now(), lastSH = -1, stable = 0) {
+    if (!term) {
+      el.style.visibility = ''
+      return
+    }
+    term.scrollToBottom()
+    const vp = container?.querySelector('.xterm-viewport') as HTMLElement | null
+    const sh = vp ? vp.scrollHeight : 0
+    const atBottom = vp ? sh - vp.clientHeight - vp.scrollTop < 5 : true
+    const nextStable = sh > 0 && sh === lastSH && atBottom ? stable + 1 : 0
+    const elapsed = performance.now() - start
+    // write 回调后可能先有一段 scrollHeight 不变的空窗，不能把这两帧误当成渲染完成。
+    if ((elapsed >= 300 && nextStable >= 2) || elapsed > 600) {
+      el.style.visibility = ''
+      return
+    }
+    requestAnimationFrame(() => settleUnhide(el, start, sh, nextStable))
+  }
 
   function flushPending() {
     if (!term || !pending.length) return
@@ -403,14 +435,26 @@ export function useTerminal(sessionId: string) {
     pending = []
     pendingBytes = 0
     const last = chunks[chunks.length - 1]!
-    const wipe = chunks.some((c) => c.data.includes('\x1b[3J') || c.data.includes('\x1bc'))
-    const joined = chunks.map((c) => c.data).join('')
-    const el = joined.length >= FLUSH_HIDE_MIN_BYTES ? (container?.querySelector('.xterm') as HTMLElement | null) : null
+    const raw = chunks.map((c) => c.data).join('')
+    const ris = raw.includes(RIS)
+    const joined = preserveScrollback(raw)
+    // 常见的 3J 已从语义上消除；大块写入与罕见 RIS 仍隐藏到渲染结算。
+    const hide = joined.length >= FLUSH_HIDE_MIN_BYTES || ris
+    const el = hide ? (container?.querySelector('.xterm') as HTMLElement | null) : null
     if (el) el.style.visibility = 'hidden'
     term.write(joined, () => {
-      if (wipe || el) term?.scrollToBottom() // 见 output 分支注释：3J 清屏重绘后同帧拉回，消顶闪
-      if (el) el.style.visibility = ''
       wsClient.queueAck(sessionId, last.offset)
+      if (!el) {
+        return
+      }
+      if (ris) {
+        term?.scrollToBottom()
+        // RIS 仍可能把 viewport 清到顶，等 DOM 真正结算后再亮。
+        requestAnimationFrame(() => settleUnhide(el))
+      } else {
+        term?.scrollToBottom()
+        el.style.visibility = ''
+      }
     })
   }
 
@@ -695,21 +739,19 @@ export function useTerminal(sessionId: string) {
         return
       }
       if (pending.length) flushPending() // 保序：先补攒下的，再写新块
-      // kimi 等 TUI 在 resize/内容收缩时全量重绘并 \x1b[3J 清 scrollback（pi-mono 渲染器实锤，
-      // 2026-07-24 连滚报障）：3J 一落 xterm 视口即被钳到顶（"跳到会话开头"），此前靠结算窗
-      // 守卫 150ms 后拉回 = 肉眼可见的顶闪+拉扯。这里写完同帧拉回，把闪压缩到 ~1 帧内。
-      // \x1bc（RIS 全重置）同效，一并检测（Qwen3.8 复核建议：堵 claude/ink 系错误恢复路径）。
-      const wipe = msg.data.includes('\x1b[3J') || msg.data.includes('\x1bc')
-      term.write(msg.data, () => {
-        if (wipe) {
-          // write 回调与 xterm 渲染 rAF 可能交错：回调时渲染器已画了一帧 viewport=0。
-          // rAF 排在 xterm 渲染之后，确保拉回动作覆盖最近一帧；再补一个 150ms 点防 reflow 尾弹。
-          requestAnimationFrame(() => term?.scrollToBottom())
-          window.setTimeout(() => {
-            if (!isUserScrolling()) term?.scrollToBottom()
-          }, 150)
-        }
+      // kimi/workbuddy resize 重绘中的 3J 已由 preserveScrollback 移除：保留 2J+H 当前屏重绘，
+      // 不让 xterm 清 scrollback 后把 viewport 钳到顶。罕见 RIS（ESC c）会重置整个终端，
+      // 无法直接移除，写入期间隐藏并在 DOM 结算、贴底后再亮。
+      const data = preserveScrollback(msg.data)
+      const ris = data.includes(RIS)
+      const wipeEl = ris ? (container?.querySelector('.xterm') as HTMLElement | null) : null
+      if (wipeEl) wipeEl.style.visibility = 'hidden'
+      term.write(data, () => {
         wsClient.queueAck(sessionId, msg.offset)
+        if (!wipeEl) return
+        term?.scrollToBottom()
+        // 同 flushPending：xterm 渲染滞后于回调，逐帧回底确认贴底再亮，消顶闪
+        requestAnimationFrame(() => settleUnhide(wipeEl))
       })
     }
   }
