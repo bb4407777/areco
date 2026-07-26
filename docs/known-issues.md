@@ -111,7 +111,7 @@ OOM / `/api/server/restart`），重启后会话被恢复成 `exitReason:'server
 
 ---
 
-## ~~4. 并行派发先注入后查幂等~~ ✅ 已修（536cf78）
+## ~~4. 并行派发先注入后查幂等~~ ✅ 已修（见 git log `fix(rooms/relay)`）
 
 **位置**：`room-relay.ts` · `deliverMentions` 并行分支
 
@@ -127,7 +127,7 @@ for (const m of members) {
 重启，首轮快进把「新消息」重放进 `onMessageStored`。底账不会脏（`createDispatch` 幂等、
 既有投递已是 `injected`），但**每个成员的终端会再收到一遍同样的任务**，两个 agent 干同一件事。
 
-**已修**（536cf78）：`del.status === 'queued'` 判断提到 `injectToMember` 之前，与串行分支对齐。
+**已修**（见 git log `fix(rooms/relay)`）：`del.status === 'queued'` 判断提到 `injectToMember` 之前，与串行分支对齐。
 
 ---
 
@@ -145,7 +145,7 @@ for (const m of members) {
 `load()` 解析失败时把坏文件改名 `rooms.json.corrupt-<ts>` 并**拒绝**覆盖；rename 前
 对 tmp fd `fsyncSync`。`persistence.ts:15-19/50-62` 已有正确写法可抄。
 
-**已修的部分**（536cf78）：`load()` 解析失败改为把坏文件改名 `.corrupt-<ts>` 留证；
+**已修的部分**（见 git log `fix(rooms/relay)`）：`load()` 解析失败改为把坏文件改名 `.corrupt-<ts>` 留证；
 留证失败则上闸让 `save()` **拒写**（不拿空名单盖好数据）；`atomicWrite` 在 rename 前对
 tmp fd `fsyncSync`。配套 `rooms-corrupt.test.ts` 6 条，含「目录设只读让留证失败 → 确认
 save 拒写 → 原坏文件内容完好」。
