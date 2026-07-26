@@ -409,23 +409,26 @@ async function main() {
 
   if (PATROL) {
     const vmapW = { resumed: '已恢复运行', 'screen-changed': '已响应，观察中', 'still-stalled': '注入后仍卡着', 'verify-failed': '验证读屏失败' }
-    const noteworthy = results.filter((r) => ['sent', 'send-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
+    const line = (r) =>
+      r.action === 'sent' ? `✅ ${r.name}：API Error 已注入 continue → ${vmapW[r.verify] || r.verify}`
+      : r.action === 'send-failed' ? `❌ ${r.name}：注入失败（${r.why}）`
+      : r.action === 'give-up' ? `🆘 ${r.name}：${r.why}`
+      : r.action === 'dialog-stuck' ? `⚠️ ${r.name}：${r.why}，请到看板处理`
+      : `💥 ${r.name}：${r.why}`
+    const logworthy = results.filter((r) => ['sent', 'send-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
     const stamp = new Date().toISOString()
-    if (!noteworthy.length) {
+    if (!logworthy.length) {
       console.log(`${stamp} 巡检 clean（${targets.length} 个 claude 系会话）`)
       return
     }
-    const L = ['🩺 areco 会话巡检']
-    for (const r of noteworthy) {
-      if (r.action === 'sent') L.push(`✅ ${r.name}：API Error 已注入 continue → ${vmapW[r.verify] || r.verify}`)
-      else if (r.action === 'send-failed') L.push(`❌ ${r.name}：注入失败（${r.why}）`)
-      else if (r.action === 'give-up') L.push(`🆘 ${r.name}：${r.why}`)
-      else if (r.action === 'dialog-stuck') L.push(`⚠️ ${r.name}：${r.why}，请到看板处理`)
-      else if (r.action === 'crashed') L.push(`💥 ${r.name}：${r.why}`)
+    console.log(`${stamp}\n${logworthy.map(line).join('\n')}`)
+    // 成功续跑静默不报（高律师 2026-07-26「continue 其实不用汇报」）；注入后仍卡的也不单独吵，
+    // 反复失败会走 give-up 聚合成一条。只有需要人出手的才推微信。
+    const alerts = logworthy.filter((r) => r.action !== 'sent')
+    if (alerts.length) {
+      const text = ['🩺 areco 会话巡检', ...alerts.map(line)].join('\n')
+      if (!notifyWeixin(text)) console.log('（微信通知发送失败，见审计日志）')
     }
-    const text = L.join('\n')
-    console.log(`${stamp}\n${text}`)
-    if (!notifyWeixin(text)) console.log('（微信通知发送失败，见审计日志）')
     return
   }
 
