@@ -242,9 +242,42 @@ def test_conf_float() -> None:
         del os.environ["__BAD_FLOAT__"]
 
 
+def test_inbox_lock() -> None:
+    """.processing 锁：原子获取 + 过期抢占（改动前 TOCTOU 且永不过期）。"""
+    print("\n[inbox] .processing 锁")
+    import time as _t
+    orig_dir = C.INBOX_DIR
+    C.INBOX_DIR = pathlib.Path(tempfile.mkdtemp())
+    try:
+        check(C.acquire_processing_lock("t1"), "首次获取成功")
+        check(not C.acquire_processing_lock("t1"), "重复获取被拒（原子，非 TOCTOU）")
+        pp = C._processing_path("t1")
+        old = _t.time() - C.LOCK_STALE_SEC - 60
+        os.utime(pp, (old, old))
+        check(C.acquire_processing_lock("t1"), "过期锁被抢占（改动前=永久锁死）")
+        C.release_processing_lock("t1")
+        check(not pp.exists(), "释放后锁消失")
+    finally:
+        C.INBOX_DIR = orig_dir
+
+
+def test_wechat_target_guard() -> None:
+    """WECHAT_TARGET 为空时不许发——cc-send 裸 -s '' 会回落到活跃会话指针发错人。"""
+    print("\n[relay] 空 WECHAT_TARGET 闸")
+    orig = C.WECHAT_TARGET
+    C.WECHAT_TARGET = ""
+    try:
+        r = C.send_callback_trigger("task-x", "测试")
+        check(not r["ok"] and "WECHAT_TARGET" in (r.get("error") or ""),
+              "未配置目标 → 不发并说明原因（改动前会发给碰巧活跃的会话）")
+    finally:
+        C.WECHAT_TARGET = orig
+
+
 def main() -> int:
     for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute,
-              test_dispatch_hardening, test_conf_float):
+              test_dispatch_hardening, test_conf_float, test_inbox_lock,
+              test_wechat_target_guard):
         t()
     print()
     if _fails:

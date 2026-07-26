@@ -1727,12 +1727,20 @@ class Caller:
                 # 真 worktree：基于 source_repo 建独立工作树，新分支名 stand-<task_id>
                 ws.parent.mkdir(parents=True, exist_ok=True)
                 branch = f"stand-{task_id}"
-                subprocess.run(
+                proc = subprocess.run(
                     ["git", "-C", source_repo, "worktree", "add", "-b", branch,
                      str(ws)],
                     capture_output=True, text=True, timeout=30,
                 )
-                kind = "git_worktree"
+                # 必须看 returncode：改动前无条件写 kind="git_worktree"，于是分支已存在 /
+                # source_repo 不是仓库 / 磁盘满 时，函数照样报告「已建好隔离工作树」。
+                # 隔离是并行 fan-out 的安全前提——谎报隔离比不隔离更危险，因为没人会再去查。
+                if proc.returncode != 0:
+                    err = (proc.stderr or proc.stdout or "").strip()[-200:]
+                    logger.warning("git worktree add 失败（task=%s）：%s", task_id, err)
+                    kind = f"failed:git_worktree: {err}"
+                else:
+                    kind = "git_worktree"
             else:
                 ws.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -2773,6 +2781,10 @@ TASKS_DIR = Path(
 INBOX_DIR = Path(
     __file__).resolve().parent.parent / "data" / "inbox"
 PROCESSING_SUFFIX = ".processing"
+DONE_SUFFIX = ".done"
+# .processing 锁多久算死锁（被抢占）。默认 30 分钟：比任何一次「读 inbox → 汇总 → 代发」
+# 都长得多，又不至于让一个被 SIGKILL 的进程把 task 锁到天荒地老。
+LOCK_STALE_SEC = _conf_float("STANDCODE_LOCK_STALE_SEC", "lock_stale_sec", 1800)
 
 
 def _state_path(task_id: str) -> Path:
@@ -2869,17 +2881,46 @@ def delete_inbox(task_id: str) -> bool:
 
 
 def acquire_processing_lock(task_id: str) -> bool:
-    """尝试获取 .processing 锁，成功返回 True，失败（已有他人处理中）返回 False"""
+    """尝试获取 .processing 锁，成功返回 True，失败（已有他人处理中）返回 False。
+
+    两处加固（2026-07-26 审计）：
+    · **原子**：改动前是 `if exists(): return False` 再 write_text ——典型 TOCTOU，
+      两个 Hermes 回合可以同时「获取成功」。改用 O_CREAT|O_EXCL，创建即占有，由内核保证。
+    · **会过期**：改动前锁没有任何过期机制，进程被 SIGKILL（或 areco 重启连带杀掉）
+      就留下永久锁，那个 task 从此永远返回 action="locked"，且没有任何 CLI 能清它。
+      现在超过 LOCK_STALE_SEC 的锁视为死锁，抢占并记 warning。
+    """
     pp = _processing_path(task_id)
-    if pp.exists():
-        return False
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        pp.write_text(_now_iso())
-        return True
+        fd = os.open(str(pp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        # 已有锁：只有确认它已经死透才抢
+        try:
+            age = time.time() - pp.stat().st_mtime
+        except OSError:
+            return False
+        if age <= LOCK_STALE_SEC:
+            return False
+        logger.warning(
+            "抢占过期 .processing 锁（task=%s，已 %.0fs 未更新 > %.0fs）——"
+            "多半是上个处理进程被杀了",
+            task_id, age, LOCK_STALE_SEC,
+        )
+        try:
+            pp.unlink(missing_ok=True)
+            fd = os.open(str(pp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except Exception as e:
+            logger.warning("抢占过期锁失败 %s: %s", pp, e)
+            return False
     except Exception as e:
         logger.warning("获取 .processing 锁失败 %s: %s", pp, e)
         return False
+    try:
+        os.write(fd, f"{_now_iso()} pid={os.getpid()}\n".encode())
+    finally:
+        os.close(fd)
+    return True
 
 
 def release_processing_lock(task_id: str) -> None:
@@ -2898,6 +2939,22 @@ def send_callback_trigger(
     避免「dry-run 未真发」误判掩盖真实的 cc-send 失败。
     """
     msg = f"任务 {summary_hint}（{task_id}）完成，Hermes 正在汇总…"
+
+    # 目标会话为空时**绝不能发**：cc-send 裸 -s "" 会回落到「当前活跃会话指针」，
+    # 于是一条任务完成通知被投进碰巧活跃的那个对话——发错人。relay_to_wechat 早有这道
+    # 闸（未配置就直接返回错误），本函数一直漏了。config/local.json 不进仓，换台机器
+    # 跑就是空值，不是边缘情况。
+    if not WECHAT_TARGET:
+        logger.warning("WECHAT_TARGET 未配置，跳过回调触发消息（task=%s）", task_id)
+        return {
+            "ok": False,
+            "dry_run": False,
+            "task_id": task_id,
+            "message": msg,
+            "stdout": "",
+            "returncode": None,
+            "error": "WECHAT_TARGET 未配置——不发，避免 cc-send 回落到活跃会话指针发错人",
+        }
 
     if dry_run:
         logger.info("[dry-run] 回调触发消息未发送: task=%s", task_id)
@@ -3268,7 +3325,6 @@ def _run_by_mode(
 
 
 def _cmd_run(args) -> int:
-    # 兜底扫描入口：scripts/room-inbox-sync.py（cron/常驻每 60s 扫漏写 inbox 的 room，补写 + 发房间内触发）
     # --timeout 未显式给时：--wait/--bg 默认 0（无限等到 Stand 完成），普通前台默认 600
     timeout = args.timeout if args.timeout is not None else (
         0 if (getattr(args, "wait", False) or getattr(args, "bg", False)) else 600
@@ -3515,6 +3571,80 @@ def _cmd_run(args) -> int:
     return 0 if res.get("status") == "completed" else 1
 
 
+def _cmd_inbox(args) -> int:
+    """收信箱运维：列出待取 / 清理已汇报 / 解死锁。
+
+    补的是一个空白：inbox 是拉模式的落点（SKILL.md「每次被微信唤醒、办正事前 ls 一下」），
+    但此前唯一的程序入口是隐藏的 `_process_inbox` argv 分支，--help 里没有；
+    `.done` 的重命名约定只写在 SKILL.md 里、代码一无所知，于是 data/inbox/ 只增不减；
+    卡死的 .processing 锁更是没有任何办法清。
+    """
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    pending, done, locks = [], [], []
+    for p in sorted(INBOX_DIR.iterdir()):
+        if p.name.endswith(PROCESSING_SUFFIX):
+            locks.append(p)
+        elif p.name.endswith(DONE_SUFFIX):
+            done.append(p)
+        elif p.suffix == ".json":
+            pending.append(p)
+
+    if args.gc or args.unlock:
+        removed = 0
+        if args.gc:
+            cutoff = time.time() - args.older_than * 86400
+            for p in done:
+                if p.stat().st_mtime < cutoff:
+                    if args.yes:
+                        p.unlink(missing_ok=True)
+                    removed += 1
+            print(f"{'已清理' if args.yes else '可清理'} {removed} 个 {DONE_SUFFIX} "
+                  f"（超过 {args.older_than} 天）" + ("" if args.yes else "；加 --yes 真删"))
+        if args.unlock:
+            stale = 0
+            for p in locks:
+                age = time.time() - p.stat().st_mtime
+                if args.force or age > LOCK_STALE_SEC:
+                    if args.yes:
+                        p.unlink(missing_ok=True)
+                    stale += 1
+                    print(f"  {'解锁' if args.yes else '可解锁'} {p.name}（已 {age/60:.0f} 分钟）")
+            print(f"{'已解' if args.yes else '可解'} {stale} 个锁"
+                  + ("" if args.yes else "；加 --yes 真解"))
+        return 0
+
+    if args.json:
+        print(json.dumps({
+            "inbox_dir": str(INBOX_DIR),
+            "pending": [p.stem for p in pending],
+            "done": len(done),
+            "locked": [p.name.replace(PROCESSING_SUFFIX, "") for p in locks],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"收信箱 {INBOX_DIR}")
+    if not pending:
+        print("  待取：无")
+    else:
+        print(f"  待取 {len(pending)} 条：")
+        for p in pending:
+            try:
+                d = json.loads(p.read_text())
+                print(f"    · {p.stem}  [{d.get('status','?')}] "
+                      f"{(d.get('request_summary') or d.get('request') or '')[:40]}")
+            except Exception:
+                print(f"    · {p.stem}  （读取失败）")
+    if locks:
+        print(f"  处理中锁 {len(locks)} 个：")
+        for p in locks:
+            age = (time.time() - p.stat().st_mtime) / 60
+            flag = " ⚠️已过期，可 --unlock" if age * 60 > LOCK_STALE_SEC else ""
+            print(f"    · {p.name.replace(PROCESSING_SUFFIX,'')}（{age:.0f} 分钟）{flag}")
+    if done:
+        print(f"  已汇报 {done and len(done)} 个 {DONE_SUFFIX}（`inbox --gc` 清理）")
+    return 0
+
+
 def _cmd_check(args) -> int:
     """Gatekeeper CLI：核查一个任务 / 命令是否必须派发（check_should_dispatch）"""
     verdict = check_should_dispatch(args.task)
@@ -3686,6 +3816,18 @@ def _cmd_rooms(args) -> int:
             v for v in views
             if v["standcode"] and v["source"] != "台账"
         ]
+        # 干跑默认（对齐 --sweep）：认领是**不可逆**的——台账按 room_id 折叠且没有
+        # unadopt 事件，一旦认错（人手建的房间碰巧以 ⚙ 开头或以 ·T1a2b 结尾），
+        # is_standcode_room 就永远返回 True，之后 --sweep --yes 会把它归档掉。
+        # 判据又只是名字启发式，误判面真实存在。所以要 --yes 才真写。
+        if not args.yes:
+            print(f"[干跑] 可认领 {len(adopted)} 个存量房间（判据=名字启发式，"
+                  f"认领不可逆，确认无误后加 --yes 真写台账）")
+            for v in adopted:
+                print(f"  · {v['room_id']}  {v['name']}  [{v['source']}]")
+            if not adopted:
+                print("  （无待认领房间：要么已在台账，要么不是 StandCode 派发的）")
+            return 0
         for v in adopted:
             ledger_append(
                 "adopted", v["room_id"], room_name=v["name"],
@@ -3825,6 +3967,15 @@ def _build_parser():
     pl = sub.add_parser("list", help="列出所有后台任务")
     pl.set_defaults(func=_cmd_list)
 
+    pi = sub.add_parser("inbox", help="收信箱：列出待取 / --gc 清理已汇报 / --unlock 解死锁")
+    pi.add_argument("--json", action="store_true", help="结构化输出")
+    pi.add_argument("--gc", action="store_true", help=f"清理 {DONE_SUFFIX}（默认干跑）")
+    pi.add_argument("--older-than", type=float, default=7, help="配合 --gc：保留最近 N 天（默认 7）")
+    pi.add_argument("--unlock", action="store_true", help="解过期 .processing 锁（默认干跑）")
+    pi.add_argument("--force", action="store_true", help="配合 --unlock：连未过期的锁一并解")
+    pi.add_argument("--yes", action="store_true", help="真执行（--gc / --unlock 默认只干跑）")
+    pi.set_defaults(func=_cmd_inbox)
+
     pm = sub.add_parser(
         "rooms",
         help="房间台账 × areco 现状：列出 / 认领存量 / 清扫积压（只归档，永不删除）",
@@ -3835,7 +3986,7 @@ def _build_parser():
         "--idle", type=float, default=SWEEP_IDLE_MIN,
         help=f"清扫的静置门槛分钟数（默认 {SWEEP_IDLE_MIN:g}，防止扫掉正在追问的房间）",
     )
-    pm.add_argument("--adopt", action="store_true", help="把台账上线前的存量派发房间补录进台账")
+    pm.add_argument("--adopt", action="store_true", help="把台账上线前的存量派发房间补录进台账（默认干跑，--yes 真写；认领不可逆）")
     pm.add_argument("--sweep", action="store_true", help="清扫：列出可归档房间（默认干跑）")
     pm.add_argument("--yes", action="store_true", help="配合 --sweep 真执行归档（可逆，UI 可恢复）")
     pm.set_defaults(func=_cmd_rooms)
