@@ -648,6 +648,14 @@ export class RoomRelay {
    * ECHO_VERIFY_MS 内未见回显 = 被吞，quiet 后重发，最多 ECHO_MAX_ATTEMPTS 次。
    * 返回本次注入的 nonce（回显标记）：调度底账用它作 delivery.correlation_id；
    * 重发会产生新 nonce，但对外只暴露首个（底账只需关联到本次注入意图）。
+   *
+   * ⚠️ 返回值只代表「已排入注入队列」，**不代表已送达**。nonce 是同步返回的，而真正的
+   * sendline 发生在之后的 onceQuiet 回调里，可能根本没跑（会话在静默窗口内死掉）、
+   * 抛错、或回显校验重试耗尽。这三种情况调用方都会拿到真值 nonce 并写 status:'injected'，
+   * 于是「什么都没投出去」被记成「已投递」——串行房间会因此冻住整条队列直到超时清扫。
+   * 三条路径现已各自 log.warn（改动前完全静默），但**状态机仍未修**：
+   * 正解是加 onFailed 回调（serialAdvanceNext 里 `nonce` 为假时的 failed 分支已经写好了，
+   * 只是永远走不到），详见 docs/known-issues.md「投递谎报成功」。
    */
   private injectNote(sessionId: string, note: string, onSent: (sess: Session) => void, attempt = 1): string {
     const sess = this.manager.get(sessionId)
@@ -667,12 +675,20 @@ export class RoomRelay {
       try {
         sess.sendline(wire, { autoName: false })
         onSent(sess)
-      } catch {
-        /* 会话可能已退出/被删 */
+      } catch (err) {
+        // 会话可能已退出/被删。原先是空 catch —— 这条投递彻底没发出去，
+        // 而调用方已经拿着 nonce 记了 status:injected，从日志里看不出任何异常。
+        // 至少让它可见（真正的修法见 docs/known-issues.md「投递谎报成功」）。
+        log.warn(`note 注入 ${sessionId.slice(0, 8)} sendline 失败，本次投递未发出`, err)
       }
       setTimeout(() => {
         sess.off('output', onOut)
-        if (echoed || !sess.isRunning) return
+        if (echoed) return
+        if (!sess.isRunning) {
+          // 会话在静默窗口内死了 —— 同样什么都没投出去，同样对调用方不可见
+          log.warn(`note 注入 ${sessionId.slice(0, 8)} 期间会话已退出，本次投递未送达`)
+          return
+        }
         if (attempt >= ECHO_MAX_ATTEMPTS) {
           log.warn(`note 注入 ${sessionId.slice(0, 8)} ${ECHO_MAX_ATTEMPTS} 次均未见回显，放弃（会话可能卡在启动页）`)
           return
