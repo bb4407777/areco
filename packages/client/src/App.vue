@@ -51,8 +51,8 @@ const connected = wsClient.connected
               {{ store.title }}
             </router-link>
             <nav class="nav">
-              <router-link to="/projects" class="nav-link" :class="{ active: route.path.startsWith('/projects') }">任务</router-link>
               <router-link to="/" class="nav-link" :class="{ active: route.path === '/' }">会话</router-link>
+              <router-link to="/projects" class="nav-link" :class="{ active: route.path.startsWith('/projects') }">任务</router-link>
               <router-link to="/history" class="nav-link" :class="{ active: route.path.startsWith('/history') }">历史</router-link>
               <router-link to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">设置</router-link>
               <button class="nav-link theme-btn" type="button" :title="ui.theme === 'dark' ? '切到浅色' : '切到深色'" @click="ui.toggleTheme()">
