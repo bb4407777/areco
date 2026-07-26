@@ -15,9 +15,20 @@
     python3 caller/test_rooms.py --live
 """
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+# _TEST_ISO：离线测试环境隔离（同 test_modes.py 口径）——audit/tasks/台账/暖池全落
+# 临时目录，暖池关掉，别再往生产 audit.jsonl 灌桩事件。--live 在线部分同样适用：
+# 它建的是真房间，但属测试流量，不该进生产报表。
+_TEST_ISO = tempfile.mkdtemp(prefix="standcode-test-")
+os.environ.setdefault("STANDCODE_AUDIT_LOG", os.path.join(_TEST_ISO, "audit.jsonl"))
+os.environ.setdefault("STANDCODE_TASKS_DIR", os.path.join(_TEST_ISO, "tasks"))
+os.environ.setdefault("STANDCODE_ROOMS_LEDGER", os.path.join(_TEST_ISO, "rooms.jsonl"))
+os.environ.setdefault("STANDCODE_STANDBY_DIR", os.path.join(_TEST_ISO, "standby"))
+os.environ.setdefault("STANDCODE_STANDBY", "off")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import caller as C  # noqa: E402

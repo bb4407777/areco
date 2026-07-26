@@ -13,6 +13,16 @@ import sys
 import pathlib
 import tempfile
 
+# _TEST_ISO：离线测试环境隔离（2026-07-26）。此前没隔离 STANDCODE_AUDIT_LOG，
+# 167 条桩事件（thinker-tpl/room0）混进生产 audit.jsonl，把报表灌成「派发 182 单」
+# （真实 15）。所有会 import caller 的离线测试都必须在 import 前落这一块。
+_TEST_ISO = tempfile.mkdtemp(prefix="standcode-test-")
+os.environ.setdefault("STANDCODE_AUDIT_LOG", os.path.join(_TEST_ISO, "audit.jsonl"))
+os.environ.setdefault("STANDCODE_TASKS_DIR", os.path.join(_TEST_ISO, "tasks"))
+os.environ.setdefault("STANDCODE_ROOMS_LEDGER", os.path.join(_TEST_ISO, "rooms.jsonl"))
+os.environ.setdefault("STANDCODE_STANDBY_DIR", os.path.join(_TEST_ISO, "standby"))
+os.environ.setdefault("STANDCODE_STANDBY", "off")  # 暖池副作用（建房/补胎）不进离线测试
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import caller as C  # noqa: E402
 
@@ -31,14 +41,21 @@ def test_route_mode() -> None:
     print("\n[route_mode] 四格路由")
     cases = [
         # (请求, 期望 mode, 期望 plan_only)
-        ("这两套架构选哪个，为什么", "think", True),
+        # 2026-07-26 强弱分档后口径：plan 两段式只留给强信号（分几步/计划/拆解…）
+        # 或 ≥2 个弱信号且无 DIRECT 压制——单个「设计/调研/架构」不再触发多步。
+        # 理由：plan 误入 = 白烧一个 Thinker 段（中位 95s+），而 Worker（claude CLI）
+        # 自带内部规划，单段扛得住边界任务；宁 worker 勿 plan。
+        ("这两套架构选哪个，为什么", "think", False),   # 弱×1 不算多步：二选一给结论即可
         ("梳理一下这三种模式的优缺点", "think", False),
-        ("评估这三条迁移路线的可行性", "think", True),
+        ("评估这三条迁移路线的可行性", "think", True),   # 弱×2（评估+可行性）→ 多步判断出结构化计划
         ("先出个计划，别动手", "think", True),
         ("把恩平法院的判决书下载下来", "worker", False),
         ("总结一下这份文书", "worker", False),
-        ("调研 X 并输出一份报告存到桌面", "plan", False),
-        ("把这个下载下来然后设计一个归档方案", "plan", False),
+        ("调研 X 并输出一份报告存到桌面", "worker", False),   # 弱×1+落盘：单段自研自写
+        ("把这个下载下来然后设计一个归档方案", "worker", False),  # DIRECT（下载）压制弱双信号
+        ("调研三个方案对比后写入报告存到桌面", "plan", False),   # 弱×3 无压制 → 两段式
+        ("分几步把网站改版并部署", "plan", False),              # 强信号单独成立
+        ("设计一个脚本保存到 /tmp/x.py", "worker", False),      # 弱×1+artifact → 单段
     ]
     for req, exp_mode, exp_po in cases:
         r = C.Caller.route_mode(req)
