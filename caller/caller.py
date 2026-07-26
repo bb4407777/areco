@@ -110,6 +110,16 @@ SWEEP_IDLE_MIN = _conf_float("STANDCODE_SWEEP_IDLE_MIN", "sweep_idle_min", 30)
 # 连续读 projects.db 失败多少次就放弃等待（见 get_messages）
 MSG_READ_FAIL_LIMIT = int(_conf_float("STANDCODE_MSG_READ_FAIL_LIMIT", None, 10))
 
+# ── 派发/轮询节奏（2026-07-26 提速）────────────────────────────────
+# BOOT_WAIT_SEC：add_stand 返回 → send_message 之间的等待。历史值 3s 是「等 TUI boot」
+# 的保险，但消息走 SQLite 落库、由 areco room-relay 2s tick 投递，注入前还有
+# onceQuiet（输出安静 1.2s）挡竞态——Stand 没 ready 消息也不会丢，3s 纯属重复保险。
+# MERGE_WAIT_SEC：poll 收到首条 Stand 回复后的合并窗（等可能的连发增量）。
+# POLL_INTERVAL_SEC：轮询间隔；读的是本地 SQLite，0.5s 的成本可忽略。
+BOOT_WAIT_SEC = _conf_float("STANDCODE_BOOT_WAIT", "boot_wait_sec", 1.0)
+MERGE_WAIT_SEC = _conf_float("STANDCODE_MERGE_WAIT", "merge_wait_sec", 1.5)
+POLL_INTERVAL_SEC = _conf_float("STANDCODE_POLL_INTERVAL", "poll_interval_sec", 0.5)
+
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
 # STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
@@ -1395,8 +1405,8 @@ class Caller:
             stand_name = member["name"]
             stand_session_id = member.get("sessionId", "")
 
-            # 4. 等待片刻让 session 启动（TUI boot）
-            time.sleep(3)
+            # 4. 等待片刻让 session 启动（投递链自带 2s tick + onceQuiet，见 BOOT_WAIT_SEC 注释）
+            time.sleep(BOOT_WAIT_SEC)
 
             # 5. 向房间发送任务消息（直写 SQLite）
             msg_id = self.send_message(team, stand_name, request)
@@ -1518,7 +1528,7 @@ class Caller:
         room_id: str | None = None,
         session_id: str | None = None,
         timeout: int = 600,
-        poll_interval: float = 1.0,
+        poll_interval: float = POLL_INTERVAL_SEC,
         stand_session_id: str | None = None,
         after_id: int = 0,
         *,
@@ -1609,7 +1619,7 @@ class Caller:
 
             if stand_replies:
                 # 收到首条 Stand 回复后再等一小段，合并可能的后续增量
-                time.sleep(3)
+                time.sleep(MERGE_WAIT_SEC)
                 try:
                     tail = self.get_messages(session_id, after_id=last_id)
                     for msg in tail:
@@ -1815,10 +1825,14 @@ class Caller:
         task_type: str = "general",
         room_id: str | None = None,
         template_id: str | None = None,
-        timeout: int = 300,
+        timeout: int = 0,
         max_retries: int = DEFAULT_MAX_REDISPATCH,
     ) -> dict:
         """派发并等待结果（dispatch + poll_result 一站式）。
+
+        timeout 默认 0=无限等（2026-07-26 对齐高律师口径：Stand 不设超时——
+        Opus 级任务动辄几十分钟，300s 默认造成的「催+误报超时」已被用户点名）。
+        要限时的调用方显式传 timeout>0。
 
         max_retries: Stand 失联（status='lost'）时自动重新派发到新 Stand 的次数上限。
             默认 0（关）——与改动前完全一致；重派发会外部 spawn 新房间+会话，属不可逆
@@ -1907,6 +1921,7 @@ class Caller:
         summary: str | None = None,
         file_path: str | None = None,
         dry_run: bool = False,
+        raw: bool = False,
     ) -> dict:
         """把 Stand 结果代发到微信（Caller 主动回执，不依赖 Stand 自汇报）
 
@@ -1918,12 +1933,17 @@ class Caller:
             summary:   一句话结论；None 时从正文自动提炼首行
             file_path: 产物文件路径（可选）
             dry_run:   True=只拼装不发送（测试用）
+            raw:       True=message 已是成品消息，原文直发、不再套 _format_wechat。
+                       给 process_inbox_callback 用——它的 summarize_inbox 已经产出
+                       「✅…📄…要点」模板，再包一层就是双重格式化（✅ 套 ✅）。
 
         返回:
             {"ok": bool, "dry_run": bool, "content": str,
              "stdout": str, "returncode": int, "error"?: str}
         """
-        content = self._format_wechat(message, summary=summary, file_path=file_path)
+        content = message if raw else self._format_wechat(
+            message, summary=summary, file_path=file_path
+        )
 
         if dry_run:
             logger.info("[dry-run] 微信代发内容（未发送）:\n%s", content)
@@ -2839,11 +2859,12 @@ def relay_to_wechat(
     summary: str | None = None,
     file_path: str | None = None,
     dry_run: bool = False,
+    raw: bool = False,
 ) -> dict:
     """代发微信（创建临时 Caller 实例）"""
     caller = Caller()
     return caller.relay_to_wechat(
-        message, summary=summary, file_path=file_path, dry_run=dry_run
+        message, summary=summary, file_path=file_path, dry_run=dry_run, raw=raw
     )
 
 
@@ -3266,16 +3287,9 @@ def process_inbox_callback(task_id: str) -> dict:
         # 3. 汇总
         summary = summarize_inbox(payload)
 
-        # 4. 发回微信（传文件路径以便 relay_to_wechat 格式化为 📄 文件行）
-        files = payload.get("files") or payload.get("file", [])
-        if isinstance(files, str):
-            files = [files]
-        file_path = files[0] if files else None
-        r = relay_to_wechat(
-            summary,
-            summary=payload.get("request_summary"),
-            file_path=file_path,
-        )
+        # 4. 发回微信。summarize_inbox 的产出已是「✅…📄…要点」成品，raw=True 原文直发——
+        #    此前又经 _format_wechat 包一层，微信收到 ✅ 套 ✅ 的嵌套模板（2026-07-26 修）。
+        r = relay_to_wechat(summary, raw=True)
         ok = r.get("ok", False)
         msg = summary
 
@@ -3709,6 +3723,15 @@ def _cmd_run(args) -> int:
             "request": (args.request or "")[:200],
             "error": res.get("error"),
         })
+        # --brief：stdout 截断到简报级（全文已落 inbox，凭 inbox_path 可取）。
+        # 这段 stdout 会整个进 Hermes 会话历史、随后续每次 API 调用回放——长结果
+        # 全文回放是今天工具输出占历史 85% 的主因之一。缺省行为不变（决议口径：
+        # stdout 全文），由 SKILL.md 指引 Hermes 默认带 --brief。
+        out_text = result_text
+        truncated = False
+        if getattr(args, "brief", False) and len(result_text) > 700:
+            out_text = result_text[:700] + f"\n…[截断，全文 {len(result_text)} 字见 inbox]"
+            truncated = True
         print(json.dumps(
             {
                 "mode": "wait",           # 执行方式（等待者模式），非工作模式
@@ -3724,7 +3747,8 @@ def _cmd_run(args) -> int:
                 "elapsed": res.get("elapsed"),
                 "completed_at": res.get("completed_at"),
                 "inbox_path": str(_inbox_path(task_id)),
-                "result_text": result_text,
+                "result_text": out_text,
+                "result_truncated": truncated,
                 "error": res.get("error"),
             },
             ensure_ascii=False, indent=2,
@@ -3789,6 +3813,59 @@ def _cmd_inbox(args) -> int:
             done.append(p)
         elif p.suffix == ".json":
             pending.append(p)
+
+    # ── --digest：一条命令消化全部待取（2026-07-26 token 纪律）──
+    # 此前 SKILL 的拉模式仪式是 ls → 逐个 cat → 逐个 mv .done，一次唤醒烧 3N+1 个
+    # tool call、每个都携带全量上下文回放（今天实测 inbox 类调用 34 次）。digest 把
+    # 整套仪式折成一条命令：每任务一段微信可直接转述的紧凑简报，读完即标 .done
+    # （--keep 可只读不标）。输出刻意精简——它同样进 Hermes 历史被反复回放。
+    if getattr(args, "digest", False):
+        if not pending:
+            print("收信箱空")
+            return 0
+        for p in pending:
+            try:
+                d = json.loads(p.read_text())
+            except Exception as e:
+                print(f"── {p.stem}（读取失败: {e}）")
+                continue
+            status = d.get("status", "?")
+            concl = (d.get("request_summary") or "").strip()
+            body = (d.get("result_text") or "").strip()
+            if not concl:
+                concl = next(
+                    (l.strip() for l in body.splitlines() if l.strip()), "（无结论）"
+                )
+            print(f"── {p.stem} [{status}]")
+            print(f"✅ {concl[:120]}")
+            pts = []
+            for line in body.splitlines():
+                s = line.strip()
+                if not s or s == concl or s.startswith(("```", "#", "---", "===")):
+                    continue
+                pts.append(s[:100])
+                if len(pts) >= 3:
+                    break
+            for i, s in enumerate(pts, 1):
+                print(f"{i}. {s}")
+            files = d.get("files") or []
+            if isinstance(files, str):
+                files = [files]
+            if files:
+                print(f"📄 {files[0] if len(files) == 1 else '; '.join(files[:3])}")
+            if d.get("error"):
+                print(f"⚠️ {str(d.get('error'))[:120]}")
+            print(f"   （房间 {d.get('room_id') or '-'} · 全文 {p.name}）")
+            if not getattr(args, "keep", False):
+                try:
+                    p.rename(p.with_name(p.name + DONE_SUFFIX))
+                except OSError as e:
+                    print(f"   ⚠️ 标记 .done 失败: {e}")
+        print(
+            f"共 {len(pending)} 条"
+            + ("（--keep 未标记，下次仍会出现）" if getattr(args, "keep", False) else "（已标 .done）")
+        )
+        return 0
 
     if args.gc or args.unlock:
         removed = 0
@@ -3921,6 +3998,44 @@ def _cmd_check(args) -> int:
     })
     print(json.dumps(verdict, ensure_ascii=False, indent=2))
     # 退出码恒 0：Hermes 直接读 json 的 should_dispatch 字段分流，无需按退出码判断。
+    return 0
+
+
+def _cmd_route(args) -> int:
+    """分诊快道（2026-07-26）：四格路由 + Gatekeeper 一条命令出结果。
+
+    给 Caller（Hermes）当分诊第一步：拿到 mode 决策与可直接照抄的派发命令，
+    不必每轮在长上下文里重跑决策树——判定口径稳定、快、且 mode 落审计可统计。
+    输出刻意单行紧凑（indent=None）：它会进 Hermes 会话历史，每个字节都随
+    后续每次 API 调用回放，缩进就是持续付费的空白。
+    """
+    r = Caller.route_mode(args.request)
+    gk = check_should_dispatch(args.request)
+    mode = r["mode"]
+    suggest = (
+        f"python3 {Path(__file__).resolve()} run --wait --brief --mode {mode}"
+        + (" --plan-only" if r.get("plan_only") else "")
+        + " '<任务原文>' --summary '<一句话>'"
+    )
+    if gk.get("category") == "blocked":
+        suggest = "拒绝执行（BLOCKED 红线，勿派发勿直干）"
+    out = {
+        "mode": mode,
+        "plan_only": r.get("plan_only", False),
+        "deliverable": r.get("deliverable"),
+        "structure": r.get("structure"),
+        "gatekeeper": gk.get("category"),
+        "reason": r.get("reason"),
+        "suggest": suggest,
+    }
+    log_audit("route", {
+        "mode": mode,
+        "blocked": gk.get("category") == "blocked",
+        "category": gk.get("category"),
+        "plan_only": r.get("plan_only", False),
+        "request_preview": (args.request or "")[:200],
+    })
+    print(json.dumps(out, ensure_ascii=False))
     return 0
 
 
@@ -4215,7 +4330,20 @@ def _build_parser():
              "默认关——静默套用过期计划会产出「看起来做完了但做错了」的结果；"
              "命中时一律回报套用了哪一条（reused_plan）",
     )
+    pr.add_argument(
+        "--brief", action="store_true",
+        help="[--wait] stdout 的 result_text 截到 700 字（全文仍在 inbox）。"
+             "stdout 会进 Caller 会话历史被反复回放，长结果全文回放极烧 token——"
+             "Hermes 派发一律带上（SKILL.md token 纪律）",
+    )
     pr.set_defaults(func=_cmd_run)
+
+    prt = sub.add_parser(
+        "route",
+        help="分诊快道：四格路由 + Gatekeeper 一次出结果（单行 JSON，含建议派发命令）",
+    )
+    prt.add_argument("request", help="用户任务原文")
+    prt.set_defaults(func=_cmd_route)
 
     ps = sub.add_parser("status", help="查看后台任务状态/结果")
     ps.add_argument("task_id", help="任务 id")
@@ -4232,7 +4360,16 @@ def _build_parser():
     pl = sub.add_parser("list", help="列出所有后台任务")
     pl.set_defaults(func=_cmd_list)
 
-    pi = sub.add_parser("inbox", help="收信箱：列出待取 / --gc 清理已汇报 / --unlock 解死锁")
+    pi = sub.add_parser(
+        "inbox",
+        help="收信箱：--digest 一键消化全部待取（推荐）/ 列出待取 / --gc 清理 / --unlock 解死锁",
+    )
+    pi.add_argument(
+        "--digest", action="store_true",
+        help="消化模式：每条待取输出微信可直接转述的紧凑简报并标 .done——"
+             "替代 ls→cat→mv 三连（一次唤醒 1 个 tool call 搞定全部积压）",
+    )
+    pi.add_argument("--keep", action="store_true", help="配合 --digest：只读简报，不标 .done")
     pi.add_argument("--json", action="store_true", help="结构化输出")
     pi.add_argument("--gc", action="store_true", help=f"清理 {DONE_SUFFIX}（默认干跑）")
     pi.add_argument("--older-than", type=float, default=7, help="配合 --gc：保留最近 N 天（默认 7）")
