@@ -1426,7 +1426,9 @@ class Caller:
                 return None
             self._assert_template_exists(template_id)
             STANDBY_DIR.mkdir(parents=True, exist_ok=True)
-            room = self.create_room(f"{ROOM_MARK}待命·{template_id}")
+            # 名字带 4 位随机尾缀：areco 房名全局唯一（含已归档，rooms.ts）——上一个
+            # 待命房归档后名字仍占着，裸「⚙待命·claude」第二次建必 400（2026-07-26 实测）。
+            room = self.create_room(f"{ROOM_MARK}待命·{template_id}·{uuid.uuid4().hex[:4]}")
             member = self.add_stand(room["id"], template_id)
             info = {
                 "room_id": room["id"],
@@ -4521,6 +4523,7 @@ def _cmd_run(args) -> int:
             "updated_at": _now_iso(),
             "pid": None,
             "log_path": str(log_path),
+            "channel": _current_channel(),
         }
         _write_state(task_id, state)
         logf = open(log_path, "a")
@@ -4569,6 +4572,7 @@ def _cmd_run(args) -> int:
             "status": "running",
             "created_at": _now_iso(),
             "pid": os.getpid(),
+            "channel": _current_channel(),  # 双通道:reconcile 补收时凭它回对通道
         }
         _write_state(task_id, state)
         caller = Caller()
@@ -5025,6 +5029,7 @@ def _cmd_ask(args) -> int:
         "task_id": task_id, "mode": "wait", "work_mode": "ask",
         "ask_route": route, "spec": spec, "status": "running",
         "created_at": _now_iso(), "pid": os.getpid(),
+        "channel": _current_channel(),
     }
     _write_state(task_id, state)
 
@@ -5140,6 +5145,7 @@ def _cmd_ask(args) -> int:
         "request": request[:200],
         "verification": verification,
         "cost": cost,
+        "channel": _current_channel(),
         "error": res.get("error"),
     })
     inbox_final = _inbox_path(task_id)
@@ -5249,6 +5255,7 @@ def _rec_finalize(task_id: str, st: dict, replies: list[dict], *, dry_run: bool)
         "files": [],
         "request_summary": (spec.get("summary") or "") + "（迟到补收）",
         "request": (spec.get("request") or "")[:200],
+        "channel": st.get("channel") or "main",
         "error": None,
     })
     st.update({
@@ -5284,6 +5291,7 @@ def _rec_notice(task_id: str, st: dict, room_id, status: str, error: str) -> Non
         "files": [],
         "request_summary": (spec.get("summary") or "") + tag,
         "request": (spec.get("request") or "")[:200],
+        "channel": st.get("channel") or "main",
         "error": error,
     })
 
