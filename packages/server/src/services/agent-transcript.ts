@@ -986,6 +986,23 @@ function loadMessages(sessionId: string, filePath: string, kind: AgentKind): Tra
   return messages
 }
 
+/**
+ * 流量状态只取文件尾部这么多字节。
+ *
+ * 为什么要限：本函数被 session-manager 的 traffic monitor 每 750ms 调一次，而它此前
+ * 读的是**整个** transcript：
+ *   · 非 codex 走 loadMessages，缓存键是 path:mtimeMs:size —— 一个正在干活的 agent
+ *     每次写入都改 mtime 和 size，于是缓存**永远命中不了**，每 750ms 全量读+全量解析；
+ *   · codex 分支连缓存都没有，无条件 readFileSync 整个文件。
+ * 两个几十 MB rollout 的会话同时干活，就是每秒上百 MB 的同步读 + 全量 JSONL 解析
+ * 压在 event loop 上，挤掉 PTY 分发、WS 心跳和 2 秒一次的 relay tick。
+ *
+ * 而流量状态只由**最后一条** assistant 消息决定，尾部窗口足够。512KB 能装下很多条记录，
+ * 极端情况（单条超大记录）最坏是这一 tick 判不出来、下一 tick 文件再长一点就判出来了，
+ * 不会误判成别的状态（trafficStateFromMessages 找不到消息时返回 working，与原先空文件同解）。
+ */
+const TRAFFIC_TAIL_BYTES = Number(process.env.ARECO_TRAFFIC_TAIL_BYTES || 512 * 1024)
+
 export function readAgentTrafficState(
   session: Session,
   kind: AgentKind,
@@ -993,8 +1010,10 @@ export function readAgentTrafficState(
 ): Exclude<TrafficState, 'exited'> {
   const filePath = knownFilePath ?? locate(session, kind)
   if (!filePath) return 'working'
-  if (kind === 'codex') return trafficStateFromCodex(fs.readFileSync(filePath, 'utf8'))
-  return trafficStateFromMessages(loadMessages(session.id, filePath, kind))
+  if (kind === 'codex') return trafficStateFromCodex(readTailText(filePath, TRAFFIC_TAIL_BYTES))
+  // 走 readAgentFileAllMessages 的尾部窗口（同一套「对齐行首、丢残首行」口径），
+  // 不再走 loadMessages —— 那条路的缓存对干活中的 agent 恒失效，等于每次全量读。
+  return trafficStateFromMessages(readAgentFileAllMessages(filePath, kind, TRAFFIC_TAIL_BYTES))
 }
 
 export function dropAgentTranscriptCache(sessionId: string) {
@@ -1047,13 +1066,10 @@ export function readAgentTranscript(
  * 交接用全量读取：取文件尾部 maxBytes 内的完整行消息（截断对齐到行首，残首行丢弃），
  * 与 history.ts readHistoryAllMessages 同口径；不走 parseCache（交接是一次性动作）。
  */
-export function readAgentFileAllMessages(
-  filePath: string,
-  kind: AgentKind,
-  maxBytes = 4 * 1024 * 1024
-): TranscriptMessage[] {
+/** 读文件尾部 maxBytes 内的完整文本：对齐到行首，残缺的首行丢弃。 */
+function readTailText(filePath: string, maxBytes: number): string {
   const st = statSafe(filePath)
-  if (!st) return []
+  if (!st) return ''
   const from = Math.max(0, st.size - maxBytes)
   const fd = fs.openSync(filePath, 'r')
   let buf: Buffer
@@ -1063,12 +1079,18 @@ export function readAgentFileAllMessages(
   } finally {
     fs.closeSync(fd)
   }
-  let text = buf.toString('utf8')
-  if (from > 0) {
-    const nl = text.indexOf('\n')
-    text = nl >= 0 ? text.slice(nl + 1) : ''
-  }
-  return parseAgentRaw(text, kind)
+  const text = buf.toString('utf8')
+  if (from === 0) return text
+  const nl = text.indexOf('\n')
+  return nl >= 0 ? text.slice(nl + 1) : ''
+}
+
+export function readAgentFileAllMessages(
+  filePath: string,
+  kind: AgentKind,
+  maxBytes = 4 * 1024 * 1024
+): TranscriptMessage[] {
+  return parseAgentRaw(readTailText(filePath, maxBytes), kind)
 }
 
 /** sessionHandoff 用：分页接口只回最后一页（PAGE_MESSAGES 条），交接要全量，否则丢前文 */
