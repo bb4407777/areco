@@ -66,14 +66,28 @@ CREATE TABLE IF NOT EXISTS delivery (
   UNIQUE(dispatch_id, member_name)
 );`
 
-// 每请求短连接：流量个位数/分钟，不与 CLI 侧长期抢 WAL
+// 建表与迁移每进程只做一次。
+// 原先每个 open() 都跑：mkdir + 5 条 CREATE TABLE IF NOT EXISTS + 1 索引 + 2 次
+// PRAGMA table_info 迁移探测。而 RoomRelay.tick 每 2 秒对每个房间调 history()（当前 39 个
+// 房间，其中 23 个已归档），sweepTimeouts 再来一轮 —— 折算约 40 次/秒的全量 DDL，
+// 打在一个 CLI 侧（areco-msg.mjs）也在并发写的库上。功能上能跑，但纯属浪费，
+// 且是房间数增长后 WAL 争用的第一个源头。
+//
+// 短连接本身保留（不与 CLI 抢长连接），只把「每次都建表」降为「首次建表」。
+let schemaReady = false
+
 function open(): DatabaseSync {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
+  if (!schemaReady) fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
   const db = new DatabaseSync(DB_PATH)
-  db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;')
-  db.exec(SCHEMA)
-  migrateMessages(db)
-  migrateDispatch(db)
+  // busy_timeout 先设：journal_mode=WAL 本身就可能要拿锁，
+  // 原顺序（WAL 在前）让唯一真正需要等锁的那条语句反而没有超时保护。
+  db.exec('PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL;')
+  if (!schemaReady) {
+    db.exec(SCHEMA)
+    migrateMessages(db)
+    migrateDispatch(db)
+    schemaReady = true
+  }
   return db
 }
 
