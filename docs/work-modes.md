@@ -1,6 +1,6 @@
 # StandCode 工作模式规范
 
-> 定稿：2026-07-26 | 作者：Opus5（Claude Fable 5）
+> 定稿：2026-07-26 | 落地：2026-07-26 | 作者：Opus5（Claude Fable 5）
 > 依据：`caller/caller.py`（3182 行）、`stand/registry.json`、`config/presets.json`、
 > `~/skills/StandCode/SKILL.md`、`docs/workflow-hardening.md`
 > 结论一句话：**当前不是 3 种模式，是 1 条运维车道 + 2 条派发车道，另有 2 条已写进代码但没进taxonomy的车道（thinker-only、fan-out）。第 4 种模式该加，而且它 90% 已经建好了——缺的是命名、门控和一个 CLI flag。**
@@ -291,17 +291,64 @@ python3 caller/caller.py run --wait --role thinker "分析 X 的三种路线并�
 
 ---
 
-## 附：本文认定的实现问题清单
+## 附一：落地状态（2026-07-26）
 
-供后续 Worker 派发时直接引用，均已核到行号。
+本文的建议已基本落地，8 个 commit（`66154a4`…`255bfb0`），测试从 0 断言到 56 断言
+（`caller/test_modes.py`，零依赖、不碰 areco、不烧额度）。
 
-| # | 位置 | 问题 | 建议 |
-|---|---|---|---|
-| 1 | `caller.py:1745,1766` | `plan_failed` 全损：标题不合模板 → Worker 不启动、用户零产出 | P0-2 三级降级 |
-| 2 | `caller.py:1699-1811` | 两段式两个 room，计划靠 prompt 搬运，Worker 冷启动且无法追问 | P0-3 合并 room（`finish_room` 按 `room_created` 判定，天然幂等，不需加锁） |
-| 3 | `caller.py:1828` | `should_plan` 纯关键词，PLAN/DIRECT 词表交叉，无法表达任务结构 | P1-1 四格路由 |
-| 4 | `caller.py:2033` | `dispatch_parallel` 无 CLI 入口，事实不可用 | P1-2 补子命令 |
-| 5 | `caller.py:1151` | `plan_only` 从 CLI 够不着 | 4.5-1 加 `--plan-only` |
-| 6 | `caller.py:331` | Gatekeeper `production` 类只记审计不拦（BLOCKED 才硬拒） | P2-1 areco 侧拦（⚠️禁会话内重启 8790） |
-| 7 | `scripts/`（空） | SKILL.md 已宣布「直干率 >30% 告警」，执行体不存在 | P2-2 补脚本 + 走 8020 API 建 cron |
-| 8 | `caller.py:_BLOCKED_PATTERNS` | 匹配任务描述全文，讨论型请求（「解释为什么禁止 rm -rf /」）会被误拒 | 加「命令位」判定，或对 blocked 保留人工放行口 |
+| 项 | 状态 | 落点 |
+|---|---|---|
+| P0-1 模式一等字段 | ✅ | `resolve_mode` / `--mode` / `--plan-only` / `--sub` / `log_audit.mode` |
+| P0-2 plan_failed 三级降级 | ✅ | `plan_and_execute` + `PLAN_RETRY_TEMPLATE` |
+| P0-3 两段式共享房间 | ✅ | `_execute_with_plan(room_id=plan_dispatch[...])` |
+| P1-1 四格路由 | ✅ | `Caller.route_mode` |
+| P1-2 fanout CLI | ✅ | `--mode fanout --sub`（⚠️ 无文件隔离，见下） |
+| P1-3 计划复用 | ✅ | `save_plan` / `find_similar_plan` / `--reuse-plan` / `caller.py plans` |
+| P2-1 Gatekeeper 硬闸 | ⛔ 卡住 | 需改 areco `room-relay`——禁会话内重启 8790，且 areco 工作树有并行会话的未提交功能 |
+| P2-2 直干率审计 | ✅ 有保留 | `scripts/audit-direct-work.py`——算的是**跟进率**不是真直干率，口径见脚本抬头 |
+| 模式 4 五件套 | ✅ | `--plan-only` / `--mode think` / `route_mode` / SKILL.md / `presets.thinker_only` |
+
+**落地过程中推翻的两个判断**（原文有错，此处更正）：
+
+1. **P0-3 按原方案会把系统搞坏。** `poll_result` 按排除法认 Stand 且 `after_id` 默认 0，
+   共享房间会让 Worker 的 poll **秒回 Thinker 的计划**当执行结果。已先修 `poll_result`
+   （加 `stand_name` + 全部调用点传 `message_id`）才做 P0-3。顺带修掉一个**当时就存在**的
+   线上 bug：`run --room-id` 复用房间会秒回旧答案。
+2. **正文第 2 节「Thinker=thinking:high / Worker=thinking:minimal」是错的。**
+   `config/presets.json`（连同 `harnesses.json` / `models.json`）**当前完全没生效**——
+   areco 侧 `standcode-resolver` 开头就 `if (!template.harness) return null`，而 areco
+   `config.json` 里没有任何模板设了 `harness`/`model`/`preset`。这些 thinking 档位与
+   timeout 从未传给任何模型；唯一在起作用的角色约束是 `PLAN_TEMPLATE` 与 `exec_request`
+   的提示词。新加的 `thinker_only` preset 同理，目前也是死的。**待定：补活还是删掉。**
+
+## 附二：实现问题清单
+
+| # | 问题 | 状态 |
+|---|---|---|
+| 1 | `plan_failed` 全损：标题不合模板 → Worker 不启动、用户零产出 | ✅ 三级降级 |
+| 2 | 两段式两个 room，计划靠 prompt 搬运，Worker 冷启动且无法追问 | ✅ 共享房间 |
+| 3 | `should_plan` 纯关键词，PLAN/DIRECT 词表交叉 | ✅ `route_mode` 四格 |
+| 4 | `dispatch_parallel` 无 CLI 入口，事实不可用 | ✅ `--mode fanout` |
+| 5 | `plan_only` 从 CLI 够不着 | ✅ `--plan-only` |
+| 6 | Gatekeeper `production` 类只记审计不拦 | ⛔ 需 areco 侧改造 |
+| 7 | SKILL.md 已宣布「直干率 >30% 告警」，执行体不存在 | ✅ 脚本已补（口径见附一） |
+| 8 | `_BLOCKED_PATTERNS` 匹配全文，讨论型请求会被误拒 | ⬜ 未做（低频） |
+
+### 附三：只读审计（2026-07-26）另发现并已修的 StandCode 缺陷
+
+| 缺陷 | 后果 | 状态 |
+|---|---|---|
+| `poll_result` 排除法认人 + `after_id=0` | 复用房秒回旧答案（已复现） | ✅ |
+| 模板 id 不存在时先建房再炸 | 孤儿房，且未进台账 → `--sweep` 扫不到 | ✅ 建房前校验 + 失败回滚 |
+| 往已归档房间派任务 | areco 永不投递 + `--wait` 无限等 = 静默挂死 | ✅ 当场拒绝 |
+| `ARECO_ROOT`/`TASKS_DIR` 走 `Path.home()` 而 `HOME_DIR` 走 local.json | 隔离 HOME 下建真房起真 Stand（烧额度）后炸 | ✅ 统一 `HOME_DIR` |
+| `process_inbox_callback` 无条件删 inbox | cc-send 失败 → 结果唯一副本消失 | ✅ 发成功才删 |
+| `get_messages` 吞 `OperationalError` | 库锁/schema 漂移 → 永久挂死 | ✅ 连续失败即抛 |
+| `send_callback_trigger` 不查空 `WECHAT_TARGET` | cc-send 回落活跃会话指针 → **发错人** | ✅ 补闸 |
+| `prepare_workspace` 不看 git returncode | 谎报「已建好隔离工作树」 | ✅ 检查 + 如实报 failed |
+| `.processing` 锁 TOCTOU 且永不过期 | 进程被杀 → 该 task 永远 `locked`，无 CLI 可清 | ✅ `O_EXCL` + 过期抢占 + `inbox --unlock` |
+| `auto_dispatch` 直派分支从不 `finish_room` | 每次调用泄一个房间 | ✅ |
+| import 期裸 `float()` | 配置手误 → 整个 CLI 死在 import | ✅ `_conf_float` |
+| `--adopt` 立即写且不可逆 | 误认领后该房永远被当自家的 | ✅ 干跑默认 |
+| `.done` 无 GC | `data/inbox/` 只增不减（实测积压 17 个） | ✅ `inbox --gc` |
+| `AUDIT_LOG_PATH` 在 `/tmp` | macOS 清 /tmp = 审计证据蒸发 | ✅ 挪 `~/.standcode/` |
