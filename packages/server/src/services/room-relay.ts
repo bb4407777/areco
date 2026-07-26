@@ -385,8 +385,14 @@ export class RoomRelay {
     // parallel：现状 for-loop 全员即注；deliveries 同步记 injected/failed
     const flat = body.replace(/\s*\r?\n\s*/g, '；')
     for (const m of members) {
-      const nonce = this.injectToMember(room, m, from, flat, senderKind, currentId)
+      // 幂等判断必须在注入**之前**。原先顺序是「先 injectToMember，再看 del 是否 queued」，
+      // 于是已经 injected 的投递会被重新注入一次——底账干净（不会重复记账），
+      // 但**成员终端会再收到一遍同样的任务，两个 agent 干同一件事**。
+      // 触发路径：areco 在人类发消息后 3 秒内重启，首轮快进把该消息重放进 onMessageStored。
+      // 串行分支（上方）本来就是先查 busy 再注入，这里对齐它。
       const del = deliveries.find((d) => d.memberName === m.name)
+      if (dispatch && del && del.status !== 'queued') continue
+      const nonce = this.injectToMember(room, m, from, flat, senderKind, currentId)
       if (del && del.status === 'queued') {
         this.tryUpdateDelivery(
           del.id,

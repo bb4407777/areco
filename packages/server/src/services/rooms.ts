@@ -19,7 +19,15 @@ export const ALL_MENTION = 'all'
 
 function atomicWrite(filePath: string, content: string) {
   const tmp = filePath + '.tmp'
-  fs.writeFileSync(tmp, content, 'utf8')
+  // rename 前 fsync：原先只 write+rename，掉电可能留下一个**已改名但内容截断**的
+  // rooms.json —— 正好是下面 load() 解析失败那条路的触发条件。
+  const fd = fs.openSync(tmp, 'w')
+  try {
+    fs.writeFileSync(fd, content, 'utf8')
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
   fs.renameSync(tmp, filePath)
 }
 
@@ -54,6 +62,8 @@ export function parseMentions(body: string, members: RoomMember[]): { targets: s
 export class RoomStore {
   private rooms: RoomInfo[]
   readonly humanName: string
+  /** load 失败过 → 拒绝写盘（否则会把空名单盖到好数据上，见 load/save 注释） */
+  private loadFailed = false
 
   constructor(humanName: string = DEFAULT_HUMAN_NAME) {
     this.humanName = humanName
@@ -64,7 +74,10 @@ export class RoomStore {
     try {
       if (!fs.existsSync(ROOMS_PATH)) return []
       const parsed = JSON.parse(fs.readFileSync(ROOMS_PATH, 'utf8'))
-      if (!Array.isArray(parsed)) return []
+      if (!Array.isArray(parsed)) {
+        this.quarantine(new Error('rooms.json 顶层不是数组'))
+        return []
+      }
       // 旧 rooms.json 没有 archivedAt：读取时补 null，下一次保存自然完成迁移。
       // 旧 rooms.json 同样没有 dispatchMode：补 'serial'（当前默认），迁移方式同 archivedAt。
       // rootPath（项目 Files 根）缺省补 null，同上。
@@ -76,12 +89,37 @@ export class RoomStore {
         rootPath: typeof room.rootPath === 'string' && room.rootPath ? room.rootPath : null,
       }))
     } catch (err) {
-      log.error('rooms.json 读取失败，按空处理', err)
+      this.quarantine(err)
       return []
     }
   }
 
+  /**
+   * 读坏了：留证 + 上闸。
+   *
+   * 原先只 log.error 然后返回 []，而 save() 会把这个 [] 原样写回去 —— 一次 JSON 解析
+   * 失败就把 39 个项目、73 个成员绑定**永久抹掉**，且看起来只是「项目列表空了」。
+   * 现在把坏文件改名留证，并置 loadFailed 让 save() 拒写，等人来处理。
+   */
+  private quarantine(err: unknown) {
+    log.error('rooms.json 读取失败 —— 已拒绝后续写入，避免空名单覆盖好数据', err)
+    this.loadFailed = true
+    try {
+      const bak = `${ROOMS_PATH}.corrupt-${Date.now()}`
+      fs.renameSync(ROOMS_PATH, bak)
+      log.error(`坏文件已留证：${bak}（修好后改回 rooms.json 并重启）`)
+      // 留证成功 = 原文件已不在，之后写的是全新文件，不会覆盖任何东西 → 解除闸
+      this.loadFailed = false
+    } catch (e) {
+      log.error('坏文件留证失败，写入闸保持关闭', e)
+    }
+  }
+
   private save() {
+    if (this.loadFailed) {
+      log.error('rooms.json 曾读取失败且未能留证，拒绝写入（防止空名单覆盖好数据）')
+      return
+    }
     try {
       fs.mkdirSync(path.dirname(ROOMS_PATH), { recursive: true })
       atomicWrite(ROOMS_PATH, JSON.stringify(this.rooms, null, 2) + '\n')

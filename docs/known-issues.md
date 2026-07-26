@@ -111,7 +111,7 @@ OOM / `/api/server/restart`），重启后会话被恢复成 `exitReason:'server
 
 ---
 
-## 4. 并行派发先注入后查幂等
+## ~~4. 并行派发先注入后查幂等~~ ✅ 已修（536cf78）
 
 **位置**：`room-relay.ts` · `deliverMentions` 并行分支
 
@@ -127,12 +127,11 @@ for (const m of members) {
 重启，首轮快进把「新消息」重放进 `onMessageStored`。底账不会脏（`createDispatch` 幂等、
 既有投递已是 `injected`），但**每个成员的终端会再收到一遍同样的任务**，两个 agent 干同一件事。
 
-**修法**：把 `del.status === 'queued'` 判断提到 `injectToMember` 之前，与串行分支对齐。
-改动很小，但同属投递路径，建议与问题 1 同批修同批验。
+**已修**（536cf78）：`del.status === 'queued'` 判断提到 `injectToMember` 之前，与串行分支对齐。
 
 ---
 
-## 5. RoomStore 吞写失败、且解析失败会清空 rooms.json
+## 5. RoomStore 吞写失败、且解析失败会清空 rooms.json（**读侧已修**，写侧未改）
 
 **位置**：`services/rooms.ts` · `save()` / `load()` / `atomicWrite`
 
@@ -146,8 +145,16 @@ for (const m of members) {
 `load()` 解析失败时把坏文件改名 `rooms.json.corrupt-<ts>` 并**拒绝**覆盖；rename 前
 对 tmp fd `fsyncSync`。`persistence.ts:15-19/50-62` 已有正确写法可抄。
 
-**为什么没修**：`load()` 那半边改起来安全，但 `save()` 从「吞」改成「抛」会改变所有房间
-写操作的失败语义（原先静默成功、之后会 400），需要过一遍前端的错误处理，本轮没余量。
+**已修的部分**（536cf78）：`load()` 解析失败改为把坏文件改名 `.corrupt-<ts>` 留证；
+留证失败则上闸让 `save()` **拒写**（不拿空名单盖好数据）；`atomicWrite` 在 rename 前对
+tmp fd `fsyncSync`。配套 `rooms-corrupt.test.ts` 6 条，含「目录设只读让留证失败 → 确认
+save 拒写 → 原坏文件内容完好」。
+
+**仍未改**：`save()` 依然吞异常（catch 后只 log.error），所以磁盘满 / 权限问题时
+`create`/`addMember` 仍会返回 200 而实际没落盘。把它改成抛会改变所有房间写操作的失败
+语义（原先静默成功、之后会 400），需要过一遍前端错误处理，本轮没余量。
+注意这条与上面已修的部分是**不同**的失败模式：已修的是「读坏了别把好数据盖掉」，
+未修的是「写失败了别骗调用方说成功了」。
 
 ---
 
