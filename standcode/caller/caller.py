@@ -199,6 +199,33 @@ CALLER_NAME = "Hermes"
 HUMAN_NAME = os.environ.get("STANDCODE_HUMAN_NAME") or _LOCAL_CONF.get("human_name") or "user"
 NON_STAND_SENDERS = {CALLER_NAME, HUMAN_NAME, "all", "system"}
 
+# ── ask 通道：点名常驻 agent，先看灯再投（2026-07-26 高律师需求）────
+# 背景：「问/让 Fable5」类任务此前全走 areco-msg @成员 投常驻房间里唯一的 Fable5
+# 会话，Fable5 正忙时新任务只能在同一会话里排队串行——看板上呈现为「总是派到同一个
+# fable5」。ask 子命令把「观察运行状态 → 空闲直投 / 忙则另开并行」折进一条命令：
+#   空闲  → 直投常驻会话（沿用其累积上下文，不铺新会话）；
+#   忙/卡框/不可用/直投席位被同轮并发 ask 抢走 → dispatch 新房并行跑（同模板）。
+# 通道定义走 env > config/local.json ask_channel > 默认；room_id 漂移时按成员名
+# 在未归档房间里唯一定位兜底。
+_ASK_CONF = _LOCAL_CONF.get("ask_channel") or {}
+ASK_MEMBER = os.environ.get("STANDCODE_ASK_MEMBER") or _ASK_CONF.get("member") or "Fable5"
+ASK_ROOM_ID = os.environ.get("STANDCODE_ASK_ROOM") or _ASK_CONF.get("room_id") or ""
+ASK_TEMPLATE_FALLBACK = (
+    os.environ.get("STANDCODE_ASK_TEMPLATE") or _ASK_CONF.get("template") or "c5"
+)
+# 忙判定：working=正在干活；needs-user=卡在终端交互框（投进去也没人处理）。
+# conclusion/idle=空闲；exited 视为可直投——room-relay 投递时自动 restart resume。
+ASK_BUSY_STATES = ("working", "needs-user")
+# 直投席位 claim：两个 ask 同轮并发时都可能探到「空闲」，凭 O_EXCL 文件抢占定唯一
+# 直投者，输家转并行——不然「忙则另开」在同轮多任务场景下照旧全挤进一个会话。
+ASK_CLAIMS_DIR = Path(
+    os.environ.get("STANDCODE_ASK_CLAIMS_DIR")
+    or str(Path(HOME_DIR) / ".standcode" / "ask-claims")
+)
+# exited 通道直投后等 resume 拉起的上限秒数：poll_result 的 lost 判定读 status==exited，
+# 不等到 running 就开轮询会在 restart 窗口内误判失联。
+ASK_RESUME_WAIT_SEC = _conf_float("STANDCODE_ASK_RESUME_WAIT", "ask_resume_wait_sec", 60)
+
 # ── Thinker/Worker 严格分工：结构化 plan 模板 + 门控 ──────────────
 # plan 模板：强制 Thinker 按「目标/上下文/步骤/约束/判据/落点」结构化输出，
 # Worker（registry.default_worker）拿到即可执行、不必再「理解意图」。三属性：结构化/自包含/有判据。
@@ -2061,6 +2088,153 @@ class Caller:
         except Exception as e:
             logger.debug("collect_stand_cost 失败（best-effort，忽略）: %s", e)
             return None
+
+    # ── ask 通道（点名 agent：空闲直投 / 忙则并行）────────────────
+
+    def resolve_ask_channel(self, room_id: str | None = None,
+                            member: str | None = None) -> dict:
+        """定位常驻通道：房间 + 成员 + 背后的 areco 会话。
+
+        解析顺序：显式参数 > 配置（env/local.json ask_channel）> 按成员名全房搜索。
+        任何一步失败都不抛死——ask 的兜底永远是 fork（新房并行），通道只是
+        「上下文连续 + 免冷启动」的优化，不可用不该挡交付。
+
+        返回（ok=False 时只保证 member/template_id/reason 三键可用）：
+            {"ok": bool, "reason": str,
+             "room_id", "team", "room_name", "member",
+             "session_id", "session": dict|None,   # areco 会话对象（trafficState 等）
+             "template_id": str}                    # fork 用模板：会话 templateId 优先
+        """
+        want = (member or ASK_MEMBER).strip()
+        rid = (room_id or ASK_ROOM_ID).strip()
+        base = {"ok": False, "member": want, "template_id": ASK_TEMPLATE_FALLBACK}
+        try:
+            rooms = self.list_rooms()  # 已滤归档：归档房 room-relay 整体跳过，投了也不达
+        except Exception as e:
+            return {**base, "reason": f"读房间列表失败: {e}"}
+        room = next((r for r in rooms if r.get("id") == rid), None) if rid else None
+        if room is None:
+            # 配置漂移兜底：按成员名搜，唯一命中才认——命中多个宁可报不可用（fork），
+            # 也不猜着往某个房里投
+            hits = [
+                r for r in rooms
+                if any(m.get("kind") == "session" and m.get("name") == want
+                       for m in r.get("members", []))
+            ]
+            if len(hits) == 1:
+                room = hits[0]
+            elif hits:
+                return {**base, "reason":
+                        f"成员 {want} 出现在 {len(hits)} 个房间，无法唯一定位——"
+                        f"在 config/local.json ask_channel.room_id 指定一个"}
+        if room is None:
+            return {**base, "reason":
+                    f"找不到含会话成员 {want} 的未归档房间（配置 room_id={rid or '未设'}）"}
+        mem = next((m for m in room.get("members", [])
+                    if m.get("kind") == "session" and m.get("name") == want), None)
+        if mem is None or not mem.get("sessionId"):
+            return {**base, "room_id": room.get("id"), "reason":
+                    f"房间 {room.get('id')} 里没有名为 {want} 的会话成员"}
+        sess = self._session_info(mem["sessionId"])
+        return {
+            "ok": True, "reason": "",
+            "room_id": room.get("id"), "team": room.get("team"),
+            "room_name": room.get("name", ""), "member": want,
+            "session_id": mem["sessionId"], "session": sess,
+            "template_id": (sess or {}).get("templateId") or ASK_TEMPLATE_FALLBACK,
+        }
+
+    @staticmethod
+    def ask_channel_probe(channel: dict) -> tuple[str, str]:
+        """通道现况 → ('direct'|'fork', 缘由)。看 areco 红绿灯实测，不猜。"""
+        if not channel.get("ok"):
+            return "fork", channel.get("reason") or "通道不可用"
+        sess = channel.get("session")
+        if not sess:
+            # 会话对象查无（被删/API 抖动）：直投可能落空，宁可 fork 保交付
+            return "fork", "通道会话查无（可能已删除），另开并行任务保交付"
+        status = sess.get("status") or ""
+        traffic = sess.get("trafficState") or ""
+        if status == "error":
+            return "fork", "通道会话 status=error，另开并行任务保交付"
+        if traffic in ASK_BUSY_STATES:
+            return "fork", f"通道会话正忙（trafficState={traffic}），另开并行任务"
+        return "direct", f"通道空闲（status={status or '?'} traffic={traffic or '?'}）"
+
+    def dispatch_to_channel(self, request: str, channel: dict,
+                            request_summary: str | None = None) -> dict:
+        """向常驻通道成员直投任务（不建房、不 spawn），返回与 dispatch() 同形结果。
+
+        与 dispatch() 的关系：这是「第 0 种复用」——连房带 Stand 全是现成的，只发
+        消息 + 审计 + 面包屑。room_created 恒 False，且**不写 rooms 台账**：台账即
+        「StandCode 地盘」声明，常驻问答房是高律师的房间，进了台账会被 rooms --sweep
+        / sweep-task-rooms 当自家任务房清扫。
+        """
+        verdict = check_should_dispatch(request or "")
+        if verdict.get("category") == "blocked":
+            blocked_task_id = f"task-{uuid.uuid4().hex[:12]}"
+            log_audit("dispatch_blocked", {
+                "task_id": blocked_task_id, "mode": "worker", "role": "worker",
+                "template": channel.get("template_id", ""), "blocked": True,
+                "category": "blocked", "reason": verdict.get("reason", ""),
+                "via": "ask", "request_preview": (request or "")[:200],
+            })
+            raise GatekeeperBlockedError(
+                f"Gatekeeper 拒绝派发（BLOCKED）：{verdict.get('reason', '')}"
+            )
+        task_id = f"task-{uuid.uuid4().hex[:12]}"
+        msg_id = self.send_message(channel["team"], channel["member"], request)
+        result = {
+            "task_id": task_id,
+            "session_id": channel["team"],
+            "room_id": channel["room_id"],
+            "room_name": channel.get("room_name", ""),
+            "room_created": False,
+            "stand_name": channel["member"],
+            "stand_session_id": channel.get("session_id", ""),
+            "message_id": msg_id,
+            "task_type": "general",
+            "template_id": channel.get("template_id", ""),
+            "role": "worker",
+            "mode": "worker",
+            "ask_direct": True,
+            "workspace": None,
+            "workspace_cwd": False,
+        }
+        log_audit("ask_direct", {
+            "task_id": task_id, "mode": "worker", "role": "worker",
+            "template": result["template_id"], "blocked": False,
+            "room_id": channel["room_id"], "stand_name": channel["member"],
+            "request_preview": (request or "")[:200],
+        })
+        logger.info(
+            "ask 直投: room=%s member=%s session=%s msg=%s",
+            channel["room_id"], channel["member"],
+            (channel.get("session_id") or "")[:8], msg_id,
+        )
+        hook = getattr(self, "_on_dispatch", None)
+        if hook:
+            try:
+                hook(result)  # 面包屑：等待者死亡后 reconcile 凭它去常驻房补收
+            except Exception as e:
+                logger.warning("ask 面包屑回调失败（不影响投递）: %s", e)
+        return result
+
+    def wait_channel_resumed(self, session_id: str,
+                             max_wait: float = ASK_RESUME_WAIT_SEC) -> bool:
+        """exited 通道直投后，等 room-relay 自动 restart resume 把会话拉回 running。
+
+        poll_result 的 lost 判定读 status==exited——不等 resume 完成就开轮询，会在
+        restart 窗口（relay 2s tick + spawn 若干秒）内把任务误判成失联。
+        返回是否等到 running；等不到也不拦（poll 会如实报 lost，reconcile 兜底）。
+        """
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            info = self._session_info(session_id) or {}
+            if info.get("status") in ("running", "spawning"):
+                return True
+            time.sleep(2)
+        return False
 
     # ── 工作区隔离（建议 4b）────────────────────────────────────
 
@@ -4326,6 +4500,321 @@ def _cmd_go(args) -> int:
     return _cmd_run(ns)
 
 
+# ── ask 直投席位 claim（同轮并发闸）─────────────────────────────────
+# 场景：Hermes 一回合并行起 N 个 ask，探灯彼此看不见（消息落库到 relay 投递有 2s+
+# 延迟，trafficState 还没翻 working），全部判「空闲」→ 全挤进同一个会话，
+# 「忙则另开」形同虚设。O_EXCL 文件抢占让同一常驻会话同刻只有一个直投者，
+# 输家自动转并行 fork。
+
+def _ask_claim_path(session_id: str) -> Path:
+    return ASK_CLAIMS_DIR / f"{session_id}.claim"
+
+
+def acquire_ask_claim(session_id: str, task_id: str) -> bool:
+    """抢常驻会话的直投席位。持有者等待者进程已死 → 夺锁重试一次（防死锁烂尾：
+    等待者被 kill -9 后席位永远占着，之后所有 ask 全被挤去 fork）。"""
+    if not session_id:
+        return False
+    path = _ask_claim_path(session_id)
+    payload = json.dumps({"pid": os.getpid(), "task_id": task_id, "at": _now_iso()})
+    for _ in range(2):
+        try:
+            ASK_CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, payload.encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                holder = json.loads(path.read_text())
+            except Exception:
+                holder = {}
+            if _waiter_alive(holder.get("pid")):
+                return False  # 真有人占着：转 fork
+            try:
+                path.unlink(missing_ok=True)  # 陈锁（持有者已死）：夺
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+def release_ask_claim(session_id: str, task_id: str) -> None:
+    """只释放自己那份席位（task_id 比对），别把并发新持有者的锁放掉。"""
+    if not session_id:
+        return
+    path = _ask_claim_path(session_id)
+    try:
+        holder = json.loads(path.read_text())
+        if holder.get("task_id") == task_id:
+            path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _cmd_ask(args) -> int:
+    """ask 单命令：点名常驻 agent（默认 Fable5）——先观察运行状态再投。
+
+    2026-07-26 高律师需求原文：「总是派到同一个 fable5，可以加一个去观察运行状态，
+    如果在运行就新建一个并行的任务」。路由：
+        空闲 → 直投常驻会话（沿用其累积上下文，一房一线，回复照常落常驻房）；
+        忙（working/needs-user）/ 不可用（会话被删、房归档、error）/ 直投席位被
+        同轮并发 ask 抢走 → dispatch 新房并行跑（模板 = 常驻会话的 templateId）。
+    两条路都走等待者链（state+面包屑+poll 红绿灯+inbox+brief），跑法与 go 完全一致：
+    terminal background=true + notify_on_complete=true，进程退出由 gateway 唤醒。
+
+    与既有 SOP 的边界：本命令只接**新任务**；对进行中任务的跟进/续跑/催促仍走
+    areco-msg 快道（fork 出去的会话不带原上下文，跟进投过去等于对牛弹琴）。
+    """
+    request = (args.request or "").strip()
+
+    # 0) Gatekeeper 快拒（与 go 同口径）：blocked 秒退，不投递不建房。
+    #    刻意不做 operator 快退——ask 是点名通道，「让 Fable5 跑 X」里的 X 即使长得像
+    #    Caller 白名单命令，也是要 Fable5 执行的任务，不是 Hermes 自持车道动作。
+    gk = check_should_dispatch(request)
+    if gk.get("category") == "blocked":
+        log_audit("ask", {
+            "mode": "worker", "blocked": True, "category": "blocked",
+            "reason": gk.get("reason", ""), "request_preview": request[:200],
+        })
+        print(json.dumps({
+            "cmd": "ask", "status": "blocked", "blocked": True,
+            "error": gk.get("reason", ""), "request_preview": request[:200],
+        }, ensure_ascii=False))
+        return 2
+
+    if args.fork and args.direct:
+        print(json.dumps({
+            "cmd": "ask", "status": "mode_conflict",
+            "error": "--fork 与 --direct 互斥（一个要另开、一个要排队）",
+        }, ensure_ascii=False), file=_sys.stderr)
+        return 2
+
+    caller = Caller()
+    channel = caller.resolve_ask_channel(room_id=args.room_id, member=args.member)
+
+    # 1) 定路由：显式旗标 > 探灯。--direct 在通道不可用时仍回落 fork（投不出去的
+    #    「排队」没有意义）。
+    if args.fork:
+        route, probe_reason = "fork", "显式 --fork"
+    elif args.direct:
+        route, probe_reason = (
+            ("direct", "显式 --direct（忙也排队直投）") if channel.get("ok")
+            else ("fork", f"--direct 但通道不可用：{channel.get('reason', '')}")
+        )
+    else:
+        route, probe_reason = caller.ask_channel_probe(channel)
+
+    task_id = f"wait-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+    # 2) 直投席位：探灯说空闲还要抢到 claim 才算数（同轮并发闸，见 acquire_ask_claim）。
+    claim_held = False
+    if route == "direct":
+        claim_held = acquire_ask_claim(channel.get("session_id", ""), task_id)
+        if not claim_held and not args.direct:
+            route, probe_reason = "fork", "直投席位被并发 ask 占用，另开并行任务"
+
+    summary = args.summary or " ".join(request.split())[:24]
+    dispatched_request = request
+    if args.recall and not re.search(r"(?:相关记忆|recall)\s*[:：]", request, re.I):
+        dispatched_request = f"{request}\n\n相关记忆：{args.recall.strip()}"
+
+    log_audit("ask", {
+        "mode": "worker", "blocked": False, "route": route,
+        "route_reason": probe_reason, "member": channel.get("member", ""),
+        "room_id": channel.get("room_id", ""), "dry_run": bool(args.dry_run),
+        "recall": bool(args.recall), "request_preview": request[:200],
+    })
+    # 头行先落 stdout（flush）：通知回放时 Hermes 一眼看到走了哪条路、为什么，
+    # 转述「已另开并行 Fable5」还是「Fable5 空闲直投」不用猜。
+    print(json.dumps({
+        "cmd": "ask", "route": route, "member": channel.get("member", ""),
+        "room_id": channel.get("room_id"), "reason": probe_reason[:100],
+        "summary": summary, "recall": (args.recall or "").strip() or None,
+    }, ensure_ascii=False), flush=True)
+
+    if args.dry_run:
+        if claim_held:
+            release_ask_claim(channel.get("session_id", ""), task_id)
+        print(json.dumps({"cmd": "ask", "status": "dry_run", "dispatched": False,
+                          "route": route,
+                          "request_final": dispatched_request[:300]},
+                         ensure_ascii=False))
+        return 0
+
+    timeout = args.timeout if args.timeout is not None else 0
+    spec = {
+        "request": dispatched_request, "task_type": "general",
+        "role": "worker", "template": channel.get("template_id"),
+        "room_id": channel.get("room_id") if route == "direct" else None,
+        "summary": summary, "file": args.file, "timeout": timeout,
+        "mode": "worker", "ask_route": route,
+    }
+    state = {
+        "task_id": task_id, "mode": "wait", "work_mode": "ask",
+        "ask_route": route, "spec": spec, "status": "running",
+        "created_at": _now_iso(), "pid": os.getpid(),
+    }
+    _write_state(task_id, state)
+
+    # 派发面包屑（与 run --wait 同构）：dispatch/直投一返回就落 state，
+    # 等待者此后死掉 reconcile 都能凭它去房间补收。
+    _bc_lock = threading.Lock()
+
+    def _breadcrumb(d: dict) -> None:
+        with _bc_lock:
+            state.setdefault("dispatches", []).append({
+                "task_id": d.get("task_id"),
+                "room_id": d.get("room_id"),
+                "session_id": d.get("session_id"),
+                "stand_name": d.get("stand_name"),
+                "stand_session_id": d.get("stand_session_id"),
+                "message_id": d.get("message_id"),
+                "at": _now_iso(),
+            })
+            _write_state(task_id, state)
+
+    caller._on_dispatch = _breadcrumb
+    try:
+        if route == "direct":
+            channel_was_exited = (channel.get("session") or {}).get("status") == "exited"
+            d = caller.dispatch_to_channel(
+                dispatched_request, channel, request_summary=summary
+            )
+            if channel_was_exited:
+                # exited 会话靠 room-relay 投递时自动 restart resume；先等它回到
+                # running 再开轮询，否则 poll 的 lost 判定会在重启窗口内误判失联
+                caller.wait_channel_resumed(d.get("stand_session_id", ""))
+            poll = caller.poll_result(
+                room_id=d["room_id"], session_id=d["session_id"],
+                stand_session_id=d.get("stand_session_id"),
+                after_id=d.get("message_id", 0) or 0,
+                stand_name=d.get("stand_name", ""),
+                timeout=timeout, task_id=d.get("task_id", ""),
+                role="worker", template=d.get("template_id", ""),
+            )
+            # 常驻房永不收口：room_created=False 本就不归档，连 finish_room 的
+            # kept 台账也不写——台账即「StandCode 地盘」声明，高律师的房间不能进。
+            res = {**d, **poll, "mode": "worker", "route": "direct"}
+        else:
+            fork_template = (
+                args.template or channel.get("template_id") or ASK_TEMPLATE_FALLBACK
+            )
+            res = caller.dispatch_and_relay(
+                dispatched_request, template_id=fork_template, mode="worker",
+                request_summary=summary, file_path=args.file,
+                poll_timeout=timeout, dry_run=True,
+            )
+            res["route"] = "fork"
+            res.setdefault("mode", "worker")
+    except GatekeeperBlockedError as e:
+        state.update({"status": "blocked", "error": str(e), "completed_at": _now_iso()})
+        _write_state(task_id, state)
+        print(json.dumps(
+            {"cmd": "ask", "task_id": task_id, "status": "blocked", "blocked": True,
+             "error": str(e), "request_preview": request[:200]},
+            ensure_ascii=False, indent=2,
+        ))
+        return 2
+    except Exception as e:
+        state.update({"status": "error", "error": str(e), "completed_at": _now_iso()})
+        _write_state(task_id, state)
+        print(json.dumps(
+            {"cmd": "ask", "task_id": task_id, "status": "error", "error": str(e)},
+            ensure_ascii=False, indent=2,
+        ))
+        return 1
+    finally:
+        if claim_held:
+            release_ask_claim(channel.get("session_id", ""), task_id)
+
+    status = res.get("status", "completed")
+    result_text = res.get("result_text", "")
+    state.update({
+        "status": status,
+        "result_text": result_text,
+        "result_preview": result_text[:500],
+        "elapsed": res.get("elapsed"),
+        "completed_at": res.get("completed_at") or _now_iso(),
+        "room_id": res.get("room_id"),
+        "session_id": res.get("session_id"),
+        "stand_name": res.get("stand_name"),
+        "template_id": res.get("template_id"),
+        "role": res.get("role"),
+        "messages_count": res.get("messages_count"),
+        "stuck_last_line": res.get("stuck_last_line"),
+        "settle_forced": res.get("settle_forced"),
+        "settle_reason": res.get("settle_reason"),
+        "error": res.get("error"),
+    })
+    _write_state(task_id, state)
+
+    verification = None
+    if status == "completed":
+        verification = verify_completion(files=[args.file] if args.file else [])
+    cost = caller.collect_stand_cost(res.get("stand_session_id") or "")
+    state["verification"] = verification
+    state["cost"] = cost
+    _write_state(task_id, state)
+
+    write_inbox(task_id, {
+        "task_id": task_id,
+        "room_id": res.get("room_id"),
+        "stand": res.get("stand_name") or "?",
+        "role": res.get("role") or "worker",
+        "status": status,
+        "result_text": result_text,
+        "files": [args.file] if args.file else [],
+        "request_summary": summary,
+        "request": request[:200],
+        "verification": verification,
+        "cost": cost,
+        "error": res.get("error"),
+    })
+    inbox_final = _inbox_path(task_id)
+    if status == "completed":
+        # 与 run --wait 同口径：completed 已随本进程退出经 notify 全文转述，
+        # inbox 即标 .done 防下轮 digest 双报
+        try:
+            done = inbox_final.with_name(inbox_final.name + DONE_SUFFIX)
+            inbox_final.rename(done)
+            inbox_final = done
+        except OSError as e:
+            logger.warning("inbox 标 .done 失败（会出现一次重复汇报）: %s", e)
+
+    out_text = result_text
+    truncated = False
+    if not args.full and len(result_text) > 700:
+        out_text = result_text[:700] + f"\n…[截断，全文 {len(result_text)} 字见 inbox]"
+        truncated = True
+    print(json.dumps(
+        {
+            "mode": "wait",
+            "work_mode": "ask",
+            "route": route,
+            "task_id": task_id,
+            "room_id": res.get("room_id"),
+            "session_id": res.get("session_id"),
+            "stand_name": res.get("stand_name"),
+            "template_id": res.get("template_id"),
+            "status": status,
+            "elapsed": res.get("elapsed"),
+            "completed_at": res.get("completed_at"),
+            "inbox_path": str(inbox_final),
+            "result_text": out_text,
+            "result_truncated": truncated,
+            "verification": verification,
+            "cost": cost,
+            "error_code": res.get("error_code") or classify_error_code(
+                status, str(res.get("error") or "")),
+            "error": res.get("error"),
+        },
+        ensure_ascii=False, indent=2,
+    ))
+    return 0 if status == "completed" else 1
+
+
 def _reconcile_lock() -> bool:
     """reconcile 单实例锁：O_EXCL 创建；>5 分钟视为陈锁可夺。False = 另一实例在跑。"""
     lock = TASKS_DIR / ".reconcile.lock"
@@ -5279,6 +5768,35 @@ def _build_parser():
     pg.add_argument("--dry-run", action="store_true",
                     help="只分诊+组包不派发（测试/预览用；audit 照记 dry_run=true）")
     pg.set_defaults(func=_cmd_go)
+
+    pk = sub.add_parser(
+        "ask",
+        help="点名常驻 agent（默认 Fable5）——先观察运行状态：空闲直投常驻会话，"
+             "忙/不可用则自动另开并行任务（2026-07-26）。跑法与 go 相同："
+             "background=true+notify_on_complete=true；仅限新任务，跟进/续跑走 areco-msg",
+    )
+    pk.add_argument("request", help="任务原文（点名通道，不走 route 分诊）")
+    pk.add_argument("--summary", default=None, help="一句话摘要（缺省取压缩空白后前 24 字）")
+    pk.add_argument(
+        "--recall", default=None, metavar="词组",
+        help="相关记忆定向词组（同 go：拼「相关记忆：<词组>」行，areco 投递层 auto-recall 按它查库）",
+    )
+    pk.add_argument("--member", default=None,
+                    help=f"通道成员名（缺省 env/local.json ask_channel，当前默认 {ASK_MEMBER}）")
+    pk.add_argument("--room-id", default=None, help="通道房间 id（缺省配置值，漂移时按成员名搜）")
+    pk.add_argument("--template", default=None,
+                    help="fork 时用的模板 id（缺省取常驻会话的 templateId）")
+    pk.add_argument("--fork", action="store_true",
+                    help="强制另开并行任务（跳过探灯；与 --direct 互斥）")
+    pk.add_argument("--direct", action="store_true",
+                    help="强制直投常驻会话（忙也排队；仅确知是同上下文延续时用；与 --fork 互斥）")
+    pk.add_argument("--file", "--file-path", dest="file", default=None, help="产物文件路径（机检收口用）")
+    pk.add_argument("--timeout", type=int, default=None, help="轮询超时秒（缺省 0=无限等到完成）")
+    pk.add_argument("--full", action="store_true",
+                    help="stdout 结果不截断（缺省截 700 字，全文在 inbox）")
+    pk.add_argument("--dry-run", action="store_true",
+                    help="只探灯+定路由不投递（测试/预览用）")
+    pk.set_defaults(func=_cmd_ask)
 
     prt = sub.add_parser(
         "route",
