@@ -129,6 +129,43 @@ export function useTerminal(sessionId: string) {
     wheelIntentTs = performance.now()
   }
 
+  // —— 接入结算窗（2026-07-26 报障「workbuddy 会话终端加载时从头拉到尾」）：
+  // attach 自带本端尺寸，与会话当前 PTY 尺寸不同即触发服务端 resize；codebuddy 等 TUI
+  // 收到 SIGWINCH 后把整个会话记录清屏重印（对照实验实锤：变尺寸 attach 的 burst 里
+  // 全量历史都在，同尺寸 attach 零输出）。逐块实时渲染这个重印流 = 肉眼看着历史滚一遍。
+  // 快照落地后开一个短结算窗：窗内输出攒进 pending 不上屏，静默 SETTLE_QUIET_MS 后
+  // 一次性写入——重绘只呈现最终一帧。窗外/超窗恢复流式，正常交互输出不受影响。
+  const ATTACH_SETTLE_WINDOW_MS = 4000
+  const ATTACH_SETTLE_QUIET_MS = 250
+  // 结算窗有自己的上限：攒批期间逐块即时 ack（收到即认，反正必渲染），服务端流控
+  // （FLOW_HIGH_WATER 256KB）不会中途暂停 pty，整场重印风暴才能完整收进一帧；
+  // 若沿用 PENDING_CAP_BYTES(128KB)，大会话重印会被流控切成几段可见回放
+  const SETTLE_CAP_BYTES = 8 * 1024 * 1024
+  let attachSettleUntil = 0
+  let settleFlushTimer: number | null = null
+
+  function inAttachSettle() {
+    return performance.now() < attachSettleUntil
+  }
+
+  function scheduleSettleFlush() {
+    // 与 scheduleFlush 不同：每块都重置计时器（要的是「静默 250ms」，不是「首块后 200ms」）
+    if (settleFlushTimer !== null) clearTimeout(settleFlushTimer)
+    settleFlushTimer = window.setTimeout(() => {
+      settleFlushTimer = null
+      if (!pending.length) return
+      // 结算窗内用户开始滑动：移交滑动攒批通道，保持原有手感
+      if (isUserScrolling() && pendingBytes < PENDING_CAP_BYTES) {
+        attachSettleUntil = 0
+        scheduleFlush()
+        return
+      }
+      flushPending()
+      // 重印风暴已整帧落屏，提前关窗：此后按键回显等零星输出恢复实时流式
+      attachSettleUntil = 0
+    }, ATTACH_SETTLE_QUIET_MS)
+  }
+
   // —— 触摸惯性补全（断触主因的根治）：xterm 的触摸滚动是纯手动 touchmove→scrollTop，
   // 没有 touchend/速度/动量代码，手指一离屏滚动瞬间死停。这里跟踪 touchmove 速度，
   // touchend 后用 rAF 指数衰减续滚出原生手感；再次触摸/到边界/速度耗尽即停。
@@ -356,6 +393,10 @@ export function useTerminal(sessionId: string) {
     }
   }
 
+  // 大块 write 期间 xterm 会按时间片分段渲染出中间帧（快进感）：超过此阈值套用
+  // 快照同款的 visibility 隐藏，写完回底再亮，整场只呈现最终一帧
+  const FLUSH_HIDE_MIN_BYTES = 64 * 1024
+
   function flushPending() {
     if (!term || !pending.length) return
     const chunks = pending
@@ -363,8 +404,12 @@ export function useTerminal(sessionId: string) {
     pendingBytes = 0
     const last = chunks[chunks.length - 1]!
     const wipe = chunks.some((c) => c.data.includes('\x1b[3J') || c.data.includes('\x1bc'))
-    term.write(chunks.map((c) => c.data).join(''), () => {
-      if (wipe) term?.scrollToBottom() // 见 output 分支注释：3J 清屏重绘后同帧拉回，消顶闪
+    const joined = chunks.map((c) => c.data).join('')
+    const el = joined.length >= FLUSH_HIDE_MIN_BYTES ? (container?.querySelector('.xterm') as HTMLElement | null) : null
+    if (el) el.style.visibility = 'hidden'
+    term.write(joined, () => {
+      if (wipe || el) term?.scrollToBottom() // 见 output 分支注释：3J 清屏重绘后同帧拉回，消顶闪
+      if (el) el.style.visibility = ''
       wsClient.queueAck(sessionId, last.offset)
     })
   }
@@ -591,14 +636,22 @@ export function useTerminal(sessionId: string) {
       //（2026-07-23 手机端"终端模式跳到会话开头"报障：会话闲置断线，点输入栏触发重连即中招）。
       // 本地画面本来就是最新，直接 ack。pending 非空不能跳：appliedOffset 含未落屏的攒压块。
       if (msg.epoch === currentEpoch && msg.offset === appliedOffset && pending.length === 0) {
+        // 画面无需重置，但本次 attach 若带来了尺寸变化，TUI 重印流仍会随后到达——同样开窗攒批
+        if (msg.live) attachSettleUntil = performance.now() + ATTACH_SETTLE_WINDOW_MS
         wsClient.queueAck(sessionId, msg.offset)
         return
       }
       // 快照全量覆盖到 msg.offset，攒着的旧输出作废
       pending = []
       pendingBytes = 0
+      if (settleFlushTimer !== null) {
+        clearTimeout(settleFlushTimer)
+        settleFlushTimer = null
+      }
       currentEpoch = msg.epoch
       appliedOffset = msg.offset
+      // live 会话才有 resize 触发的 TUI 重印流；exited 快照后无 output，开窗无意义
+      attachSettleUntil = msg.live ? performance.now() + ATTACH_SETTLE_WINDOW_MS : 0
       // reset 同步清屏、write 异步渲染——间隙会画一帧空白。隐藏元素跨过间隙，回调里再亮。
       const el = container?.querySelector('.xterm') as HTMLElement | null
       if (el) el.style.visibility = 'hidden'
@@ -626,6 +679,15 @@ export function useTerminal(sessionId: string) {
     if (msg.type === 'output' && msg.sessionId === sessionId) {
       if (msg.epoch !== currentEpoch || msg.offset <= appliedOffset) return
       appliedOffset = msg.offset
+      // 接入结算窗：resize 触发的 TUI 全量重印攒批成一帧，不让用户看着历史从头滚到尾。
+      // 逐块即时 ack 保持流控水位为零；触顶（SETTLE_CAP_BYTES）落到下方常规通道退化为流式。
+      if (inAttachSettle() && pendingBytes < SETTLE_CAP_BYTES) {
+        pending.push({ data: msg.data, offset: msg.offset })
+        pendingBytes += msg.data.length
+        wsClient.queueAck(sessionId, msg.offset)
+        scheduleSettleFlush()
+        return
+      }
       if (isUserScrolling() && pendingBytes < PENDING_CAP_BYTES) {
         pending.push({ data: msg.data, offset: msg.offset })
         pendingBytes += msg.data.length
@@ -666,6 +728,8 @@ export function useTerminal(sessionId: string) {
     if (term.cols !== lastReported.cols || term.rows !== lastReported.rows) {
       lastReported = { cols: term.cols, rows: term.rows }
       wsClient.send({ type: 'resize', sessionId, cols: term.cols, rows: term.rows })
+      // 旋转/键盘收放触发的 resize 与 attach 同源：TUI 会全量重印，同样攒批成一帧
+      attachSettleUntil = performance.now() + ATTACH_SETTLE_WINDOW_MS
     }
   }
 
@@ -706,6 +770,7 @@ export function useTerminal(sessionId: string) {
     wsClient.send({ type: 'detach', sessionId })
     if (fitTimer !== null) clearTimeout(fitTimer)
     if (flushTimer !== null) clearTimeout(flushTimer)
+    if (settleFlushTimer !== null) clearTimeout(settleFlushTimer)
     cancelSettleGuard()
     stopMomentum()
     pending = []
