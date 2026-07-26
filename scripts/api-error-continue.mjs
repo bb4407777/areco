@@ -89,7 +89,7 @@ const LOCK_FILE = path.join(ROOT, 'data', 'api-error-continue.lock')
 // 连接错/超时/登录失效/限流/网络错误码等都算。误报防线不在词表在形态学——必须是
 // 「错误行之后直到空闲输入框再无实质内容」才判 stalled，聊天内容里出现这些词不会中招。
 const RE_ERROR =
-  /API Error|Connection error|Request timed out|fetch failed|Please run \/login|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|overloaded|rate.?limit|usage limit|Internal server error/i
+  /API Error|Connection error|Request timed out|fetch failed|Please run \/login|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|overloaded|rate.?limit|usage limit|Internal server error|Bad Gateway|Service Unavailable|Gateway Timeout|Server Error|HTTP 5\d\d/i
 const RE_BUSY = /esc to interrupt/i
 const RE_RETRYING = /Retrying in \d+|attempt \d+\/\d+/i
 // 与 shared/traffic.ts PENDING_CHOICE_RE 同口径：权限框/信任页永不注入
@@ -133,8 +133,11 @@ export function classifyScreen(lines) {
   const text = lines.join('\n')
   if (RE_BUSY.test(text)) return { verdict: 'busy' }
   if (RE_DIALOG.test(text)) return { verdict: 'dialog' }
-  if (!RE_ERROR.test(text)) return { verdict: 'clean' }
+  // Retrying 必须先于 clean：502 Bad Gateway 等网关错 Claude 会自动重试，尾屏「Retrying in Xs /
+  // attempt N/10」本身就是卡错信号——不能因错误词表没覆盖到（如"502 Bad G…"被截断）就判 clean 漏掉
+  // （2026-07-27 全 Fable5 卡 502 实战，fb2832c5 attempt 7/10 被漏判 clean）。
   if (RE_RETRYING.test(text)) return { verdict: 'retrying' }
+  if (!RE_ERROR.test(text)) return { verdict: 'clean' }
   let errIdx = -1
   for (let i = 0; i < lines.length; i++) if (RE_ERROR.test(lines[i])) errIdx = i
   const errorLine = lines[errIdx].trim().slice(0, 120)
@@ -248,6 +251,12 @@ function selfTest() {
       '',
       '  ◯ skills-bug-sweep 21/88 agents done · 1',
     ]],
+    // 502/网关错实战（2026-07-27 全 Fable5 卡）：Claude 自动重试 UI，必须判 retrying 不能 clean
+    ['retrying', ['✻ 502 Bad G… · Retrying in 15s · attempt 7/10', box, '❯ ', box, status]],
+    ['retrying', ['✻ 503 Service Unavailable · Retrying in 0s · attempt 5/10', box, '❯ ', box]],
+    // 网关错已不重试、停在空闲框 = stalled（RE_ERROR 补了 Bad Gateway / Gateway Timeout 等）
+    ['stalled', ['  ⎿  502 Bad Gateway', '', box, '❯ ', box, status]],
+    ['stalled', ['  ⎿  504 Gateway Timeout', '', box, '❯ ', box, status]],
   ]
   let fail = 0
   for (const [want, lines] of cases) {
