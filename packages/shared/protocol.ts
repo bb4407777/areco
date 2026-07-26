@@ -42,6 +42,11 @@ export interface Template {
    * 决定 system prompt、thinking、timeout 等行为参数。
    */
   preset?: string
+  /**
+   * 推理/think 档位。不同 harness 与模型支持面不同：
+   * 服务端 resolver 会按 harness/model 能力矩阵校验并翻译为对应 CLI 参数。
+   */
+  reasoningEffort?: string
   claudeHome?: string
   /**
    * claude 布局的 transcript projects 根目录（如 /Users/gao/.qoder-cn/projects）：
@@ -61,6 +66,23 @@ export interface StandCodeConfig {
   thinker?: string
   worker?: string
   fastWorker?: string
+}
+
+export interface StandCodeCatalogHarness {
+  description?: string
+  reasoningEfforts: string[]
+}
+
+export interface StandCodeCatalogModel {
+  provider?: string
+  modelId?: string
+  description?: string
+  reasoningEfforts?: string[]
+}
+
+export interface StandCodeCatalog {
+  harnesses: Record<string, StandCodeCatalogHarness>
+  models: Record<string, StandCodeCatalogModel>
 }
 
 export interface SessionSummary {

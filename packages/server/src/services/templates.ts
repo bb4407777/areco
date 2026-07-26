@@ -217,6 +217,7 @@ export class TemplateStore {
       ...(input.harness?.trim() ? { harness: input.harness.trim() } : {}),
       ...(input.model?.trim() ? { model: input.model.trim() } : {}),
       ...(input.preset?.trim() ? { preset: input.preset.trim() } : {}),
+      ...(input.reasoningEffort?.trim() ? { reasoningEffort: input.reasoningEffort.trim() } : {}),
       ...(input.transcriptDir?.trim() ? { transcriptDir: input.transcriptDir.trim() } : {}),
     }
     this.config.templates.push(template)
@@ -243,6 +244,10 @@ export class TemplateStore {
       harness: patch.harness !== undefined ? patch.harness.trim() || undefined : template.harness,
       model: patch.model !== undefined ? patch.model.trim() || undefined : template.model,
       preset: patch.preset !== undefined ? patch.preset.trim() || undefined : template.preset,
+      reasoningEffort:
+        patch.reasoningEffort !== undefined
+          ? patch.reasoningEffort.trim() || undefined
+          : template.reasoningEffort,
       transcriptDir:
         patch.transcriptDir !== undefined
           ? patch.transcriptDir.trim() || undefined

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 设置：系统信息（访问地址/版本/认证）+ 模板 CRUD
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NCard,
@@ -17,7 +17,7 @@ import {
   useDialog,
   useMessage,
 } from 'naive-ui'
-import type { StandCodeConfig, StatsSummary, Template } from '../../../shared/protocol'
+import type { StandCodeCatalog, StandCodeConfig, StatsSummary, Template } from '../../../shared/protocol'
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
@@ -59,6 +59,7 @@ const STANDCODE_ROLES = [
 ] as const
 const standcodeSaved = ref<StandCodeConfig>({})
 const standcodeInput = ref<StandCodeConfig>({})
+const standcodeCatalog = ref<StandCodeCatalog | null>(null)
 const savingStandcode = ref(false)
 const standcodeOptions = computed(() =>
   store.templates.filter((t) => t.enabled).map((t) => ({ label: `${t.name}（${t.id}）`, value: t.id }))
@@ -87,9 +88,51 @@ const busy = ref(false)
 function emptyTemplate(): Template {
   return {
     id: '', name: '', command: '', args: [], cwd: '', color: '#7d8590', autoStart: false, enabled: true,
-    harness: '', model: '', preset: '',
+    harness: '', model: '', preset: '', reasoningEffort: '',
   }
 }
+
+const EFFORT_LABELS: Record<string, string> = {
+  minimal: 'minimal（最省）',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh（超高）',
+  max: 'max（最高）',
+  ultra: 'ultra（极限）',
+}
+
+/** harness 能力与 model 能力取交集；model 未声明限制时沿用 harness 全档位。 */
+const reasoningOptions = computed(() => {
+  const harness = editing.value.harness?.trim() ?? ''
+  const model = editing.value.model?.trim() ?? ''
+  const harnessLevels = standcodeCatalog.value?.harnesses[harness]?.reasoningEfforts ?? []
+  const modelLevels = standcodeCatalog.value?.models[model]?.reasoningEfforts
+  const levels = modelLevels?.length
+    ? harnessLevels.filter((level) => modelLevels.includes(level))
+    : harnessLevels
+  return levels.map((value) => ({ value, label: EFFORT_LABELS[value] ?? value }))
+})
+
+const reasoningPlaceholder = computed(() => {
+  if (!editing.value.harness?.trim()) return '先填写 harness'
+  if (!reasoningOptions.value.length) return '该 harness/model 暂无已验证档位'
+  return '留空 = 使用 harness/model 默认值'
+})
+
+watch(
+  () => [editing.value.harness, editing.value.model],
+  () => {
+    const current = editing.value.reasoningEffort
+    if (
+      standcodeCatalog.value &&
+      current &&
+      !reasoningOptions.value.some((option) => option.value === current)
+    ) {
+      editing.value.reasoningEffort = ''
+    }
+  },
+)
 
 // 模板列表圆点：直接复用会话红绿灯——取该模板下会话里最值得关注的状态（无会话=灰）
 function dotColor(t: Template): string {
@@ -110,6 +153,11 @@ onMounted(async () => {
     standcodeInput.value = { ...standcodeSaved.value }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
+  }
+  try {
+    standcodeCatalog.value = await api.get<StandCodeCatalog>('/api/standcode/catalog')
+  } catch {
+    // 前端构建产物会先于用户择时重启 8790 生效；旧服务端没有该端点时保持设置页其余功能可用。
   }
 })
 
@@ -144,11 +192,12 @@ function openEdit(template: Template) {
 async function save() {
   busy.value = true
   try {
-    // StandCode 分层三字段：空串不落 config（standcode-resolver 按 falsy 跳过，但别存噪音键）
+    // StandCode 分层字段：空串不落 config（standcode-resolver 按 falsy 跳过，但别存噪音键）
     const payload = { ...editing.value }
-    for (const k of ['harness', 'model', 'preset'] as const) {
-      if (!payload[k]?.trim()) delete payload[k]
-      else payload[k] = payload[k]!.trim()
+    for (const k of ['harness', 'model', 'preset', 'reasoningEffort'] as const) {
+      const value = typeof payload[k] === 'string' ? payload[k].trim() : ''
+      if (!value) delete payload[k]
+      else payload[k] = value
     }
     if (isCreate.value) await store.createTemplate(payload)
     else await store.updateTemplate(payload.id, payload)
@@ -428,7 +477,7 @@ function clearLog() {
               <n-tag v-if="template.autoStart" size="small" :bordered="false" type="info">自启</n-tag>
             </div>
             <div class="template-cmd mono">
-              <template v-if="template.harness">⚙ {{ template.harness }}{{ template.model ? ` · ${template.model}` : '' }}{{ template.preset ? ` · ${template.preset}` : '' }}</template>
+              <template v-if="template.harness">⚙ {{ template.harness }}{{ template.model ? ` · ${template.model}` : '' }}{{ template.preset ? ` · ${template.preset}` : '' }}{{ template.reasoningEffort ? ` · think:${template.reasoningEffort}` : '' }}</template>
               <template v-else>{{ template.command }} {{ template.args.join(' ') }}</template>
             </div>
           </div>
@@ -533,6 +582,15 @@ function clearLog() {
         </n-form-item>
         <n-form-item label="preset">
           <n-input v-model:value="editing.preset" placeholder="可选：thinker / worker" />
+        </n-form-item>
+        <n-form-item label="think档位">
+          <n-select
+            v-model:value="editing.reasoningEffort"
+            :options="reasoningOptions"
+            :placeholder="reasoningPlaceholder"
+            :disabled="!reasoningOptions.length"
+            clearable
+          />
         </n-form-item>
         <n-form-item label="默认目录"><n-input v-model:value="editing.cwd" placeholder="留空 = 服务端 HOME" /></n-form-item>
         <n-form-item label="颜色"><n-color-picker v-model:value="editing.color" :show-alpha="false" /></n-form-item>

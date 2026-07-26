@@ -13,6 +13,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
 
   // StandCode 角色默认模板（caller/thinker/worker/fastWorker）：设置页编辑，caller.py 消费
   router.get('/standcode/defaults', c.getStandcodeDefaults)
+  router.get('/standcode/catalog', c.getStandcodeCatalog)
   router.put('/standcode/defaults', c.updateStandcodeDefaults)
 
   // StandCode 任务管理：列出 caller.py 后台任务状态 / 提交新任务（subprocess 调 caller.py run --bg）

@@ -29,6 +29,7 @@ import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$|^-[A-Za-z0-9._-]+$/
 import { handoffPrompt, writeHandoffFile } from '../services/handoff'
 import { effectiveClaudeHome } from '../services/templates'
+import { standCodeCatalog } from '../services/standcode-resolver'
 import { FileService } from '../services/files'
 
 const execFileAsync = promisify(execFile)
@@ -160,6 +161,9 @@ export class ApiControllers {
   /** GET /api/standcode/defaults：StandCode 角色默认模板（设置页编辑面；
    *  StandCode caller.py 启动时读它覆盖 registry.json 默认）。 */
   getStandcodeDefaults = (ctx: Context) => ok(ctx, this.config.standcode ?? {})
+
+  /** 设置页模板编辑器用的只读目录：harness/model 名称与已验证推理档位，不含任何 provider env。 */
+  getStandcodeCatalog = (ctx: Context) => ok(ctx, standCodeCatalog())
 
   /** PUT /api/standcode/defaults：逐角色设置/清除默认模板 id。写回 config.json 即时生效。
    *  空串 = 清除该角色（消费方回落 registry.json）；非空必须是已存在的模板 id

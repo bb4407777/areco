@@ -114,6 +114,9 @@ function normalizeTemplate(raw: Partial<Template>, index: number): Template {
     ...(typeof raw.harness === 'string' && raw.harness.trim() ? { harness: raw.harness.trim() } : {}),
     ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
     ...(typeof raw.preset === 'string' && raw.preset.trim() ? { preset: raw.preset.trim() } : {}),
+    ...(typeof raw.reasoningEffort === 'string' && raw.reasoningEffort.trim()
+      ? { reasoningEffort: raw.reasoningEffort.trim() }
+      : {}),
   }
 }
 

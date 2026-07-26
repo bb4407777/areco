@@ -30,21 +30,25 @@
     "workbuddy-deepseek-pro": {
       "provider": "workbuddy",
       "model_id": "deepseek-v4-pro",
+      "reasoning_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
       "description": "WorkBuddy DeepSeek-v4-pro"
     },
     "workbuddy-deepseek-flash": {
       "provider": "workbuddy",
       "model_id": "deepseek-v4-flash",
+      "reasoning_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
       "description": "WorkBuddy DeepSeek-v4-flash（快速 Worker）"
     },
     "workbuddy-hy3": {
       "provider": "workbuddy",
       "model_id": "hy3",
+      "reasoning_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
       "description": "WorkBuddy 混元3"
     },
     "glm-5.2-bigmodel": {
       "provider": "bigmodel",
       "model_id": "glm-5.2",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "description": "GLM-5.2 智谱开放平台直连（claude CLI 用户 settings 同款端点）"
     },
     "kimi-k3": {
@@ -55,21 +59,25 @@
     "gpt-5.6-sol": {
       "provider": "freemodel",
       "model_id": "gpt-5.6-sol",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
       "description": "GPT-5.6-sol（codex，FreeModel 网关，config.toml 默认同款）"
     },
     "qwen3.8-max-preview": {
       "provider": "qoder",
       "model_id": "Qwen3.8-Max-Preview",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh"],
       "description": "Qwen3.8-Max-Preview（qoder CLI 默认）"
     },
     "claude-fable-5": {
       "provider": "freemodel-cc",
       "model_id": "claude-fable-5",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "description": "Claude Fable 5（FreeModel 网关，bin/c5 同款整包 env）"
     },
     "claude-opus-5": {
       "provider": "freemodel-cc",
       "model_id": "claude-opus-5",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "description": "Claude Opus 5（FreeModel 网关，bin/cfm 同款整包 env）"
     }
   }

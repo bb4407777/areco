@@ -21,6 +21,8 @@ fs.writeFileSync(
         cwd: '/Users/gao',
       },
       workbuddy: { command: '/apps/codebuddy', args: ['--dangerously-skip-permissions'], env: {} },
+      codex: { command: 'codex', args: ['--sandbox', 'danger-full-access'], env: {} },
+      qoder: { command: 'qoderclicn', args: ['--dangerously-skip-permissions'], env: {} },
       hermes: {
         command: '/opt/hermes',
         args: ['chat', '--cli', '--yolo'],
@@ -39,8 +41,21 @@ fs.writeFileSync(
   path.join(dir, 'models.json'),
   JSON.stringify({
     models: {
-      'workbuddy-deepseek-pro': { provider: 'workbuddy', model_id: 'deepseek-v4-pro' },
-      'claude-fable-5': { provider: 'freemodel-cc', model_id: 'claude-fable-5' },
+      'workbuddy-deepseek-pro': {
+        provider: 'workbuddy',
+        model_id: 'deepseek-v4-pro',
+        reasoning_efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      'gpt-5.6-sol': {
+        provider: 'freemodel',
+        model_id: 'gpt-5.6-sol',
+        reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      },
+      'claude-fable-5': {
+        provider: 'freemodel-cc',
+        model_id: 'claude-fable-5',
+        reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
       'gateway-no-path': { provider: 'broken-gateway', model_id: 'x-1' },
       'orphan-provider': { provider: 'nowhere', model_id: 'orphan-1' },
     },
@@ -67,6 +82,7 @@ fs.writeFileSync(
 fs.writeFileSync(path.join(dir, 'presets.json'), JSON.stringify({ presets: { thinker: { timeout: 600 } } }))
 
 const { resolveStandCode } = await import('./standcode-resolver')
+const { standCodeCatalog } = await import('./standcode-resolver')
 const { buildSpawnSpec } = await import('./templates')
 
 function tpl(patch: Partial<Template>): Template {
@@ -85,6 +101,50 @@ test('harness+model 基本解析：--model 用 models.json 的 model_id', () => 
   assert.ok(r)
   assert.equal(r.command, '/apps/codebuddy')
   assert.deepEqual(r.args, ['--dangerously-skip-permissions', '--model', 'deepseek-v4-pro'])
+})
+
+test('推理档位按 harness 翻译：Codex 用 -c，Claude/WorkBuddy 用 --effort', () => {
+  const codex = resolveStandCode(tpl({ harness: 'codex', model: 'gpt-5.6-sol', reasoningEffort: 'xhigh' }))
+  assert.ok(codex)
+  assert.deepEqual(codex.args, [
+    '--sandbox', 'danger-full-access', '--model', 'gpt-5.6-sol',
+    '-c', 'model_reasoning_effort="xhigh"',
+  ])
+
+  const claude = resolveStandCode(tpl({ harness: 'claude', model: 'claude-fable-5', reasoningEffort: 'max' }))
+  assert.ok(claude)
+  const claudeAt = claude.args.indexOf('claude')
+  assert.deepEqual(claude.args.slice(claudeAt), [
+    'claude', '--setting-sources', 'user', '--dangerously-skip-permissions',
+    '--model', 'claude-fable-5', '--effort', 'max',
+  ])
+
+  const workbuddy = resolveStandCode(
+    tpl({ harness: 'workbuddy', model: 'workbuddy-deepseek-pro', reasoningEffort: 'minimal' }),
+  )
+  assert.ok(workbuddy)
+  assert.deepEqual(workbuddy.args, [
+    '--dangerously-skip-permissions', '--model', 'deepseek-v4-pro', '--effort', 'minimal',
+  ])
+})
+
+test('推理档位按 model 缩窄；无可靠 flag 的 harness 明确拒绝', () => {
+  assert.throws(
+    () => resolveStandCode(tpl({ harness: 'codex', model: 'gpt-5.6-sol', reasoningEffort: 'minimal' })),
+    /可用：low, medium, high, xhigh, max, ultra/,
+  )
+  assert.throws(
+    () => resolveStandCode(tpl({ harness: 'reasonix', reasoningEffort: 'high' })),
+    /没有已验证的推理档位参数/,
+  )
+})
+
+test('设置目录只暴露能力元数据，并按 harness/model 分别列档位', () => {
+  const catalog = standCodeCatalog()
+  assert.deepEqual(catalog.harnesses.codex.reasoningEfforts, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+  assert.deepEqual(catalog.harnesses.reasonix.reasoningEfforts, [])
+  assert.deepEqual(catalog.models['gpt-5.6-sol'].reasoningEfforts, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+  assert.equal(JSON.stringify(catalog).includes('ANTHROPIC_BASE_URL'), false)
 })
 
 test('未知 harness / 未知 model → 抛错不静默', () => {

@@ -29,7 +29,7 @@ function newStore() {
   return new TemplateStore({ templates: [] } as never)
 }
 
-test('create 保留 harness/model/preset/transcriptDir', () => {
+test('create 保留 harness/model/preset/reasoningEffort/transcriptDir', () => {
   const store = newStore()
   const created = store.create({
     id: 'stand-thinker',
@@ -39,11 +39,13 @@ test('create 保留 harness/model/preset/transcriptDir', () => {
     harness: 'workbuddy',
     model: 'deepseek-v4-pro',
     preset: 'thinker',
+    reasoningEffort: 'xhigh',
     transcriptDir: '/tmp/tr',
   } as never)
   assert.equal(created.harness, 'workbuddy')
   assert.equal(created.model, 'deepseek-v4-pro')
   assert.equal(created.preset, 'thinker')
+  assert.equal(created.reasoningEffort, 'xhigh')
   assert.equal(created.transcriptDir, '/tmp/tr')
   // 落库的也得有（不能只是返回值对）
   assert.equal(store.get('stand-thinker')?.harness, 'workbuddy')
@@ -57,21 +59,28 @@ test('create 的 harness 模板不会退化成空 command 且无 harness', () =>
   assert.ok(t.harness, 'harness 被丢了 → buildSpawnSpec 会拼出 exec 空串')
 })
 
-test('update 能改这四个字段', () => {
+test('update 能改分层字段', () => {
   const store = newStore()
   store.create({ id: 't', name: 'T', command: '', args: [], harness: 'workbuddy', model: 'a' } as never)
-  const updated = store.update('t', { harness: 'reasonix', model: 'b', preset: 'worker' } as never)
+  const updated = store.update(
+    't',
+    { harness: 'reasonix', model: 'b', preset: 'worker', reasoningEffort: 'high' } as never,
+  )
   assert.equal(updated.harness, 'reasonix')
   assert.equal(updated.model, 'b')
   assert.equal(updated.preset, 'worker')
+  assert.equal(updated.reasoningEffort, 'high')
 })
 
 test('update 传空串 = 清除该字段（与 claudeHome 同语义）', () => {
   const store = newStore()
-  store.create({ id: 't2', name: 'T2', command: 'claude', args: [], model: 'a', preset: 'worker' } as never)
-  const updated = store.update('t2', { model: '', preset: '' } as never)
+  store.create({
+    id: 't2', name: 'T2', command: 'claude', args: [], model: 'a', preset: 'worker', reasoningEffort: 'high',
+  } as never)
+  const updated = store.update('t2', { model: '', preset: '', reasoningEffort: '' } as never)
   assert.equal(updated.model, undefined)
   assert.equal(updated.preset, undefined)
+  assert.equal(updated.reasoningEffort, undefined)
 })
 
 test('update 不传则保持原值', () => {

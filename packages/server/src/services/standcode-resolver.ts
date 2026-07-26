@@ -1,4 +1,4 @@
-import type { Template } from '../../../shared/protocol'
+import type { StandCodeCatalog, Template } from '../../../shared/protocol'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ROOT_DIR } from '../config'
@@ -17,6 +17,14 @@ interface HarnessSpec {
   /** exec 前的 shell 前置命令（原样拼进登录 shell，如 reasonix 的 config auto-plan on） */
   pre?: string[]
   description?: string
+}
+
+interface ModelSpec {
+  model_id?: string
+  provider?: string
+  description?: string
+  /** 该模型确认可用的推理档位；缺省 = 不再缩窄 harness 的能力面。 */
+  reasoning_efforts?: string[]
 }
 
 /**
@@ -52,6 +60,70 @@ function loadJson<T>(name: string): T | null {
   }
 }
 
+interface HarnessReasoningSpec {
+  levels: readonly string[]
+  args: (level: string) => string[]
+}
+
+// 只登记本机 CLI --help 已确认的参数面。没有可靠 flag 的 harness 不暴露选择，
+// 避免 UI 看似可选、实际启动即报未知参数。
+const HARNESS_REASONING: Record<string, HarnessReasoningSpec> = {
+  codex: {
+    levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    args: (level) => ['-c', `model_reasoning_effort="${level}"`],
+  },
+  claude: {
+    levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    args: (level) => ['--effort', level],
+  },
+  workbuddy: {
+    levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    args: (level) => ['--effort', level],
+  },
+  qoder: {
+    levels: ['low', 'medium', 'high', 'xhigh'],
+    args: (level) => ['--reasoning-effort', level],
+  },
+}
+
+function reasoningLevels(harnessName: string, model?: ModelSpec): string[] {
+  const harnessLevels = [...(HARNESS_REASONING[harnessName]?.levels ?? [])]
+  const modelLevels = model?.reasoning_efforts?.map(String).filter(Boolean)
+  if (!modelLevels?.length) return harnessLevels
+  const allowed = new Set(modelLevels)
+  return harnessLevels.filter((level) => allowed.has(level))
+}
+
+/** 设置页只读目录：不返回 provider env/凭证，只暴露可选名称与推理能力。 */
+export function standCodeCatalog(): StandCodeCatalog {
+  const harnesses = loadJson<{ harnesses?: Record<string, HarnessSpec> }>('harnesses')?.harnesses ?? {}
+  const models = loadJson<{ models?: Record<string, ModelSpec> }>('models')?.models ?? {}
+  return {
+    harnesses: Object.fromEntries(
+      Object.entries(harnesses).map(([name, spec]) => [
+        name,
+        {
+          ...(spec.description ? { description: spec.description } : {}),
+          reasoningEfforts: reasoningLevels(name),
+        },
+      ]),
+    ),
+    models: Object.fromEntries(
+      Object.entries(models).map(([name, spec]) => [
+        name,
+        {
+          ...(spec.provider ? { provider: spec.provider } : {}),
+          ...(spec.model_id ? { modelId: spec.model_id } : {}),
+          ...(spec.description ? { description: spec.description } : {}),
+          ...(spec.reasoning_efforts?.length
+            ? { reasoningEfforts: spec.reasoning_efforts.map(String).filter(Boolean) }
+            : {}),
+        },
+      ]),
+    ),
+  }
+}
+
 /**
  * 把 template 的 harness/model/preset 声明解析成可 spawn 的 command/args/pre。
  *
@@ -70,7 +142,7 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
   if (!template.harness) return null
 
   const harnesses = loadJson<{ harnesses?: Record<string, HarnessSpec> }>('harnesses')
-  const models = loadJson<{ models?: Record<string, { model_id?: string; provider?: string }> }>('models')
+  const models = loadJson<{ models?: Record<string, ModelSpec> }>('models')
   const presets = loadJson<{ presets?: Record<string, { timeout?: number }> }>('presets')
   const providers = loadJson<{ providers?: Record<string, ProviderSpec> }>('providers')
 
@@ -109,6 +181,25 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
     throw new Error(
       `模板 ${template.id} 的 model="${template.model}" 在 models.json 中不存在`,
     )
+  }
+
+  // 推理档位：同一个字段按 harness 翻译成不同 CLI 参数，并与模型能力取交集。
+  // 例：codex → -c model_reasoning_effort="xhigh"；Claude/WorkBuddy → --effort xhigh。
+  if (template.reasoningEffort) {
+    const spec = HARNESS_REASONING[template.harness]
+    const allowed = reasoningLevels(template.harness, model)
+    if (!spec || !allowed.length) {
+      throw new Error(
+        `模板 ${template.id} 的 harness="${template.harness}" / model="${template.model ?? ''}" 没有已验证的推理档位参数`,
+      )
+    }
+    if (!allowed.includes(template.reasoningEffort)) {
+      throw new Error(
+        `模板 ${template.id} 的 reasoningEffort="${template.reasoningEffort}" 不适用于 ` +
+          `harness="${template.harness}" / model="${template.model ?? ''}"。可用：${allowed.join(', ')}`,
+      )
+    }
+    args.push(...spec.args(template.reasoningEffort))
   }
 
   // preset.timeout 原先只对 openclaw 生效，其余 harness 声明了 preset 也毫无效果。
