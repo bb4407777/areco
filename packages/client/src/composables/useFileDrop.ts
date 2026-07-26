@@ -1,5 +1,6 @@
 // 文件拖放/选件：document 级拖放监听 + 路径回填输入框。会话页/项目页共用。
-// 散文件 → 上传副本落盘 data/uploads（浏览器拿不到源路径，只能复制）；
+// 散文件 → 先 Spotlight 反查源路径（name+size 精确匹配），命中零复制直填源路径；
+//          查不到（手机端拍照/网盘/未索引位置）才上传副本落盘 data/uploads；
 // 文件夹 → 不上传内容：只报目录名+首层子项名，服务端 Spotlight 反查源目录路径回填，agent 直读源目录（零复制，空文件夹/iCloud 占位也秒回）
 import { nextTick, onMounted, onUnmounted, ref, type Ref } from 'vue'
 import { useMessage } from 'naive-ui'
@@ -62,6 +63,36 @@ export function useFileDrop({ text, inputEl, afterFill }: Options) {
     }
   }
 
+  // 散文件入口：先 Spotlight 反查源路径（name+size 精确匹配，零复制），查不到的才上传副本
+  async function handleFiles(files: File[]) {
+    if (!files.length || uploading.value) return
+    let located = false
+    try {
+      const { results } = await api.post<{ results: Array<{ name: string; paths: string[] }> }>(
+        '/api/files/locate-files',
+        { files: files.map((f) => ({ name: f.name, size: f.size })) },
+      )
+      located = true
+      const rest: File[] = []
+      for (let i = 0; i < files.length; i++) {
+        const paths = results[i]?.paths ?? []
+        if (paths.length) {
+          await fillPaths(paths[0])
+          if (paths.length > 1) message.warning(`「${files[i].name}」同名同大小文件有 ${paths.length} 处，已填最可能的一处；不对请改为粘贴路径`)
+          else message.success(`已填入「${files[i].name}」的源路径（未复制，agent 直读源文件）`)
+        } else {
+          rest.push(files[i])
+        }
+      }
+      files = rest
+    } catch (err) {
+      // 端点未上线（旧服务端）等情况：全量退回上传副本，不阻塞用户
+      if (!located && err instanceof Error && !err.message.includes('404'))
+        message.warning(`源路径定位失败（${err.message}），改为上传副本`)
+    }
+    if (files.length) await uploadFiles(files)
+  }
+
   // 首层子项名（只列目录首批条目，不读任何文件内容）：给服务端核验同名候选目录用
   function firstLevelNames(dir: FileSystemDirectoryEntry, limit: number): Promise<string[]> {
     return new Promise((resolve) => {
@@ -97,7 +128,7 @@ export function useFileDrop({ text, inputEl, afterFill }: Options) {
   }
   function onInputChange(e: Event) {
     const files = (e.target as HTMLInputElement).files
-    if (files) void uploadFiles(Array.from(files))
+    if (files) void handleFiles(Array.from(files))
   }
 
   // document 级拖放监听（组件挂载即覆盖整页）：计数器解子元素 dragenter/dragleave 抖动
@@ -142,7 +173,7 @@ export function useFileDrop({ text, inputEl, afterFill }: Options) {
     // 旧浏览器无 entries API：退回 dt.files（文件夹在这条路只是空壳，无从识别）
     if (!dirs.length && !files.length && dt.files?.length) files.push(...Array.from(dt.files))
     if (dirs.length) await locateDirs(dirs)
-    if (files.length) await uploadFiles(files)
+    if (files.length) await handleFiles(files)
   }
 
   onMounted(() => {

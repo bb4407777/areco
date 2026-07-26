@@ -735,6 +735,65 @@ export class ApiControllers {
     ok(ctx, { paths: found.slice(0, 8) })
   }
 
+  /**
+   * 拖入散文件 → 定位源路径（与 locate-dir 同一思路）：浏览器拿不到拖放文件的磁盘路径，
+   * 前端报 文件名+字节数；这里用 Spotlight 按名找候选、核验字节数完全一致，命中即回源文件
+   * 绝对路径——零上传零复制，agent 直读源文件。定位不到的前端退回上传副本（见 useFileDrop）。
+   * 与 locate-dir 的差异：核验用 size 精确匹配（File.size 是精确字节数），散文件没有子项可采样。
+   */
+  fileLocateFiles = async (ctx: Context) => {
+    const body = (ctx.request.body ?? {}) as { files?: unknown }
+    const items = (Array.isArray(body.files) ? body.files : [])
+      .map((f) => {
+        const it = (f ?? {}) as { name?: unknown; size?: unknown }
+        return {
+          name: typeof it.name === 'string' ? it.name.trim() : '',
+          size: typeof it.size === 'number' && Number.isFinite(it.size) && it.size >= 0 ? it.size : null,
+        }
+      })
+      .filter((it) => it.name && !/[/\\]/.test(it.name) && it.name.length <= 255)
+      .slice(0, 20)
+    if (!items.length) return fail(ctx, 400, 'bad_request', 'files 须为 [{name,size}] 数组')
+
+    const uploadsRoot = path.join(DATA_DIR, 'uploads') + path.sep
+    const hidden = (p: string) => (p.split('/').some((seg) => seg.startsWith('.')) ? 1 : 0)
+    const results: Array<{ name: string; size: number | null; paths: string[] }> = []
+    for (const it of items) {
+      const nfcName = it.name.normalize('NFC')
+      const queries: string[][] = [
+        ['-name', it.name],
+        [`kMDItemFSName == "${it.name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`],
+      ]
+      let found: string[] = []
+      for (const args of queries) {
+        let lines: string[] = []
+        try {
+          const { stdout } = await execFileAsync('mdfind', args, { timeout: 8000, maxBuffer: 8 * 1024 * 1024 })
+          lines = stdout.split('\n').filter(Boolean)
+        } catch {
+          // Spotlight 不可用/超时：按未命中处理，前端退回上传
+        }
+        found = lines
+          .filter((p) => path.basename(p).normalize('NFC') === nfcName)
+          .filter((p) => {
+            try {
+              const st = fs.statSync(p)
+              return st.isFile() && (it.size === null || st.size === it.size)
+            } catch {
+              return false
+            }
+          })
+        if (found.length) break
+      }
+      // 同 locate-dir：有真源文件就剔除 data/uploads 里的历史副本；全是副本才保留兜底
+      const nonCopies = found.filter((p) => !p.startsWith(uploadsRoot))
+      if (nonCopies.length) found = nonCopies
+      found.sort((a, b) => hidden(a) - hidden(b) || a.length - b.length)
+      results.push({ name: it.name, size: it.size, paths: found.slice(0, 8) })
+    }
+    ok(ctx, { results })
+  }
+
   fileMeta = (ctx: Context) =>
     guard(ctx, () => {
       const p = typeof ctx.query.path === 'string' ? ctx.query.path : ''

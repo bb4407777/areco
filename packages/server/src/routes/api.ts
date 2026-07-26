@@ -52,6 +52,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.get('/files/raw', c.fileRaw)
   router.post('/files/upload', c.fileUpload)
   router.post('/files/locate-dir', c.fileLocateDir)
+  router.post('/files/locate-files', c.fileLocateFiles)
 
   // 项目协作（Phase 6：项目 = 人 + 活会话，@mention 投递终端，消息 SoT 在项目消息库）
   router.get('/rooms', rc.list)
