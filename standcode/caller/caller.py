@@ -132,6 +132,12 @@ MSG_READ_FAIL_LIMIT = int(_conf_float("STANDCODE_MSG_READ_FAIL_LIMIT", None, 10)
 BOOT_WAIT_SEC = _conf_float("STANDCODE_BOOT_WAIT", "boot_wait_sec", 1.0)
 MERGE_WAIT_SEC = _conf_float("STANDCODE_MERGE_WAIT", "merge_wait_sec", 1.5)
 POLL_INTERVAL_SEC = _conf_float("STANDCODE_POLL_INTERVAL", "poll_interval_sec", 0.5)
+# 红绿灯三常量（2026-07-26 poll 接入 areco trafficState）：
+# STATE_PROBE_SEC 探针节流；STUCK_CONFIRM_HITS 连续 N 个探针周期 needs-user 才判卡死
+# （滤瞬时黄灯）；SETTLE_MAX_SEC 已有回复但灯一直 working 的强制定稿上限（灯坏死兜底）。
+STATE_PROBE_SEC = _conf_float("STANDCODE_STATE_PROBE", "state_probe_sec", 5)
+STUCK_CONFIRM_HITS = int(_conf_float("STANDCODE_STUCK_HITS", "stuck_confirm_hits", 2))
+SETTLE_MAX_SEC = _conf_float("STANDCODE_SETTLE_MAX", "settle_max_sec", 1800)
 
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
@@ -1575,12 +1581,20 @@ class Caller:
             task_id/role/template: 仅用于审计日志（log_audit），由上层 dispatch 结果透传；
                 缺省空串——审计仍写，只是 task_id 一列留空。
 
+        红绿灯（2026-07-26 接入 areco trafficState，微信「汇报不准/卡死没人管」两症同治）:
+            · 有回复 ≠ 干完了：Stand 先应一句「收到」再干十分钟，旧逻辑合并窗一过就把
+              这句当最终结果。现在定稿前看灯——working = 还在干，继续等并入后续回复；
+              conclusion/idle/exited/无灯可看才定稿（SETTLE_MAX_SEC 兜底灯坏死）。
+            · stuck：trafficState=needs-user（终端内权限框/信任页/选择框）连续
+              STUCK_CONFIRM_HITS 个探针周期 → 返回 status='stuck' 带尾屏 last_line。
+              timeout=0 无限等 + 卡选项曾是致命组合：黄灯亮着、等待者永远傻等。
+
         返回:
             {
                 "session_id": str,
                 "room_id": str | None,
-                "status": "completed" | "timeout" | "error",
-                "result_text": str,         # Stand 回复合并文本（completed 才有）
+                "status": "completed" | "stuck" | "lost" | "timeout" | "error",
+                "result_text": str,         # Stand 回复合并文本（completed/stuck 才有，stuck 为部分结果）
                 "stand_replies": [...],     # 仅 Stand 的回复（排除 Hermes/用户）
                 "elapsed": float,           # 耗时（秒）
                 "completed_at": str | None, # ISO 完成时间
@@ -1596,6 +1610,10 @@ class Caller:
         last_id = after_id
         stand_replies: list[dict] = []
         last_status_check = 0.0
+        needs_user_hits = 0
+        sess_info: dict | None = None
+        first_reply_at = 0.0
+        last_reply_at = 0.0
 
         def _is_my_stand(sender: str) -> bool:
             """这条消息算不算「我派的那个 Stand 的回复」"""
@@ -1631,93 +1649,159 @@ class Caller:
                 last_id = max(last_id, msg.get("id", 0))
                 if _is_my_stand(msg.get("from_agent", "")):
                     stand_replies.append(msg)
+                    last_reply_at = time.time()
+                    if not first_reply_at:
+                        first_reply_at = time.time()
 
+            # 2) 会话状态探针（节流 STATE_PROBE_SEC，一次 API 供 stuck/lost/settle 三判共用）
+            traffic: str | None = None
+            if stand_session_id:
+                if time.time() - last_status_check > STATE_PROBE_SEC:
+                    last_status_check = time.time()
+                    sess_info = self._session_info(stand_session_id)
+                traffic = (sess_info or {}).get("trafficState")
+
+                # 2a) stuck：needs-user（终端内权限框/选择框/信任页，红绿灯黄灯）连续
+                #     STUCK_CONFIRM_HITS 个探针周期 → 判卡死返回，不再无限傻等。
+                #     单次命中不算：注入回显/瞬时 UI 会闪一下黄灯。
+                if traffic == "needs-user":
+                    needs_user_hits += 1
+                    if needs_user_hits >= STUCK_CONFIRM_HITS:
+                        elapsed = round(time.time() - start_time, 2)
+                        partial = "\n\n".join(
+                            m.get("body", "") for m in stand_replies if m.get("body")
+                        ).strip()
+                        last_line = (sess_info or {}).get("lastLine") or ""
+                        logger.warning(
+                            "Stand 卡在交互选项: session=%s stand=%s last_line=%r",
+                            session_id, stand_session_id, last_line[:120],
+                        )
+                        log_audit("poll_stuck", {
+                            "task_id": task_id, "role": role, "template": template,
+                            "blocked": False, "session_id": session_id,
+                            "room_id": room_id, "stand_session_id": stand_session_id,
+                            "elapsed": elapsed, "last_line": last_line[:200],
+                        })
+                        return {
+                            "session_id": session_id,
+                            "room_id": room_id,
+                            "status": "stuck",
+                            "result_text": partial,
+                            "stand_replies": stand_replies,
+                            "elapsed": elapsed,
+                            "completed_at": None,
+                            "messages_count": last_id,
+                            "stuck_last_line": last_line,
+                            "error": (
+                                f"Stand 卡在交互选项等人工确认（needs-user，尾屏：{last_line[:120]}）——"
+                                f"去 areco 看板点开会话 {stand_session_id[:8]} 处理"
+                            ),
+                        }
+                else:
+                    needs_user_hits = 0
+
+                # 2b) lost：两路信号（建议 4a·会话可靠性）——
+                #     (a) areco 会话 status==exited：主信号（但已有回复时不算失联，
+                #         干完活正常退出属收尾，走 settle）；
+                #     (b) 心跳文件过期：辅信号，仅 Stand 宿主写了心跳才有意义。
+                if not stand_replies:
+                    lost_reason: str | None = None
+                    ses = (sess_info or {}).get("status")
+                    hb = heartbeat_stale(stand_session_id)  # None=无文件，True=过期，False=新鲜
+                    if ses == "exited":
+                        lost_reason = f"session_exited（areco 报 {stand_session_id}=exited）"
+                    elif hb is True:
+                        lost_reason = (
+                            f"heartbeat_stale（{stand_session_id}.hb 超过 "
+                            f"{HEARTBEAT_STALE_SEC:.0f}s 未更新）"
+                        )
+                    if lost_reason:
+                        elapsed = round(time.time() - start_time, 2)
+                        logger.warning("Stand 失联: session=%s stand=%s reason=%s",
+                                       session_id, stand_session_id, lost_reason)
+                        log_audit("poll_lost", {
+                            "task_id": task_id,
+                            "role": role,
+                            "template": template,
+                            "blocked": False,
+                            "session_id": session_id,
+                            "room_id": room_id,
+                            "stand_session_id": stand_session_id,
+                            "elapsed": elapsed,
+                            "lost_reason": lost_reason,
+                        })
+                        return {
+                            "session_id": session_id,
+                            "room_id": room_id,
+                            "status": "lost",
+                            "result_text": "",
+                            "stand_replies": [],
+                            "elapsed": elapsed,
+                            "completed_at": None,
+                            "messages_count": last_id,
+                            "lost_reason": lost_reason,
+                            "error": f"Stand 失联：{lost_reason}",
+                        }
+
+            # 3) 定稿判定：有回复 ≠ 干完了（「先应一句收到再干十分钟」曾被截成最终结果）。
+            #    读得到红绿灯时，working = 还在干 → 继续等并入后续回复；
+            #    conclusion/idle/exited/读不到灯 → 静默 MERGE_WAIT_SEC 后定稿（原合并窗口径）；
+            #    灯坏死兜底：首条回复起 SETTLE_MAX_SEC 仍 working，强制定稿（记 settle_forced）。
             if stand_replies:
-                # 收到首条 Stand 回复后再等一小段，合并可能的后续增量
-                time.sleep(MERGE_WAIT_SEC)
-                try:
-                    tail = self.get_messages(session_id, after_id=last_id)
-                    for msg in tail:
-                        last_id = max(last_id, msg.get("id", 0))
-                        if _is_my_stand(msg.get("from_agent", "")):
-                            stand_replies.append(msg)
-                except Exception:
-                    pass
-
-                result_text = "\n\n".join(
-                    m.get("body", "") for m in stand_replies if m.get("body")
-                ).strip()
-                elapsed = round(time.time() - start_time, 2)
-                logger.info(
-                    "轮询完成: session=%s %d 条 Stand 回复（耗时 %.1fs）",
-                    session_id, len(stand_replies), elapsed,
-                )
-                log_audit("poll_completed", {
-                    "task_id": task_id,
-                    "role": role,
-                    "template": template,
-                    "blocked": False,
-                    "session_id": session_id,
-                    "room_id": room_id,
-                    "elapsed": elapsed,
-                    "messages_count": last_id,
-                })
-                return {
-                    "session_id": session_id,
-                    "room_id": room_id,
-                    "status": "completed",
-                    "result_text": result_text,
-                    "stand_replies": stand_replies,
-                    "elapsed": elapsed,
-                    "completed_at": _now_iso(),
-                    "messages_count": last_id,
-                    "error": None,
-                }
-
-            # 2) 还没收到回复 —— best-effort 判定是否「lost」（Stand 失联）
-            #    两路信号（建议 4a·会话可靠性）：
-            #    (a) areco 会话状态 == exited：主信号、真实（直查 areco /api/sessions）。
-            #    (b) 心跳文件过期（>15s 未更新）：辅信号。仅当 Stand 宿主写了心跳才有意义；
-            #        无心跳文件（None）不参与判定——Caller 不自写心跳（假信号，见 _HeartbeatWriter）。
-            #    命中任一 → status='lost'，区别于普通 error/timeout，便于上层有针对性地重派发。
-            if stand_session_id and time.time() - last_status_check > 10:
-                last_status_check = time.time()
-                lost_reason: str | None = None
-                ses = self._session_status(stand_session_id)
-                hb = heartbeat_stale(stand_session_id)  # None=无文件，True=过期，False=新鲜
-                if ses == "exited":
-                    lost_reason = f"session_exited（areco 报 {stand_session_id}=exited）"
-                elif hb is True:
-                    lost_reason = (
-                        f"heartbeat_stale（{stand_session_id}.hb 超过 "
-                        f"{HEARTBEAT_STALE_SEC:.0f}s 未更新）"
-                    )
-                if lost_reason:
+                settle = False
+                settle_forced = False
+                if stand_session_id and traffic == "working":
+                    if time.time() - first_reply_at >= SETTLE_MAX_SEC:
+                        settle = settle_forced = True
+                        logger.warning(
+                            "定稿兜底: session=%s 首条回复已 %.0fs 灯仍 working，强制定稿",
+                            session_id, time.time() - first_reply_at,
+                        )
+                elif stand_session_id and traffic == "needs-user":
+                    pass  # 黄灯累计期：等 stuck 判定或灯变绿，不定稿
+                else:
+                    # conclusion/idle/exited/无灯可读（老调用方没传 stand_session_id）
+                    settle = time.time() - last_reply_at >= MERGE_WAIT_SEC
+                if settle:
+                    try:
+                        tail = self.get_messages(session_id, after_id=last_id)
+                        for msg in tail:
+                            last_id = max(last_id, msg.get("id", 0))
+                            if _is_my_stand(msg.get("from_agent", "")):
+                                stand_replies.append(msg)
+                    except Exception:
+                        pass
+                    result_text = "\n\n".join(
+                        m.get("body", "") for m in stand_replies if m.get("body")
+                    ).strip()
                     elapsed = round(time.time() - start_time, 2)
-                    logger.warning("Stand 失联: session=%s stand=%s reason=%s",
-                                   session_id, stand_session_id, lost_reason)
-                    log_audit("poll_lost", {
+                    logger.info(
+                        "轮询完成: session=%s %d 条 Stand 回复（耗时 %.1fs%s）",
+                        session_id, len(stand_replies), elapsed,
+                        "，settle_forced" if settle_forced else "",
+                    )
+                    log_audit("poll_completed", {
                         "task_id": task_id,
                         "role": role,
                         "template": template,
                         "blocked": False,
                         "session_id": session_id,
                         "room_id": room_id,
-                        "stand_session_id": stand_session_id,
                         "elapsed": elapsed,
-                        "lost_reason": lost_reason,
+                        "messages_count": last_id,
+                        "settle_forced": settle_forced,
                     })
                     return {
                         "session_id": session_id,
                         "room_id": room_id,
-                        "status": "lost",
-                        "result_text": "",
-                        "stand_replies": [],
+                        "status": "completed",
+                        "result_text": result_text,
+                        "stand_replies": stand_replies,
                         "elapsed": elapsed,
-                        "completed_at": None,
+                        "completed_at": _now_iso(),
                         "messages_count": last_id,
-                        "lost_reason": lost_reason,
-                        "error": f"Stand 失联：{lost_reason}",
+                        "settle_forced": settle_forced or None,
+                        "error": None,
                     }
 
             time.sleep(poll_interval)
@@ -1746,20 +1830,28 @@ class Caller:
             "error": f"轮询超时（{timeout}s）",
         }
 
-    def _session_status(self, session_id: str) -> str | None:
-        """best-effort 查 areco 会话状态（'running'/'exited'/...）。失败或找不到返回 None。
+    def _session_info(self, session_id: str) -> dict | None:
+        """best-effort 查 areco 会话对象（status/trafficState/lastLine…）。失败返回 None。
 
         走 GET /api/sessions 列表线性匹配；只读，不改 areco 服务端。
+        trafficState 是 areco 红绿灯（working/needs-user/conclusion/idle/exited），
+        needs-user 由 transcript 尾消息 + 影子终端尾屏对话框检测双路判出——poll 的
+        stuck/定稿判定都吃它，服务端已有的能力不重造。
         """
         try:
             data = self._api_get("/sessions")
             sessions = data if isinstance(data, list) else data.get("sessions", [])
             for s in sessions:
                 if s.get("id") == session_id:
-                    return s.get("status")
+                    return s
         except Exception:
             return None
         return None
+
+    def _session_status(self, session_id: str) -> str | None:
+        """[兼容薄壳] 只要 status 字段时用；新代码用 _session_info。"""
+        info = self._session_info(session_id)
+        return info.get("status") if info else None
 
     # ── 工作区隔离（建议 4b）────────────────────────────────────
 
