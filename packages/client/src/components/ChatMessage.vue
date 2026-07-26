@@ -8,11 +8,20 @@ import type { TranscriptMessage } from '../../../shared/protocol'
 import { copyPlainText } from '../utils/clipboard'
 import { extractFileLinks, iconFor, type FileLink } from '../utils/filelinks'
 import { fmtFullTime } from '../utils/format'
+import { isTaskNotification, parseTaskNotification } from '../utils/notify'
 import { useUiStore } from '../stores/ui'
 
 const props = defineProps<{ message: TranscriptMessage; agentLabel?: string }>()
 const emit = defineEmits<{ preview: [path: string] }>()
 const ui = useUiStore()
+
+// 任务通知兜底归类：服务端旧版把 <task-notification> 合成行当 text 段（解析层已改产 notice，
+// 待重启生效），前端按内容再归一次——重启前立即生效，重启后此分支自然空转
+const parts = computed(() =>
+  props.message.parts.map((p) =>
+    p.kind === 'text' && isTaskNotification(p.text) ? { kind: 'notice' as const, text: p.text } : p
+  )
+)
 
 // 复制回复：双通道实现在 utils/clipboard（GroupChatView 项目消息同用）
 const copied = ref(false)
@@ -40,7 +49,7 @@ async function copyReply() {
 
 // 设置开关：思考/工具调用/工具结果默认全关，勾选才显示；过滤后无可见段则整条不渲染
 const visibleParts = computed(() =>
-  props.message.parts.filter((p) => {
+  parts.value.filter((p) => {
     if (p.kind === 'thinking') return ui.showThinking
     if (p.kind === 'tool_use') return ui.showToolUse
     if (p.kind === 'tool_result') return ui.showToolResult
@@ -48,10 +57,13 @@ const visibleParts = computed(() =>
   }),
 )
 
+// notice 段若是任务通知：折叠块呈现（<summary> 做标题、<result> 做正文），免得整墙 XML 糊在流里
+const notifs = computed(() => visibleParts.value.map((p) => (p.kind === 'notice' ? parseTaskNotification(p.text) : null)))
+
 // 右侧只放真人指令：role=user 且带 text 段才算用户泡泡；tool_result/notice（子 agent 回报、
-// cron 触发等合成 user 消息）一律归左侧（2026-07-23 维护者定：只有用户命令消息放用户侧）
+// cron 触发、Claude 任务通知等合成 user 消息）一律归左侧（2026-07-23 维护者定：只有用户命令消息放用户侧）
 const displayRole = computed(() =>
-  props.message.role === 'user' && props.message.parts.some((part) => part.kind === 'text')
+  props.message.role === 'user' && parts.value.some((part) => part.kind === 'text')
     ? 'user'
     : 'assistant'
 )
@@ -105,6 +117,11 @@ function render(text: string): string {
         <template v-for="(part, i) in visibleParts" :key="i">
           <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
           <div v-if="part.kind === 'text'" class="md" v-html="render(part.text)" />
+          <details v-else-if="part.kind === 'notice' && notifs[i]" class="fold notify">
+            <summary>📨 {{ notifs[i]!.summary }}</summary>
+            <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
+            <div class="md fold-md" v-html="render(notifs[i]!.body)" />
+          </details>
           <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
           <div v-else-if="part.kind === 'notice'" class="md notice" v-html="render(part.text)" />
           <details v-else-if="part.kind === 'thinking'" class="fold thinking">
@@ -254,6 +271,14 @@ function render(text: string): string {
 }
 .fold.thinking summary {
   color: var(--thinking);
+}
+/* 折叠块里的 markdown 正文（任务通知 <result>）：对齐 fold pre 的内边距与分隔线 */
+.fold .fold-md {
+  padding: 0 9px 7px;
+  border-top: 1px solid var(--fold-border);
+  font-size: 12.5px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 .fold.err {
   border-color: var(--danger);

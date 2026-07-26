@@ -9,11 +9,13 @@ import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore, type SessionViewMode } from '../stores/ui'
 import { chatCapable, statusTagText, templateLabel, trafficColor } from '../utils/format'
+import { isTaskNotification } from '../utils/notify'
 import ArtifactsBar from '../components/ArtifactsBar.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import FilePreview from '../components/FilePreview.vue'
 import MobileKeyBar from '../components/MobileKeyBar.vue'
 import PromptBar from '../components/PromptBar.vue'
+import ThinkingStream from '../components/ThinkingStream.vue'
 import TypingIndicator from '../components/TypingIndicator.vue'
 import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
@@ -202,6 +204,36 @@ const lightColor = computed(() =>
     : '#555'
 )
 
+// 本轮思考串联：最后一条真人指令之后的所有 thinking 段。任务通知等合成 user 行不算指令边界
+//（服务端解析已归 notice；服务端重启生效前仍是 text 段，按内容再排除一次）。开了「显示思考过程」
+// 且 agent 干活时喂给尾部打字机气泡——数据按步落盘，打字机匀速吐字补出连续体感（2026-07-26 维护者定）
+const liveThinking = computed(() => {
+  if (!working.value || !ui.showThinking) return ''
+  const list = messages.value
+  let from = 0
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]
+    if (m.role === 'user' && m.parts.some((p) => p.kind === 'text' && !isTaskNotification(p.text))) {
+      from = i + 1
+      break
+    }
+  }
+  const chunks: string[] = []
+  for (let i = from; i < list.length; i++) {
+    for (const p of list[i].parts) if (p.kind === 'thinking') chunks.push(p.text)
+  }
+  return chunks.join('\n\n')
+})
+// 思考气泡定高，「出现」是它唯一一次高度跳变：贴底则入镜，否则对账「回到最新」按钮
+watch(() => !!liveThinking.value, async (has) => {
+  if (!has) return
+  const el = scroller.value
+  const wasNear = !el || el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
+  await nextTick()
+  if (wasNear) scrollToBottom()
+  else onScroll()
+})
+
 async function poll() {
   const gen = sessionGen
   if (pollingGen === gen || document.visibilityState !== 'visible') return
@@ -343,7 +375,8 @@ onBeforeUnmount(() => {
           />
           <div v-if="messages.length" class="stream-tail" />
         </template>
-        <TypingIndicator v-if="working && !loading" class="stream-typing" label="正在输入中…" />
+        <ThinkingStream v-if="working && !loading && liveThinking" class="stream-typing" :text="liveThinking" />
+        <TypingIndicator v-else-if="working && !loading" class="stream-typing" label="正在输入中…" />
       </div>
       <Transition name="jump">
         <button v-if="showJump" type="button" class="jump-latest" @click="jumpToLatest">↓ 回到最新</button>

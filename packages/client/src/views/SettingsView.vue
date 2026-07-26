@@ -481,7 +481,7 @@ function clearLog() {
       <div class="pref-row">
         <div>
           <div class="pref-label">显示思考过程</div>
-          <div class="pref-hint">默认关闭，勾选后才展开 agent 的思考块</div>
+          <div class="pref-hint">默认关闭，勾选后才展开思考块；运行中最新思考以打字机实时滚动</div>
         </div>
         <n-switch :value="ui.showThinking" @update:value="ui.setShowThinking" />
       </div>

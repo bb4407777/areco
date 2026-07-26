@@ -49,7 +49,13 @@ export function parseTranscriptLine(raw: string): TranscriptMessage | null {
   const parts: TranscriptPart[] = []
 
   if (typeof content === 'string') {
-    if (content.trim()) parts.push({ kind: 'text', text: content.slice(0, MAX_PART_TEXT) })
+    if (content.trim()) {
+      // Claude 注入的后台子任务完成通知是合成 user 行（字符串正文、isMeta 都不标），不是真人指令：
+      // 归 notice 段 → 前端按段类型归 agent 侧（2026-07-23「只有用户命令消息放用户侧」同口径）。
+      // traffic 只看 text 段，通知到达不打断 working——与 agent-transcript 合成消息同语义
+      const notice = type === 'user' && content.trimStart().startsWith('<task-notification>')
+      parts.push({ kind: notice ? 'notice' : 'text', text: content.slice(0, MAX_PART_TEXT) })
+    }
   } else if (Array.isArray(content)) {
     for (const item of content) {
       const o = item as Record<string, unknown>
