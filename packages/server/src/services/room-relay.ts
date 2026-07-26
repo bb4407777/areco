@@ -3,9 +3,10 @@
 // 2) mention 投递：@成员/@all → onceQuiet 注入目标会话终端（注入模板带来源+回执命令）；
 // 3) 防环：人发言清零链路深度；agent 消息触发投递时深度+1，≥MAX_DEPTH 只落库不投递。
 // 页面发消息走 postMessage（落库 + 立即广播 + 投递），不等轮询；轮询只负责"外部进来的"消息。
-// 房间调度（2026-07-22 确定性设计，不上 LLM selector）：消息可见性与行动许可拆开——
-// 无 @ 的人类发言全体收到（message_targets 逐行落账），但 serial 模式一次只放行一位成员实施，
-// 回复/超时/取消驱动轮转；parallel 模式保持现状全员即注。底账在 projects.db 的 dispatch/delivery 表。
+// 房间调度（2026-07-22 确定性设计，不上 LLM selector；2026-07-26 砍掉房间级 parallel，一律串行）：
+// 消息可见性与行动许可拆开——无 @ 的人类发言全体收到（message_targets 逐行落账），但一次只放行
+// 一位成员实施，回复/超时/取消驱动轮转。@不同成员派不同任务=各自独立 dispatch，天然并行。
+// 底账在 projects.db 的 dispatch/delivery 表。
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -293,7 +294,7 @@ export class RoomRelay {
   }
 
   /** 消息落库后的统一后处理（tick 轮询 / postMessage / captureTick 三路径共用）：
-   *  1) mention 投递（parallel=现状全员即注；serial=只放行当前轮到的成员）；
+   *  1) mention 投递（串行：只放行当前轮到的成员）；
    *  2) 串行推进：本条 from 命中 active serial dispatch 的 current_target → 当前 delivery 落定、放下一位。 */
   private onMessageStored(room: RoomInfo, m: { id: number; from: string; body: string; to?: string; humanRelay?: boolean }) {
     this.deliverMentions(room, m.from, m.body, m.id, m.humanRelay ?? false, m.to)
@@ -306,7 +307,7 @@ export class RoomRelay {
    *  - 人→agent 投递附「共享上下文文件路径 + 最近若干条预览」，agent 进来不再失忆；agent→agent 不附，防膨胀。
    *  - 防环：人发言清零链路深度；agent 互调深度 ≥MAX_DEPTH 时只落库不投递。
    *  - 调度底账（2026-07-22）：message_targets 落真实收件人（广播展开成成员名），
-   *    幂等建 dispatch + deliveries；parallel 全员即注（现状），serial 只放行成员顺序第一位。
+   *    幂等建 dispatch + deliveries；串行只放行成员顺序第一位，回复/超时驱动轮转。
    */
   private deliverMentions(room: RoomInfo, from: string, body: string, currentId: number, humanRelay = false, toField?: string) {
     if (room.archivedAt !== null) return
@@ -353,17 +354,18 @@ export class RoomRelay {
     if (!members.length) return
 
     // 调度底账：真实收件人 + 幂等 dispatch/deliveries。记账失败不阻断投递（消息本身已落库已广播）。
+    // mode 固定 'serial'：房间级并行已砍（2026-07-26），@不同成员派不同任务=各自独立 dispatch，天然并行。
     let dispatch: projectDb.DispatchRow | null = null
     let deliveries: projectDb.DeliveryRow[] = []
     try {
       projectDb.recordMessageTargets(currentId, members.map((m) => m.name))
-      dispatch = projectDb.createDispatch(room.team, currentId, room.dispatchMode, MAX_DEPTH).dispatch
+      dispatch = projectDb.createDispatch(room.team, currentId, 'serial', MAX_DEPTH).dispatch
       deliveries = projectDb.addDeliveries(
         dispatch.id,
         members.map((m) => ({ name: m.name, sessionId: m.sessionId }))
       )
     } catch (err) {
-      log.warn(`项目「${room.name}」调度记账失败，按现状并行投递继续`, err)
+      log.warn(`项目「${room.name}」调度记账失败，全员直接注入兜底`, err)
       dispatch = null
       deliveries = []
     }
@@ -379,35 +381,20 @@ export class RoomRelay {
     }
 
     // serial：只放行成员顺序第一位（current_target），其余 queued——全体收到 ≠ 全体同时实施。
-    // 幂等重入（同一根消息重复处理）时已有放行位则不再注入。
-    if (dispatch && room.dispatchMode === 'serial') {
+    // 幂等重入（同一根消息重复处理，如重启后首轮快进重放）时已有放行位则不再注入。
+    if (dispatch) {
       const busy = deliveries.some((d) => d.status === 'injected' || d.status === 'working')
       if (!busy) this.serialAdvanceNext(room, dispatch.id)
       this.broadcastDispatches(room)
       return
     }
 
-    // parallel：现状 for-loop 全员即注；deliveries 同步记 injected/failed
+    // 记账失败兜底（dispatch 建不出来 = 没有轮转底账可推进）：全员直接注入，投递不能因账务故障丢。
+    // 此路径无 deliveries 可查，重启重放的幂等保护不可用——degraded 但可接受（消息本身已落库）。
     const flat = body.replace(/\s*\r?\n\s*/g, '；')
     for (const m of members) {
-      // 幂等判断必须在注入**之前**。原先顺序是「先 injectToMember，再看 del 是否 queued」，
-      // 于是已经 injected 的投递会被重新注入一次——底账干净（不会重复记账），
-      // 但**成员终端会再收到一遍同样的任务，两个 agent 干同一件事**。
-      // 触发路径：areco 在人类发消息后 3 秒内重启，首轮快进把该消息重放进 onMessageStored。
-      // 串行分支（上方）本来就是先查 busy 再注入，这里对齐它。
-      const del = deliveries.find((d) => d.memberName === m.name)
-      if (dispatch && del && del.status !== 'queued') continue
-      const nonce = this.injectToMember(room, m, from, flat, senderKind, currentId)
-      if (del && del.status === 'queued') {
-        this.tryUpdateDelivery(
-          del.id,
-          nonce
-            ? { status: 'injected', attempt: del.attempt + 1, correlationId: nonce }
-            : { status: 'failed', attempt: del.attempt + 1 }
-        )
-      }
+      this.injectToMember(room, m, from, flat, senderKind, currentId)
     }
-    if (dispatch) this.broadcastDispatches(room)
   }
 
   /** delivery 落账失败只记日志（投递本身已完成，账务不能反过来炸投递链路） */

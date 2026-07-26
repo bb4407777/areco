@@ -49,19 +49,20 @@ function setup(): { rooms: InstanceType<typeof RoomStore>; roomId: string; team:
   return { rooms, roomId: room.id, team: room.team, name }
 }
 
-test('人类无 @ 发言默认投全体在线 agent（不必手打 @all）', () => {
+test('人类无 @ 发言全体收到：串行先放行第一位，回复后轮到下一位', () => {
   const { rooms, roomId, name } = setup()
-  rooms.setDispatchMode(roomId, 'parallel') // 本测验证并行全员即注（项目默认已是 serial）
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(roomId, 'Owner', '大家看下这个报错')
-  assert.ok(sent['sa']?.length, 'A 应收到投递')
-  assert.ok(sent['sb']?.length, 'B 应收到投递')
+  assert.ok(sent['sa']?.length, '成员顺序第一位 A 应先被放行')
+  assert.equal(sent['sb'], undefined, 'B 排队等 A 回复，不同时实施')
   const note = sent['sa'][0]
   assert.match(note, new RegExp(`\\[项目·${name}\\] Owner: 大家看下这个报错`))
   assert.match(note, /共享上下文/, '人→agent 投递应附共享上下文')
   assert.match(note, /context\.md/, '应给出纪要文件路径')
   assert.match(note, /必须执行下面命令/, '应附回执命令')
+  relay.postMessage(roomId, 'A', '我看完了，没问题') // 回复驱动轮转
+  assert.ok(sent['sb']?.length, 'A 回复后 B 被放行，收到同一条根消息')
 })
 
 test('agent 无 @ 发言不广播（防 agent 互调失控）', () => {
@@ -165,7 +166,6 @@ function futureStart(relay: unknown) {
 
 test('外部直写消息正文无 @ 时按 to_agent 列投递（CLI 收件人不再被吞）', () => {
   const { rooms, roomId, team } = setup()
-  rooms.setDispatchMode(roomId, 'parallel')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   futureStart(relay)
@@ -179,7 +179,6 @@ test('外部直写消息正文无 @ 时按 to_agent 列投递（CLI 收件人不
 
 test('外部编排者（非花名册）连续委派不触发互调深度闸；房内成员互调仍计链深', () => {
   const { rooms, roomId, team } = setup()
-  rooms.setDispatchMode(roomId, 'parallel')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   futureStart(relay)
@@ -198,7 +197,6 @@ test('外部编排者（非花名册）连续委派不触发互调深度闸；�
 
 test('初见房间：中继启动前的存量快进不补投，之后的新帖照投', () => {
   const { rooms, roomId, team } = setup()
-  rooms.setDispatchMode(roomId, 'parallel')
   projectDb.send(team, 'Owner', 'all', '@all 启动前的存量消息')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
@@ -289,7 +287,6 @@ test('auto-recall：session→agent 普通讨论（无委派特征）不触发�
 
 test('auto-recall：同一根消息投多个成员只跑一次 recall 子进程（缓存复用）', () => {
   const { rooms, roomId } = setup()
-  rooms.setDispatchMode(roomId, 'parallel') // 并行全员即注下才有一根消息投多成员的场景
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   const stub = stubRecall({
@@ -298,13 +295,14 @@ test('auto-recall：同一根消息投多个成员只跑一次 recall 子进程�
   })
   let n = 0
   try {
-    relay.postMessage(roomId, 'Owner', '全体成员看下这个') // 无 @ → 投全体
+    relay.postMessage(roomId, 'Owner', '全体成员看下这个') // 无 @ → 全体收到，串行先放行 A
+    relay.postMessage(roomId, 'A', '我看完了') // 回复驱动轮转：B 注入内容回取同一根消息
     n = stub.count()
   } finally {
     stub.restore()
   }
-  assert.ok(sent['sa']?.length && sent['sb']?.length, '两个成员都应收到')
-  assert.match(sent['sb'][0], /【auto-recall 命中 1：m3】/, '第二成员复用缓存块')
+  assert.ok(sent['sa']?.length && sent['sb']?.length, '两个成员先后都应收到')
+  assert.match(sent['sb'][0], /【auto-recall 命中 1：m3】/, '轮到的第二成员复用缓存块')
   assert.equal(n, 1, '同一 root message 只起一次子进程')
 })
 
@@ -348,7 +346,6 @@ test('auto-recall：recall 无命中（空数组）不注入任何内容', () =>
 
 test('human_relay：白名单 agent 转述清零链深并默认投全体；链深满时转述可解锁', () => {
   const { rooms, roomId } = setup()
-  rooms.setDispatchMode(roomId, 'parallel')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {}, { humanRelayAgents: ['Hermes'] })
   // agent 互发把链深推到 MAX_DEPTH=3：第 3 条起只落库不投递
@@ -357,19 +354,18 @@ test('human_relay：白名单 agent 转述清零链深并默认投全体；链�
   relay.postMessage(roomId, 'A', '@B 深度三（应被拦）')
   const blockedAt = sent['sb']?.length ?? 0
   assert.equal(blockedAt, 2, '第 3 条应被防环闸拦下')
-  // Hermes 转述维护者原话：无 @ 也默认投全体，且清零链深
+  // Hermes 转述维护者原话：无 @ 也默认投全体（全体收到；串行先放行第一位 A），且清零链深
   relay.postMessage(roomId, 'Hermes', '收到请回复', { humanRelay: true })
-  assert.ok((sent['sa']?.length ?? 0) >= 1, '转述后 A 收到（默认投全体）')
-  assert.ok((sent['sb']?.length ?? 0) > blockedAt, '转述后 B 收到')
-  // 清零生效：agent 消息恢复可投
-  const beforeUnlock = sent['sb']!.length
+  assert.ok((sent['sa']?.length ?? 0) >= 1, '转述后 A 先收到（串行放行第一位）')
+  assert.equal(sent['sb']!.length, blockedAt, 'B 在转述单里排队，等 A 回复')
+  // 清零生效：A 的 @B 委派投出（+1）；同时 A 发言驱动转述单轮转，B 收到转述根消息（+1）
   relay.postMessage(roomId, 'A', '@B 解锁后')
-  assert.equal(sent['sb']!.length, beforeUnlock + 1, '链深清零后 agent 投递恢复')
+  assert.equal(sent['sb']!.length, blockedAt + 2, '链深清零后委派恢复 + 转述轮到 B')
+  assert.ok(sent['sb']!.some((x) => /收到请回复/.test(x)), 'B 轮到时收到转述根消息')
 })
 
 test('human_relay：名单外 agent 打标无效——不广播、不清零、照常计深', () => {
   const { rooms, roomId } = setup()
-  rooms.setDispatchMode(roomId, 'parallel')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {}, { humanRelayAgents: ['Hermes'] })
   // 名单外成员 A 打标 + 无 @：若被误判人类会广播全体——正确行为是按 agent 处理不投递
@@ -386,7 +382,6 @@ test('项目房间驻场简报：每个进程代际只带一次 PROJECT.md 指�
   const rooms = new RoomStore('Owner')
   const proj = rooms.create(`areco-proj${++seq}`, 'project', '/tmp/proj-root')
   rooms.addMember(proj.id, { name: 'A', kind: 'session', sessionId: 'sa' })
-  rooms.setDispatchMode(proj.id, 'parallel')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(proj.id, 'Owner', '先熟悉一下环境')
@@ -400,7 +395,6 @@ test('项目房间驻场简报：每个进程代际只带一次 PROJECT.md 指�
   const task = rooms.create(`areco-task${++seq}`)
   rooms.setRootPath(task.id, '/tmp/task-root')
   rooms.addMember(task.id, { name: 'B', kind: 'session', sessionId: 'sb' })
-  rooms.setDispatchMode(task.id, 'parallel')
   relay.postMessage(task.id, 'Owner', '看下报错')
   assert.doesNotMatch(sent['sb'][0], /驻场成员/, '任务房不带驻场简报')
 })

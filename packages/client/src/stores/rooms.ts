@@ -1,7 +1,7 @@
 // 群聊房间状态：房间列表 + 各房消息缓存。实时性靠 WS（rooms 全量 / roomMessage 增量），
 // REST 只用于首载与 CRUD；mutations 后等服务端 broadcastRooms 回流，不本地改名单。
 import { defineStore } from 'pinia'
-import type { DispatchMode, RoomDispatchInfo, RoomInfo, RoomKind, RoomMessage, ServerMsg } from '../../../shared/protocol'
+import type { RoomDispatchInfo, RoomInfo, RoomKind, RoomMessage, ServerMsg } from '../../../shared/protocol'
 import { api } from '../api'
 
 interface RoomsPayload {
@@ -128,9 +128,6 @@ export const useRoomsStore = defineStore('rooms', {
     },
     async loadDispatches(roomId: string) {
       this.dispatches[roomId] = await api.get<RoomDispatchInfo[]>(`/api/rooms/${roomId}/dispatches`)
-    },
-    async setMode(roomId: string, mode: DispatchMode) {
-      return api.post<RoomInfo>(`/api/rooms/${roomId}/mode`, { mode })
     },
     async setRoot(roomId: string, rootPath: string | null) {
       return api.post<RoomInfo>(`/api/rooms/${roomId}/root`, { rootPath })

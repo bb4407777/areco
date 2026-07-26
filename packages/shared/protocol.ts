@@ -311,13 +311,11 @@ export interface RoomInfo {
   name: string
   /** 消息库的 team 段（room-<id>，与项目 id 对应，改名不受影响） */
   team: string
-  /** 旧 rooms.json 无此字段，读取时补 'task'（迁移方式同 dispatchMode） */
+  /** 旧 rooms.json 无此字段，读取时补 'task'（迁移方式同 archivedAt） */
   kind: RoomKind
   createdAt: number
   /** 归档时间；null = 当前项目。归档项目保留成员快照和消息，只读且不参与消息投递。 */
   archivedAt: number | null
-  /** 房间调度模式（2026-07-22）：parallel=全员即注；serial=串行轮转一次只放行一位成员（默认，旧 rooms.json 读取时补此值） */
-  dispatchMode: 'parallel' | 'serial'
   /** 项目/案件文件根目录（可空）：Files 只读浏览的唯一根，不从成员 cwd 推断。 */
   rootPath: string | null
   /** 最后一条消息时间（ISO，服务端列表时从 projects.db 注入；无消息缺省）。前端按它排序房间，不回写 rooms.json */
@@ -355,6 +353,8 @@ export interface ProjectFileList {
 
 // ---- 房间调度（确定性轮转，2026-07-22）：底账在 projects.db 的 dispatch/delivery 表 ----
 
+/** 房间级并行模式已砍（2026-07-26 维护者定：@不同成员派不同任务天然并行，房间一律串行轮转）。
+ *  类型保留是给 dispatch 底账历史行显示用（旧行存有 'parallel'/'claim'），新单一律 'serial'。 */
 export type DispatchMode = 'parallel' | 'serial'
 export type DispatchState = 'active' | 'done' | 'cancelled'
 export type DeliveryStatus = 'queued' | 'injected' | 'working' | 'replied' | 'done' | 'timeout' | 'cancelled' | 'failed'

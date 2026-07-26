@@ -233,15 +233,6 @@ export class RoomControllers {
       ok(ctx, projectDb.listDispatches(room.team))
     })
 
-  /** 切调度模式：{mode: 'parallel'|'serial'}——parallel=全员即注；serial=串行轮转 */
-  setMode = (ctx: Context) =>
-    guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { mode?: 'parallel' | 'serial' }
-      const room = this.rooms.setDispatchMode(ctx.params.id, body.mode as 'parallel' | 'serial')
-      this.relay.broadcastRooms()
-      ok(ctx, room)
-    })
-
   /** 显式绑定项目/案件根目录，不从任何成员 cwd 推断。 */
   setRoot = (ctx: Context) =>
     guard(ctx, () => {

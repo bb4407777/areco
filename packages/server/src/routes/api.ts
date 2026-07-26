@@ -67,7 +67,6 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.post('/rooms/:id/messages', rc.send)
   // 房间调度（确定性轮转）：列表 / 切模式 / 取消
   router.get('/rooms/:id/dispatches', rc.listDispatches)
-  router.post('/rooms/:id/mode', rc.setMode)
   router.post('/rooms/:id/root', rc.setRoot)
   router.get('/rooms/:id/files', rc.files)
   router.post('/rooms/:id/dispatches/:dispatchId/cancel', rc.cancelDispatch)

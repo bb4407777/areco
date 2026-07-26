@@ -207,21 +207,9 @@ const showDispatch = ref(false)
 const dispatchList = computed(() => (activeId.value ? (rooms.dispatches[activeId.value] ?? []) : []))
 const activeSerial = computed(() => dispatchList.value.find((d) => d.mode === 'serial' && d.state === 'active'))
 
+// 房间级并行模式已砍（2026-07-26）：房间一律串行轮转，@不同成员派不同任务天然并行。
+// MODE_LABEL 保留给调度列表的历史行显示（旧 dispatch 底账里存有 parallel）。
 const MODE_LABEL: Record<DispatchMode, string> = { parallel: '并行讨论', serial: '串行轮转' }
-const MODE_TOAST: Record<DispatchMode, string> = {
-  parallel: '已切到并行讨论：全体同时收到',
-  serial: '已切到串行轮转：一次只放行一位 agent',
-}
-
-async function setDispatchMode(mode: DispatchMode) {
-  if (!room.value || room.value.dispatchMode === mode) return
-  try {
-    await rooms.setMode(room.value.id, mode)
-    message.success(MODE_TOAST[mode])
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  }
-}
 
 async function cancelDispatch(dispatchId: number) {
   if (!room.value) return
@@ -639,24 +627,10 @@ onMounted(async () => {
 
         <div v-if="!viewingArchived" class="dispatch">
           <div class="dispatch-bar">
-            <button class="dispatch-toggle" @click="showDispatch = !showDispatch">
-              调度 · {{ MODE_LABEL[room.dispatchMode] }} {{ showDispatch ? '▾' : '▸' }}
+            <button class="dispatch-toggle" title="串行轮转：一次只放行一位 agent，回复/超时自动轮到下一位；@不同成员派不同任务则各自独立轮转" @click="showDispatch = !showDispatch">
+              调度 · 串行轮转 {{ showDispatch ? '▾' : '▸' }}
             </button>
             <span v-if="activeSerial?.currentTarget" class="dispatch-cur">轮到 {{ activeSerial.currentTarget }}</span>
-            <template v-if="showDispatch">
-              <button
-                class="mode-btn"
-                :class="{ on: room.dispatchMode === 'parallel' }"
-                title="全体同时收到并实施（现状行为）"
-                @click="setDispatchMode('parallel')"
-              >并行讨论</button>
-              <button
-                class="mode-btn"
-                :class="{ on: room.dispatchMode === 'serial' }"
-                title="一次只放行一位 agent，回复/超时自动轮到下一位"
-                @click="setDispatchMode('serial')"
-              >串行轮转</button>
-            </template>
           </div>
           <div v-if="showDispatch" class="dispatch-list">
             <NEmpty v-if="!dispatchList.length" description="还没有调度记录，发一条消息试试" size="small" class="dispatch-empty" />
@@ -1099,21 +1073,6 @@ onMounted(async () => {
 }
 .dispatch-cur {
   color: var(--accent);
-}
-.mode-btn {
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: 11px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-.mode-btn.on {
-  background: var(--chip-bg);
-  color: var(--accent);
-  border-color: var(--accent);
 }
 .dispatch-list {
   max-height: 180px;

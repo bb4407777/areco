@@ -1,4 +1,4 @@
-// 房间确定性调度（2026-07-22）：serial 串行轮转（首放/回复推进/超时/取消）、幂等建单、parallel 记账回归。
+// 房间确定性调度（2026-07-22；2026-07-26 起串行是唯一模式）：串行轮转（首放/回复推进/超时/取消）、幂等建单。
 // 隔离同 room-relay.test.ts：先于 import 设 ARECO_ROOT 到临时目录，project-db/rooms 落盘都在其下（不污染真库）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -37,7 +37,7 @@ function mockManager(runningIds: string[]): { manager: unknown; sent: Sent } {
 }
 
 let seq = 0
-function setup(mode: 'parallel' | 'serial'): {
+function setup(): {
   rooms: InstanceType<typeof RoomStore>
   roomId: string
   team: string
@@ -48,14 +48,13 @@ function setup(mode: 'parallel' | 'serial'): {
   const room = rooms.create(name)
   rooms.addMember(room.id, { name: 'A', kind: 'session', sessionId: 'sa' })
   rooms.addMember(room.id, { name: 'B', kind: 'session', sessionId: 'sb' })
-  if (mode !== 'serial') rooms.setDispatchMode(room.id, mode) // serial 为默认，parallel 显式切
   return { rooms, roomId: room.id, team: room.team, name }
 }
 
 const tick = (relay: unknown) => (relay as { tick(): void }).tick()
 
 test('serial：人类无 @ 发言只注入第一位成员，另一位 queued，三表记账正确', () => {
-  const { rooms, roomId, team } = setup('serial')
+  const { rooms, roomId, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(roomId, 'Owner', '大家评审一下这个方案')
@@ -84,7 +83,7 @@ test('serial：人类无 @ 发言只注入第一位成员，另一位 queued，�
 })
 
 test('serial：当前放行成员回复后自动放行下一位', () => {
-  const { rooms, roomId, team } = setup('serial')
+  const { rooms, roomId, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(roomId, 'Owner', '大家评审一下这个方案')
@@ -102,7 +101,7 @@ test('serial：当前放行成员回复后自动放行下一位', () => {
 })
 
 test('serial：最后一名成员回复后 dispatch 收单 done', () => {
-  const { rooms, roomId, team } = setup('serial')
+  const { rooms, roomId, team } = setup()
   const { manager } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(roomId, 'Owner', '过一遍')
@@ -118,7 +117,7 @@ test('serial：最后一名成员回复后 dispatch 收单 done', () => {
 })
 
 test('serial：当前成员超时未回复，置 timeout 并自动放下一位', () => {
-  const { rooms, roomId, team } = setup('serial')
+  const { rooms, roomId, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   // 超时时长传 0：deadline = 注入当下，下一个 tick 必过期
   const relay = new RoomRelay(rooms, manager as never, () => {}, { deliveryTimeoutMs: 0 })
@@ -137,7 +136,7 @@ test('serial：当前成员超时未回复，置 timeout 并自动放下一位',
 })
 
 test('serial：cancelDispatch 后剩余 queued 全 cancelled，回复不再注入', () => {
-  const { rooms, roomId, team } = setup('serial')
+  const { rooms, roomId, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(roomId, 'Owner', '先别动')
@@ -158,7 +157,7 @@ test('serial：cancelDispatch 后剩余 queued 全 cancelled，回复不再注�
 })
 
 test('dispatch 幂等：同一 root_message_id 重复建单不产生重复行', () => {
-  const { team } = setup('serial')
+  const { team } = setup()
   const msg = projectDb.send(team, 'Owner', 'all', '幂等测试')
   const members = [
     { name: 'A', sessionId: 'sa' },
@@ -174,25 +173,8 @@ test('dispatch 幂等：同一 root_message_id 重复建单不产生重复行', 
   assert.equal(projectDb.listDispatches(team).length, 1)
 })
 
-test('parallel：全员即注行为不变，deliveries 同步记 injected', () => {
-  const { rooms, roomId, team } = setup('parallel')
-  const { manager, sent } = mockManager(['sa', 'sb'])
-  const relay = new RoomRelay(rooms, manager as never, () => {})
-  relay.postMessage(roomId, 'Owner', '大家一起看')
-
-  assert.ok(sent['sa']?.length && sent['sb']?.length, 'parallel 应全员同时注入')
-  const msg = projectDb.history(team, 1)[0]
-  assert.deepEqual(projectDb.targetsOf(msg.id), ['A', 'B'])
-  const d = projectDb.listDispatches(team)[0]
-  assert.equal(d.mode, 'parallel')
-  assert.equal(d.currentTarget, null, 'parallel 无放行位')
-  const byName = Object.fromEntries(d.deliveries.map((x) => [x.memberName, x]))
-  assert.equal(byName.A.status, 'injected')
-  assert.equal(byName.B.status, 'injected')
-})
-
 test('serial：显式 @ 单个成员只创建谁的 delivery', () => {
-  const { rooms, roomId, team } = setup('serial')
+  const { rooms, roomId, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   relay.postMessage(roomId, 'Owner', '@B 你单独看下')

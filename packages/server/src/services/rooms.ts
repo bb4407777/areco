@@ -85,15 +85,14 @@ export class RoomStore {
         return []
       }
       // 旧 rooms.json 没有 archivedAt：读取时补 null，下一次保存自然完成迁移。
-      // 旧 rooms.json 同样没有 dispatchMode：补 'serial'（当前默认），迁移方式同 archivedAt。
       // rootPath（项目 Files 根）缺省补 null，同上。
       // kind（2026-07-26 项目/任务分家）缺省补 'task'：既有房间全是任务，项目须显式创建。
-      return (parsed as Partial<RoomInfo>[]).map((room) => ({
+      // dispatchMode 已砍（2026-07-26，先例 claim 2026-07-25）：房间一律串行轮转，
+      // 遗留字段在此剥掉，下一次保存自然从 rooms.json 消失。
+      return (parsed as (Partial<RoomInfo> & { dispatchMode?: unknown })[]).map(({ dispatchMode: _legacy, ...room }) => ({
         ...(room as RoomInfo),
         kind: room.kind === 'project' ? 'project' : 'task',
         archivedAt: typeof room.archivedAt === 'number' ? room.archivedAt : null,
-        // claim 调度模式已砍掉（2026-07-25），旧 rooms.json 里残留的 'claim' 视为默认 'serial'
-        dispatchMode: room.dispatchMode === 'parallel' ? 'parallel' : 'serial',
         rootPath: typeof room.rootPath === 'string' && room.rootPath ? room.rootPath : null,
       }))
     } catch (err) {
@@ -160,7 +159,6 @@ export class RoomStore {
       kind,
       createdAt: Date.now(),
       archivedAt: null,
-      dispatchMode: 'serial', // 默认串行轮转（2026-07-22 调转）：一次只放行一位成员
       rootPath,
       members: [{ name: this.humanName, kind: 'human', sessionId: null }],
     }
@@ -198,18 +196,6 @@ export class RoomStore {
 
   private assertActive(room: RoomInfo) {
     if (room.archivedAt !== null) throw new Error(`项目「${room.name}」已归档，只能查看或恢复`)
-  }
-
-  /** 切调度模式：parallel=全员即注；serial=串行轮转一次只放行一位（默认） */
-  setDispatchMode(id: string, mode: 'parallel' | 'serial'): RoomInfo {
-    const room = this.get(id)
-    this.assertActive(room)
-    if (mode !== 'parallel' && mode !== 'serial') throw new Error('调度模式只能是 parallel 或 serial')
-    if (room.dispatchMode !== mode) {
-      room.dispatchMode = mode
-      this.save()
-    }
-    return room
   }
 
   /** 路径校验由 controller 的 ProjectFileService 先完成；这里只持久化 canonical root。 */

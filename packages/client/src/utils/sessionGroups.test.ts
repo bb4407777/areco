@@ -11,7 +11,7 @@ function room(id: string, memberSessionIds: (string | null)[], archived = false)
     team: `room-${id}`,
     createdAt: 0,
     archivedAt: archived ? 1 : null,
-    dispatchMode: 'parallel',
+    kind: 'task',
     members: [
       { name: 'Owner', kind: 'human', sessionId: null },
       ...memberSessionIds.map((sid, i) => ({ name: `a${i}`, kind: 'session' as const, sessionId: sid })),
