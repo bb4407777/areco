@@ -1107,9 +1107,11 @@ class Caller:
         ids: set[str] = set()
         try:
             data = self._api_get("/templates")
-            items = data.get("templates") or data.get("data") or data
-            if isinstance(items, dict):
-                items = items.get("templates", [])
+            # _api_get 可能已把 {ok, data:[...]} 解包成裸 list；两种形状都接
+            if isinstance(data, dict):
+                items = data.get("templates") or data.get("data") or []
+            else:
+                items = data
             for t in items or []:
                 tid = t.get("id") if isinstance(t, dict) else t
                 if tid:
@@ -3809,6 +3811,89 @@ def _cmd_run(args) -> int:
     return 0 if res.get("status") == "completed" else 1
 
 
+def _cmd_go(args) -> int:
+    """go 单命令收口（2026-07-26 P0，弱模型强 harness）：一条命令替代 route→run 组合。
+
+    存在的理由：Hermes（deepseek-v4-flash）每轮 terminal 调用都是一次全量上下文回放，
+    且 background/--brief/--mode 全是模型手填的纪律位——命令越多、flag 越多，弱模型
+    走形概率越高（2026-07-26「300s 超时+催」即 background 漏填）。go 把分诊、组包、
+    派发、等待折进一个进程：模型的 SOP 缩成「跑 go，回一句收到；唤醒后照 stdout 转述」。
+
+    跑法与 run --wait 完全一致：terminal background=true + notify_on_complete=true。
+    进程退出由 gateway 事件唤醒，stdout（头行 JSON + wait 结果简报）随通知回放。
+    内部全复用 _cmd_run 等待者链：state 文件、inbox 落盘、--brief 截断口径一律不变。
+
+    刻意不做的两件事（防越权/防语义漂移）：
+      - 不 cc-send 代发秒回——Hermes 醒着，当轮回复即秒回，代发必出双消息；
+      - 不消化 inbox 积压——digest 是唤醒仪式的独立安全网，折进 go 会在通知丢失时
+        连带丢积压简报。
+    """
+    request = (args.request or "").strip()
+
+    # 0) Gatekeeper 前置快拒：blocked 秒退（不建房、不耗额度），gateway 通知立刻回注。
+    gk = check_should_dispatch(request)
+    if gk.get("category") == "blocked":
+        log_audit("go", {
+            "mode": None, "blocked": True, "category": "blocked",
+            "reason": gk.get("reason", ""), "request_preview": request[:200],
+        })
+        print(json.dumps({
+            "cmd": "go", "status": "blocked", "blocked": True,
+            "error": gk.get("reason", ""), "request_preview": request[:200],
+        }, ensure_ascii=False))
+        return 2
+
+    # 1) 定模式：显式 --mode 改判优先，缺省 route 四格自动判（route 不产 fanout/operator）。
+    if args.mode:
+        mode, plan_only, route_reason = args.mode, bool(args.plan_only), "显式 --mode 改判"
+    else:
+        r = Caller.route_mode(request)
+        mode, plan_only, route_reason = r["mode"], bool(r.get("plan_only")), r.get("reason", "")
+    if mode == "operator":
+        print(json.dumps({
+            "cmd": "go", "status": "not_dispatchable", "mode": "operator",
+            "error": "operator 是 Caller 自持车道——核对白名单后自己跑，不派发。",
+        }, ensure_ascii=False), file=_sys.stderr)
+        return 2
+
+    summary = args.summary or " ".join(request.split())[:24]
+
+    # 2) 相关记忆定向行：areco 投递层 auto-recall 按「相关记忆：X」引导词查记忆库
+    #    （room-relay recallQuery 的 guided 分支）；正文已带引导词则尊重原文不重复拼。
+    dispatched_request = request
+    if args.recall and not re.search(r"(?:相关记忆|recall)\s*[:：]", request, re.I):
+        dispatched_request = f"{request}\n\n相关记忆：{args.recall.strip()}"
+
+    log_audit("go", {
+        "mode": mode, "blocked": False, "plan_only": plan_only,
+        "explicit_mode": bool(args.mode), "recall": bool(args.recall),
+        "dry_run": bool(args.dry_run), "request_preview": request[:200],
+    })
+    # 头行先落 stdout（flush）：通知回放时 Hermes 一眼见到分诊结论，转述不用再猜。
+    print(json.dumps({
+        "cmd": "go", "mode": mode, "plan_only": plan_only, "summary": summary,
+        "route_reason": route_reason[:80],
+        "recall": (args.recall or "").strip() or None,
+    }, ensure_ascii=False), flush=True)
+
+    if args.dry_run:
+        print(json.dumps({"cmd": "go", "status": "dry_run", "dispatched": False,
+                          "request_final": dispatched_request[:300]}, ensure_ascii=False))
+        return 0
+
+    # 3) 委托 run --wait 全链（等待者模式：dispatch→poll→state→inbox→brief stdout）。
+    ns = SimpleNamespace(
+        request=dispatched_request,
+        wait=True, bg=False, brief=not args.full,
+        mode=mode, plan_only=plan_only, subs=list(args.subs or []),
+        role=None, plan=False, task_type=args.task_type,
+        template=args.template, room_id=args.room_id,
+        summary=summary, file=args.file, timeout=args.timeout,
+        no_relay=False, dry_run=False, reuse_plan=bool(args.reuse_plan),
+    )
+    return _cmd_run(ns)
+
+
 def _cmd_inbox(args) -> int:
     """收信箱运维：列出待取 / 清理已汇报 / 解死锁。
 
@@ -4355,6 +4440,37 @@ def _build_parser():
              "Hermes 派发一律带上（SKILL.md token 纪律）",
     )
     pr.set_defaults(func=_cmd_run)
+
+    pg = sub.add_parser(
+        "go",
+        help="单命令收口（Hermes 主道，2026-07-26）：gatekeeper→route 定模式→相关记忆引导→派发+等待+inbox，"
+             "替代 route→run 两连。跑法与 run --wait 相同：background=true+notify_on_complete=true",
+    )
+    pg.add_argument("request", help="用户原文（go 自动分诊定模式）")
+    pg.add_argument("--summary", default=None, help="一句话摘要（缺省取压缩空白后前 24 字）")
+    pg.add_argument(
+        "--recall", default=None, metavar="词组",
+        help="相关记忆定向词组：拼「相关记忆：<词组>」行进任务文本，areco 投递层 auto-recall 按它查记忆库"
+             "（缺省服务端用正文前 120 字；正文已含引导词则不重复拼）",
+    )
+    pg.add_argument("--mode", choices=list(MODES), default=None,
+                    help="显式改判模式（缺省 route 四格自动判；route 明显不合常识才用）")
+    pg.add_argument("--plan-only", dest="plan_only", action="store_true",
+                    help="配 --mode think：只出结构化计划不执行")
+    pg.add_argument("--sub", dest="subs", action="append", default=[], metavar="子任务",
+                    help="--mode fanout 的子任务，可重复（route 判不出 fanout，必须显式声明拆法）")
+    pg.add_argument("--template", default=None, help="指定模板 id（缺省按角色默认）")
+    pg.add_argument("--room-id", default=None, help="复用现有房间")
+    pg.add_argument("--task-type", default="general", help="任务类型（默认 general）")
+    pg.add_argument("--file", "--file-path", dest="file", default=None, help="产物文件路径")
+    pg.add_argument("--timeout", type=int, default=None, help="轮询超时秒（缺省 0=无限等到 Stand 完成）")
+    pg.add_argument("--full", action="store_true",
+                    help="stdout 结果不截断（缺省按 --brief 口径截 700 字，全文在 inbox）")
+    pg.add_argument("--reuse-plan", dest="reuse_plan", action="store_true",
+                    help="[plan 模式] 命中足够相似的历史计划则跳过 Thinker 段")
+    pg.add_argument("--dry-run", action="store_true",
+                    help="只分诊+组包不派发（测试/预览用；audit 照记 dry_run=true）")
+    pg.set_defaults(func=_cmd_go)
 
     prt = sub.add_parser(
         "route",
