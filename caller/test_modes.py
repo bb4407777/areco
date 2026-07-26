@@ -164,7 +164,14 @@ def _run_plan(thinker_replies: list[str]) -> dict:
     tmp = pathlib.Path(tempfile.mkdtemp())
     c = _FakeCaller(tmp / "projects.db")
     c._thinker_replies = thinker_replies
-    return c.plan_and_execute("设计一个归档方案并落盘", poll_timeout=3, dry_run=True)
+    # 计划落盘也要隔离——否则测试会往仓库的 data/plans/ 里灌垃圾（首轮实测灌了 4 条）
+    _dir, _idx = C.PLANS_DIR, C.PLANS_INDEX
+    C.PLANS_DIR = tmp / "plans"
+    C.PLANS_INDEX = C.PLANS_DIR / "index.jsonl"
+    try:
+        return c.plan_and_execute("设计一个归档方案并落盘", poll_timeout=3, dry_run=True)
+    finally:
+        C.PLANS_DIR, C.PLANS_INDEX = _dir, _idx
 
 
 def test_plan_and_execute() -> None:
@@ -274,10 +281,48 @@ def test_wechat_target_guard() -> None:
         C.WECHAT_TARGET = orig
 
 
+def test_plan_reuse() -> None:
+    """P1-3 计划复用：落盘 → 相似命中跳过 Thinker → 不相似不误用 → 降级不入库。"""
+    print("\n[plans] P1-3 计划复用（opt-in）")
+    _sleep, _dir, _idx = C.time.sleep, C.PLANS_DIR, C.PLANS_INDEX
+    C.time.sleep = lambda *a, **k: None
+    C.PLANS_DIR = pathlib.Path(tempfile.mkdtemp()) / "plans"
+    C.PLANS_INDEX = C.PLANS_DIR / "index.jsonl"
+    try:
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        c = _FakeCaller(tmp / "1.db")
+        c._thinker_replies = [GOOD_PLAN]
+        c.plan_and_execute("把这批判决书归档并建索引", poll_timeout=3, dry_run=True)
+        check(len(C.load_plans()) == 1, "合格计划自动落盘")
+
+        c2 = _FakeCaller(tmp / "2.db")
+        c2._thinker_replies = ["不该被用到的新计划"]
+        r2 = c2.plan_and_execute("把这批判决书归档并建索引", poll_timeout=3,
+                                 dry_run=True, reuse_plan=True)
+        check(bool(r2.get("reused_plan")), f"相似任务命中复用（相似度 "
+                                           f"{(r2.get('reused_plan') or {}).get('score')}）")
+        check(len(c2._stands) == 1, f"跳过 Thinker 段：只起 {len(c2._stands)} 个 Stand（原需 2 个）")
+
+        c3 = _FakeCaller(tmp / "3.db")
+        c3._thinker_replies = [GOOD_PLAN]
+        r3 = c3.plan_and_execute("给客户写一份股权转让协议", poll_timeout=3,
+                                 dry_run=True, reuse_plan=True)
+        check(not r3.get("reused_plan"), "不相似任务不误用历史计划")
+        check(len(c3._stands) == 2, "不命中时正常走两段式")
+
+        before = len(C.load_plans())
+        c4 = _FakeCaller(tmp / "4.db")
+        c4._thinker_replies = ["散文没有步骤段", "还是散文"]
+        c4.plan_and_execute("完全不同的任务描述xyz", poll_timeout=3, dry_run=True)
+        check(len(C.load_plans()) == before, "降级产出不入库（不合格计划复用会放大误差）")
+    finally:
+        C.time.sleep, C.PLANS_DIR, C.PLANS_INDEX = _sleep, _dir, _idx
+
+
 def main() -> int:
     for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute,
               test_dispatch_hardening, test_conf_float, test_inbox_lock,
-              test_wechat_target_guard):
+              test_wechat_target_guard, test_plan_reuse):
         t()
     print()
     if _fails:

@@ -2049,6 +2049,7 @@ class Caller:
         file_path: str | None = None,
         poll_timeout: int = 600,
         dry_run: bool = False,
+        reuse_plan: bool = False,
     ) -> dict:
         """任务含规划需求时：Caller 先派 Thinker 做计划，再把计划交给 Worker 执行
 
@@ -2074,6 +2075,26 @@ class Caller:
                 "wechat": {...}, "relayed": bool,
             }
         """
+        # 0. 计划复用（P1-3，opt-in）：命中就整段跳过 Thinker——省一个 Stand + 一次
+        #    thinking:high 轮询。命中信息一律回报（reused_plan），让用户能当场否掉误配。
+        if reuse_plan:
+            hit = find_similar_plan(request)
+            if hit:
+                logger.info("复用历史计划 %s（相似度 %.3f），跳过 Thinker 段",
+                            hit["task_id"], hit["score"])
+                log_audit("plan_reused", {
+                    "mode": "plan", "reused_from": hit["task_id"],
+                    "score": hit["score"], "request_preview": (request or "")[:200],
+                })
+                return self._execute_with_plan(
+                    request, hit["plan_text"], self._parse_plan(hit["plan_text"]),
+                    task_type=task_type, request_summary=request_summary,
+                    file_path=file_path, poll_timeout=poll_timeout, dry_run=dry_run,
+                    plan_dispatch=None, degraded=False, degrade_reason="",
+                    reused_plan={k: hit[k] for k in ("task_id", "score", "path", "request")},
+                )
+            logger.info("无足够相似的历史计划（阈值 %.2f），正常派 Thinker", PLAN_REUSE_MIN_SCORE)
+
         # 1. Thinker 出结构化计划（plan_only 强制「只规划不执行」+ 结构化模板）
         plan_dispatch = self.dispatch_thinker(
             request,
@@ -2163,7 +2184,42 @@ class Caller:
                     "reason": degrade_reason,
                 })
 
-        # 2. Worker（registry.default_worker）按计划执行
+        # 计划落盘（P1-3）：Thinker 的产出此前只在变量里活一次，同类任务要重新想。
+        # 只存合格的——降级路径的散文当计划复用会把误差放大。
+        if not degraded:
+            save_plan(plan_dispatch.get("task_id", ""), request, plan_text, plan)
+
+        # 2. Worker 按计划执行
+        return self._execute_with_plan(
+            request, plan_text, plan,
+            task_type=task_type, request_summary=request_summary,
+            file_path=file_path, poll_timeout=poll_timeout, dry_run=dry_run,
+            plan_dispatch=plan_dispatch, plan_poll=plan_poll,
+            degraded=degraded, degrade_reason=degrade_reason,
+        )
+
+    def _execute_with_plan(
+        self,
+        request: str,
+        plan_text: str,
+        plan: dict,
+        *,
+        task_type: str | None,
+        request_summary: str | None,
+        file_path: str | None,
+        poll_timeout: int,
+        dry_run: bool,
+        plan_dispatch: dict | None,
+        plan_poll: dict | None = None,
+        degraded: bool,
+        degrade_reason: str,
+        reused_plan: dict | None = None,
+    ) -> dict:
+        """两段式的执行半段：拿着计划派 Worker → 轮询 → 代发 → 收口。
+
+        抽出来是因为有两个入口共用它：正常的 Thinker→Worker，以及计划复用
+        （plan_dispatch=None，直接从历史计划开工，跳过整个 Thinker 段）。
+        """
         if degraded:
             exec_request = (
                 "下面是 Thinker 对本任务的分析，**未经结构化**（没有可直接照做的步骤段）。"
@@ -2179,14 +2235,22 @@ class Caller:
             )
             if plan.get("done_when"):
                 exec_request += "\n\n【完成判据】\n" + plan["done_when"]
+            if reused_plan:
+                # 复用的计划可能是为「相似但不同」的任务写的——明说，让 Worker 自己把关
+                exec_request += (
+                    f"\n\n【注意】本计划复用自历史任务（相似度 {reused_plan.get('score')}），"
+                    f"原任务是：{(reused_plan.get('request') or '')[:120]}\n"
+                    "若与当前任务有实质出入，按当前任务为准，并在结果里说明你偏离了哪一步。"
+                )
         # P0-3：Worker 复用 Thinker 的房间——一条链一个房间。看板上不再是两个孤立 ⚙ 房，
         # 计划与执行在同一处可查，也为「Worker 向仍活着的 Thinker 追问」留出通道。
         # 前提是 poll_result 已按 stand_name + after_id 认人认位（见其 docstring），
         # 否则 Worker 的 poll 会秒回 Thinker 的计划当成执行结果。
+        # 复用计划时 plan_dispatch 为 None，没有可复用的房间 → 新建。
         exec_dispatch = self.dispatch_worker(
             exec_request,
             task_type=task_type,
-            room_id=plan_dispatch["room_id"],
+            room_id=plan_dispatch["room_id"] if plan_dispatch else None,
             mode="plan",
         )
         exec_poll = self.poll_result(
@@ -2213,19 +2277,19 @@ class Caller:
             )
             relayed = wechat.get("ok", False)
 
-        # 收口：两段式开了两个房间（Thinker 一个、Worker 一个），成败按「整条链」算——
-        # 执行段没成时连计划房一起留着，排查要看的是完整链路，不是半截。
+        # 收口：成败按「整条链」算——执行段没成时连计划房一起留着，
+        # 排查要看的是完整链路，不是半截。（共享房时 finish_room 天然幂等，见其实现）
         exec_status = exec_poll.get("status")
-        archive = {
-            "plan": self.finish_room(plan_dispatch, exec_status),
-            "execute": self.finish_room(exec_dispatch, exec_status),
-        }
+        archive = {"execute": self.finish_room(exec_dispatch, exec_status)}
+        if plan_dispatch:
+            archive["plan"] = self.finish_room(plan_dispatch, exec_status)
 
         return {
             "stage": "execute",
             "degraded": degraded,
             "degrade_reason": degrade_reason,
-            "plan": {**plan_dispatch, **plan_poll},
+            "reused_plan": reused_plan,
+            "plan": {**(plan_dispatch or {}), **(plan_poll or {})},
             "execute": {**exec_dispatch, **exec_poll},
             "plan_text": plan_text,
             "plan_parsed": plan,
@@ -2777,6 +2841,99 @@ TASKS_DIR = Path(
     os.environ.get("STANDCODE_TASKS_DIR") or str(Path(HOME_DIR) / ".standcode" / "tasks")
 )
 
+# ── 计划复用（P1-3）──────────────────────────────────────────────────
+# Thinker 的产出此前是耗材：只在 plan_text 里活一次，不落盘、不进任何台账，同类任务
+# 再来一遍要重新想（一个 Thinker 段 = 一个 Stand + 一次 thinking:high 轮询）。
+# 现在落 data/plans/{task_id}.md + 一行 index.jsonl（append-only，同 rooms 台账的写法）。
+#
+# ⚠️ 复用是 opt-in（--reuse-plan），默认关。理由：静默套用一个过期计划会产出「看起来
+# 做完了但做错了」的结果，而这种错不报警。所以必须显式要，且每次都回报套用了哪一条，
+# 让用户能当场否掉。
+PLANS_DIR = Path(__file__).resolve().parent.parent / "data" / "plans"
+PLANS_INDEX = PLANS_DIR / "index.jsonl"
+# 复用相似度阈值（字符 bigram Jaccard）。0.6 偏保守——宁可白想一遍，不可套错计划。
+PLAN_REUSE_MIN_SCORE = _conf_float("STANDCODE_PLAN_REUSE_MIN", "plan_reuse_min", 0.6)
+
+
+def _bigrams(text: str) -> set[str]:
+    """字符二元组。中文没有空格分词，字符 bigram 比 token 切分稳，且零依赖。"""
+    s = "".join((text or "").split())
+    return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+
+
+def _similarity(a: str, b: str) -> float:
+    """Jaccard 相似度（0~1）。刻意用最笨的可解释算法——没有嵌入、没有模型调用，
+    出了误配能直接看出是哪些字重叠导致的。"""
+    ba, bb = _bigrams(a), _bigrams(b)
+    if not ba or not bb:
+        return 0.0
+    return len(ba & bb) / len(ba | bb)
+
+
+def save_plan(task_id: str, request: str, plan_text: str, parsed: dict | None = None) -> Path:
+    """把 Thinker 的计划落盘 + 追加索引。写失败只告警，不拖垮主链。"""
+    path = PLANS_DIR / f"{task_id}.md"
+    try:
+        PLANS_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"<!-- task_id: {task_id} | saved: {_now_iso()} -->\n"
+            f"# 原始任务\n\n{request}\n\n# 计划\n\n{plan_text}\n",
+            encoding="utf-8",
+        )
+        with PLANS_INDEX.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": _now_iso(),
+                "task_id": task_id,
+                "request": (request or "")[:300],
+                "path": str(path),
+                "steps": len((parsed or {}).get("steps") or []),
+                "goal": ((parsed or {}).get("goal") or "")[:120],
+            }, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("计划落盘失败 %s: %s", path, e)
+    return path
+
+
+def load_plans() -> list[dict]:
+    """读计划索引（新→旧）。坏行跳过。"""
+    if not PLANS_INDEX.exists():
+        return []
+    out = []
+    try:
+        for line in PLANS_INDEX.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except Exception as e:
+        logger.warning("读计划索引失败: %s", e)
+    return list(reversed(out))
+
+
+def find_similar_plan(request: str, min_score: float | None = None) -> dict | None:
+    """找一条足够像的历史计划。返回 {**索引项, "score", "plan_text"} 或 None。"""
+    threshold = PLAN_REUSE_MIN_SCORE if min_score is None else min_score
+    best, best_score = None, 0.0
+    for item in load_plans():
+        score = _similarity(request, item.get("request", ""))
+        if score > best_score:
+            best, best_score = item, score
+    if not best or best_score < threshold:
+        return None
+    try:
+        text = Path(best["path"]).read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("历史计划文件读不到（索引在但文件没了）%s: %s", best.get("path"), e)
+        return None
+    # 只取「# 计划」之后的部分喂给 Worker
+    marker = "\n# 计划\n"
+    plan_text = text.split(marker, 1)[1].strip() if marker in text else text
+    return {**best, "score": round(best_score, 3), "plan_text": plan_text}
+
+
 # ── 异步回调 inbox ────────────────────────────────────────────────────
 INBOX_DIR = Path(
     __file__).resolve().parent.parent / "data" / "inbox"
@@ -3135,6 +3292,7 @@ def _bg_worker(task_id: str) -> int:
             file=spec.get("file"),
             room_id=spec.get("room_id"),
             template=spec.get("template"),
+            reuse_plan=bool(spec.get("reuse_plan")),
         )
         # dry_run=True：后台不直接发完整结果（inbox 设计：Hermes 读 inbox 后代发）
         # poll_timeout=0：无限等待，直到 Stand 完成
@@ -3256,7 +3414,9 @@ def _run_by_mode(
     )
 
     if mode == "plan":
-        res = caller.plan_and_execute(args.request, **common)
+        res = caller.plan_and_execute(
+            args.request, reuse_plan=getattr(args, "reuse_plan", False), **common
+        )
         exe = res.get("execute", {}) or {}
         return {
             **res,
@@ -3385,6 +3545,7 @@ def _cmd_run(args) -> int:
             "mode": decision["mode"],
             "plan_only": decision["plan_only"],
             "subs": decision["subs"],
+            "reuse_plan": getattr(args, "reuse_plan", False),
             "no_relay": args.no_relay,
             "dry_run": args.dry_run,
         }
@@ -3642,6 +3803,64 @@ def _cmd_inbox(args) -> int:
             print(f"    · {p.name.replace(PROCESSING_SUFFIX,'')}（{age:.0f} 分钟）{flag}")
     if done:
         print(f"  已汇报 {done and len(done)} 个 {DONE_SUFFIX}（`inbox --gc` 清理）")
+    return 0
+
+
+def _cmd_plans(args) -> int:
+    """计划库（P1-3）：列出 / 查看 / 试匹配。
+
+    --match 是给人用的安全阀：在真的加 --reuse-plan 之前，先看清它会套用哪一条、
+    相似度多少。复用之所以默认关，就是因为套错计划的错不会报警。
+    """
+    plans = load_plans()
+
+    if args.show:
+        hit = next((p for p in plans if p.get("task_id") == args.show), None)
+        if not hit:
+            print(f"计划库里没有 {args.show}", file=_sys.stderr)
+            return 1
+        try:
+            print(Path(hit["path"]).read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"读取失败 {hit.get('path')}: {e}", file=_sys.stderr)
+            return 1
+        return 0
+
+    if args.match:
+        scored = sorted(
+            ((_similarity(args.match, p.get("request", "")), p) for p in plans),
+            key=lambda x: -x[0],
+        )[:5]
+        if args.json:
+            print(json.dumps({
+                "query": args.match,
+                "threshold": PLAN_REUSE_MIN_SCORE,
+                "would_reuse": bool(scored and scored[0][0] >= PLAN_REUSE_MIN_SCORE),
+                "candidates": [{"task_id": p["task_id"], "score": round(s, 3),
+                                "request": p.get("request", "")[:120]} for s, p in scored],
+            }, ensure_ascii=False, indent=2))
+            return 0
+        print(f"查询：{args.match}\n阈值：{PLAN_REUSE_MIN_SCORE}")
+        if not scored:
+            print("  计划库为空——没有可复用的历史计划")
+            return 0
+        for s, p in scored:
+            flag = " ← 会命中复用" if s >= PLAN_REUSE_MIN_SCORE else ""
+            print(f"  {s:.3f}  {p['task_id']}  {p.get('request','')[:60]}{flag}")
+        if scored[0][0] < PLAN_REUSE_MIN_SCORE:
+            print("  （最高分未过阈值 → --reuse-plan 也会正常派 Thinker）")
+        return 0
+
+    if args.json:
+        print(json.dumps({"plans_dir": str(PLANS_DIR), "count": len(plans),
+                          "plans": plans}, ensure_ascii=False, indent=2))
+        return 0
+    print(f"计划库 {PLANS_DIR}（{len(plans)} 条，新→旧）")
+    if not plans:
+        print("  空。跑过 --mode plan 且计划合格后会自动落盘。")
+    for p in plans[:30]:
+        print(f"  · {p.get('task_id')}  [{p.get('steps', 0)} 步]  "
+              f"{p.get('goal') or p.get('request', '')[:50]}")
     return 0
 
 
@@ -3950,6 +4169,12 @@ def _build_parser():
         help="fanout 子任务，可重复给（≥2 个）。positional request 作为共享前置上下文拼到每个子任务前。"
              "⚠️ 当前无文件隔离，多 Worker 并发写同一文件会互相覆盖——只适合只读或互不相干的子任务",
     )
+    pr.add_argument(
+        "--reuse-plan", dest="reuse_plan", action="store_true",
+        help="[--mode plan] 命中足够相似的历史计划就跳过 Thinker 段（省一个 Stand）。"
+             "默认关——静默套用过期计划会产出「看起来做完了但做错了」的结果；"
+             "命中时一律回报套用了哪一条（reused_plan）",
+    )
     pr.set_defaults(func=_cmd_run)
 
     ps = sub.add_parser("status", help="查看后台任务状态/结果")
@@ -3975,6 +4200,13 @@ def _build_parser():
     pi.add_argument("--force", action="store_true", help="配合 --unlock：连未过期的锁一并解")
     pi.add_argument("--yes", action="store_true", help="真执行（--gc / --unlock 默认只干跑）")
     pi.set_defaults(func=_cmd_inbox)
+
+    pp2 = sub.add_parser("plans", help="计划库：列出历史 Thinker 计划 / 查相似度（P1-3 复用）")
+    pp2.add_argument("--show", default=None, metavar="TASK_ID", help="打印某条计划全文")
+    pp2.add_argument("--match", default=None, metavar="任务描述",
+                     help="拿一段任务描述去比相似度，看会不会命中复用（不派发，纯查）")
+    pp2.add_argument("--json", action="store_true", help="结构化输出")
+    pp2.set_defaults(func=_cmd_plans)
 
     pm = sub.add_parser(
         "rooms",

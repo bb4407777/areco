@@ -3,3 +3,4 @@ __pycache__/
 data/inbox/
 config/local.json
 config/harnesses.json
+data/plans/
