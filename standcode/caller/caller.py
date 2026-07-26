@@ -146,6 +146,23 @@ SETTLE_MAX_SEC = _conf_float("STANDCODE_SETTLE_MAX", "settle_max_sec", 1800)
 OUTPUT_STALL_PROBES = int(_conf_float("STANDCODE_OUTPUT_STALL_PROBES", "output_stall_probes", 6))
 IDLE_STALL_PROBES = int(_conf_float("STANDCODE_IDLE_STALL_PROBES", "idle_stall_probes", 9))
 
+# ── 暖池 standby pool + plan 预热（2026-07-26 提速批件）──────────────────
+# 一单冷派发的固定税 ≈ 12-15s：spawn 后 areco 侧 8s 注入下限（MIN_BOOT）+ relay 2s
+# tick + onceQuiet 1.2s + BOOT_WAIT。暖池把这笔税移出关键路径：预先建房+spawn 好
+# 「待命 Stand」（TUI 空闲不调模型 = 零 token；房名「⚙待命·<模板>」留在看板），
+# dispatch 认领即注入，用掉 inline 补胎。isolated 派发不走暖池——cwd 在 spawn 时定。
+# 池文件：~/.standcode/standby/<模板>--<房id>.json；认领 = os.rename 原子抢占。
+STANDBY_ENABLED = _conf_bool("STANDCODE_STANDBY", "standby_pool", True)
+STANDBY_MAX_AGE_SEC = _conf_float("STANDCODE_STANDBY_MAX_AGE", "standby_max_age_sec", 7200)
+STANDBY_POOL_SIZE = int(_conf_float("STANDCODE_STANDBY_POOL_SIZE", "standby_pool_size", 1))
+STANDBY_DIR = Path(
+    os.environ.get("STANDCODE_STANDBY_DIR") or str(Path(HOME_DIR) / ".standcode" / "standby")
+)
+# plan 两段式预热：派 Thinker 的同时同房 add_stand Worker（不发任务，投递按 to_agent
+# 定向不会误收）——Thinker 段跑着的时候 Worker 把 spawn+注入下限静默付清，
+# 计划一出直接注入，第二段冷启动移出关键路径。
+PREWARM_WORKER = _conf_bool("STANDCODE_PREWARM_WORKER", "prewarm_worker", True)
+
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
 # STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
@@ -280,10 +297,18 @@ PLAN_RETRY_TEMPLATE = (
 )
 
 # 门控信号词（should_plan 用）：命中 PLAN_KEYWORDS 且未强命中 DIRECT_KEYWORDS → 走两段式
-PLAN_KEYWORDS = (
-    "调研", "研究", "方案", "设计", "架构", "对比", "规划", "拆解",
-    "分几步", "计划", "梳理流程", "可行性", "评估", "多步", "分阶段",
+# 2026-07-26 强弱分档（提速批件）：plan 是最贵的模式（两段串行，Thinker 段中位 95s+），
+# 误入的代价 = 一整个 Thinker 段白烧 + 端到端翻倍。强信号（明说多步/要计划）单独命中
+# 即 multi_step；弱信号（设计/调研这类常出现在单步小任务里的词）单个不算数，
+# 凑够两个才算——「设计一个脚本存到 X」是单步 worker，不该进两段式。
+PLAN_STRONG_KEYWORDS = (
+    "分几步", "分阶段", "多步", "计划", "规划", "拆解", "梳理流程",
 )
+PLAN_WEAK_KEYWORDS = (
+    "调研", "研究", "方案", "设计", "架构", "对比", "可行性", "评估",
+)
+# 兼容旧名：should_plan（保留兼容层）仍按全集判——它的行为刻意不变（见其 docstring）。
+PLAN_KEYWORDS = PLAN_STRONG_KEYWORDS + PLAN_WEAK_KEYWORDS
 DIRECT_KEYWORDS = (
     "总结", "摘要", "翻译", "转格式", "转成", "改成", "找一下", "查找",
     "下载", "生成这份", "套模板", "格式转换", "提取",
@@ -634,6 +659,19 @@ def verify_completion(files: list | None = None, output_path: str | None = None)
                 "note": "无可机检判据（未给产物路径）"}
     level = "verified" if all(c["passed"] for c in checks) else "check_failed"
     return {"level": level, "checks": checks}
+
+
+def _audit_is_stub(r: dict) -> bool:
+    """审计条目是否测试桩痕迹（thinker-tpl/worker-tpl 假模板、room0 类假房号）。
+
+    历史包袱：2026-07-25/26 的离线测试没隔离 STANDCODE_AUDIT_LOG，167 条桩事件混进
+    生产 audit.jsonl——报表一度显示「派发 182 单 / plan 78 / 降级 23」，真实只有 15 单
+    且零 plan。测试文件已加环境隔离（见 test_*.py 头部 _TEST_ISO），本过滤器在读取侧
+    兜住既有脏数据与未来漏网；audit.jsonl 本身 append-only 不回改。
+    """
+    t = str(r.get("template") or "")
+    rid = str(r.get("room_id") or "")
+    return t.endswith("-tpl") or bool(re.fullmatch(r"room\d{0,4}", rid))
 
 
 def log_audit(event: str, detail: dict | None = None) -> None:
@@ -1294,6 +1332,170 @@ class Caller:
         logger.info("移除 Stand: room=%s name=%s", room_id, member_name)
         return result
 
+    # ── 暖池 standby pool（2026-07-26 提速批件）───────────────────
+    # 认领/补胎全部 fail-open：暖池只能加速，任何异常都回落冷启动，不挡主链。
+
+    def _standby_files(self, template_id: str | None = None) -> list[Path]:
+        """池文件列表（旧的在前）。文件名 <模板>--<房id>.json。"""
+        if not STANDBY_DIR.exists():
+            return []
+        pat = f"{template_id}--*.json" if template_id else "*--*.json"
+        try:
+            return sorted(STANDBY_DIR.glob(pat), key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return []
+
+    def standby_claim(self, template_id: str) -> dict | None:
+        """认领一个同模板待命 Stand，返回 dispatch 可直用的 reuse_stand 字典或 None。
+
+        认领 = os.rename 原子抢占（并发派发只有一个赢家）。过期 / 会话已死 / 房间
+        被归档的待命位当场清理（归档房间+落台账）后继续找下一个。
+        """
+        if not STANDBY_ENABLED:
+            return None
+        try:
+            for f in self._standby_files(template_id):
+                claimed = f.with_name(f.name + f".claiming-{os.getpid()}")
+                try:
+                    os.rename(f, claimed)
+                except OSError:
+                    continue  # 并发输家：别人已抢走
+                try:
+                    info = json.loads(claimed.read_text())
+                except Exception:
+                    claimed.unlink(missing_ok=True)
+                    continue
+                claimed.unlink(missing_ok=True)
+                age = time.time() - float(info.get("created_ts") or 0)
+                if age > STANDBY_MAX_AGE_SEC:
+                    self._standby_discard(info, "expired")
+                    continue
+                # 会话活性：areco 重启会杀掉待命 TUI（exited），认领前必须验活
+                try:
+                    sess = next((s for s in self.list_sessions()
+                                 if s.get("id") == info.get("stand_session_id")), None)
+                except Exception:
+                    sess = None
+                if not sess or sess.get("status") != "running":
+                    self._standby_discard(info, "session_dead")
+                    continue
+                try:
+                    room = self.get_room(info["room_id"])
+                    if room.get("archivedAt") is not None:
+                        self._standby_discard(info, "room_archived", archive=False)
+                        continue
+                except Exception:
+                    self._standby_discard(info, "room_missing", archive=False)
+                    continue
+                ledger_append("adopted", info["room_id"], by="standby_claim",
+                              template_id=template_id, room_name=info.get("room_name", ""))
+                log_audit("standby_claim", {
+                    "template": template_id, "room_id": info["room_id"],
+                    "age_sec": round(age, 1),
+                })
+                logger.info("暖池命中: room=%s tpl=%s 龄=%.0fs", info["room_id"], template_id, age)
+                return {"kind": "standby", "room_created": True, **info}
+        except Exception as e:
+            logger.warning("standby 认领异常（回落冷启动）: %s", e)
+        return None
+
+    def _standby_discard(self, info: dict, reason: str, archive: bool = True) -> None:
+        """废弃一个待命位：池文件已被认领方摘走，这里只负责收拾房间与留痕。"""
+        log_audit("standby_discard", {
+            "room_id": info.get("room_id"), "template": info.get("template_id"),
+            "reason": reason,
+        })
+        if not archive:
+            return
+        try:
+            self.archive_room(info["room_id"])
+            ledger_append("archived", info["room_id"], by=f"standby_{reason}")
+        except Exception as e:
+            logger.warning("待命房清理失败 room=%s: %s", info.get("room_id"), e)
+
+    def standby_refill(self, template_id: str) -> dict | None:
+        """补一个待命 Stand。池满 / 建失败一律静默跳过——补胎不影响主链。
+
+        待命 Stand 是 spawn 好但没收到任何消息的 TUI：空闲不调模型，token 成本为零，
+        只占一个进程与看板一个「⚙待命·<模板>」房。
+        """
+        if not STANDBY_ENABLED:
+            return None
+        try:
+            if len(self._standby_files(template_id)) >= STANDBY_POOL_SIZE:
+                return None
+            self._assert_template_exists(template_id)
+            STANDBY_DIR.mkdir(parents=True, exist_ok=True)
+            room = self.create_room(f"{ROOM_MARK}待命·{template_id}")
+            member = self.add_stand(room["id"], template_id)
+            info = {
+                "room_id": room["id"],
+                "team": room["team"],
+                "room_name": room.get("name", ""),
+                "stand_name": member["name"],
+                "stand_session_id": member.get("sessionId", ""),
+                "template_id": template_id,
+                "created_ts": time.time(),
+                "created_at": _now_iso(),
+            }
+            (STANDBY_DIR / f"{template_id}--{room['id']}.json").write_text(
+                json.dumps(info, ensure_ascii=False), encoding="utf-8")
+            ledger_append("created", room["id"], room_name=room.get("name", ""),
+                          team=room["team"], template_id=template_id, by="standby_refill")
+            log_audit("standby_refill", {"template": template_id, "room_id": room["id"]})
+            logger.info("暖池补胎: room=%s tpl=%s", room["id"], template_id)
+            return info
+        except Exception as e:
+            logger.warning("standby 补胎失败（不影响主链）tpl=%s: %s", template_id, e)
+            return None
+
+    def standby_sweep(self) -> dict:
+        """清扫暖池：过期待命位归档回收；>5 分钟的孤儿 .claiming-*（认领方进程死在半路）删除。"""
+        expired, orphans = 0, 0
+        for f in self._standby_files():
+            try:
+                info = json.loads(f.read_text())
+            except Exception:
+                f.unlink(missing_ok=True)
+                continue
+            if time.time() - float(info.get("created_ts") or 0) > STANDBY_MAX_AGE_SEC:
+                try:
+                    os.rename(f, f.with_name(f.name + f".claiming-{os.getpid()}"))
+                except OSError:
+                    continue  # 正被认领
+                f.with_name(f.name + f".claiming-{os.getpid()}").unlink(missing_ok=True)
+                self._standby_discard(info, "expired")
+                expired += 1
+        if STANDBY_DIR.exists():
+            for c in STANDBY_DIR.glob("*.claiming-*"):
+                try:
+                    if time.time() - c.stat().st_mtime > 300:
+                        c.unlink(missing_ok=True)
+                        orphans += 1
+                except OSError:
+                    pass
+        return {"expired": expired, "orphan_claims": orphans}
+
+    def standby_status(self) -> list[dict]:
+        """暖池现状（池文件 × 会话活性），供 `caller.py pool` 展示。"""
+        out = []
+        try:
+            sessions = {s.get("id"): s for s in self.list_sessions()}
+        except Exception:
+            sessions = {}
+        for f in self._standby_files():
+            try:
+                info = json.loads(f.read_text())
+            except Exception:
+                continue
+            sess = sessions.get(info.get("stand_session_id"))
+            out.append({
+                **info,
+                "age_sec": round(time.time() - float(info.get("created_ts") or 0), 1),
+                "session_status": (sess or {}).get("status", "unknown"),
+            })
+        return out
+
     # ── 消息收发（直写 SQLite，绕过 REST 的固定 from 限制）─────
 
     def _db_connect(self) -> sqlite3.Connection:
@@ -1402,6 +1604,7 @@ class Caller:
         workspace_repo: str | None = None,
         request_summary: str | None = None,
         mode: str = "",
+        reuse_stand: dict | None = None,
     ) -> dict:
         """向 Stand 派发任务
 
@@ -1425,6 +1628,11 @@ class Caller:
                         dispatch 会把工作目录传给 Stand（worktree 建失败时不传，如实标
                         applied=False）。默认 False——隔离要花磁盘和 git 操作，按需开。
             workspace_repo: isolated=True 时基于哪个 git 仓库建 worktree；None=只建空目录。
+            reuse_stand: 复用已 spawn 好的房内 Stand（2026-07-26 提速批件）——跳过建房/
+                        add_stand/BOOT_WAIT，直接向既有成员发任务。两类来源：
+                        plan 预热（kind='prewarm'，room_created=False，房归 Thinker 链收口）、
+                        暖池认领（kind='standby'，room_created=True，收口照常归档）。
+                        None 且非隔离、未指定房间时，dispatch 自动尝试暖池认领。
 
         返回:
             {
@@ -1439,7 +1647,9 @@ class Caller:
                 "template_id": str,  # 实际模板 ID
                 "role": str,         # 'thinker' | 'worker'
                 "workspace": str | None,     # 隔离工作目录（isolated=True 才有）
-                "workspace_cwd": bool,       # Stand cwd 是否已真正切到 workspace（当前恒 False）
+                "workspace_cwd": bool,       # Stand cwd 已真正切到 workspace（2026-07-26 冒烟 ✓）
+                "stand_reused": bool,        # 走了复用通道（暖池认领或 plan 预热）
+                "standby": bool,             # 复用来源是暖池
             }
         """
         # 0. Gatekeeper 硬闸：命中 BLOCKED 红线（不可逆灾难性操作）→ 拒绝执行 + 记审计。
@@ -1481,10 +1691,60 @@ class Caller:
         effective_role = role or self.roles.get(tid, "worker")
 
         # 1.5 工作区隔离（默认关）。仅准备目录 + 回填结果；cwd 落地待 areco 支持。
+        #     复用通道下忽略——cwd 只能在 spawn 时定，复用的 Stand 早已 spawn 完。
         workspace_info = (
             self.prepare_workspace(task_id, source_repo=workspace_repo)
-            if isolated else None
+            if (isolated and reuse_stand is None) else None
         )
+
+        # 1.6 复用通道（2026-07-26 提速批件）：显式 reuse_stand（plan 预热）优先；
+        #     否则暖池自动认领（无指定房、非隔离）。命中即跳过建房/add_stand/BOOT_WAIT，
+        #     spawn+注入下限的 12s 冷启动税移出关键路径。
+        explicit_reuse = reuse_stand is not None
+        standby_hit = False
+        if reuse_stand is None and STANDBY_ENABLED and not room_id and not isolated:
+            claim = self.standby_claim(tid)
+            if claim:
+                reuse_stand = claim
+                standby_hit = True
+
+        if reuse_stand:
+            rid = reuse_stand["room_id"]
+            team = reuse_stand["team"]
+            stand_name = reuse_stand["stand_name"]
+            stand_session_id = reuse_stand.get("stand_session_id", "")
+            tid = reuse_stand.get("template_id", tid)
+            effective_role = role or self.roles.get(tid, effective_role)
+            room_created = bool(reuse_stand.get("room_created", False))
+            room = {"id": rid, "name": reuse_stand.get("room_name", ""), "team": team}
+            try:
+                msg_id = self.send_message(team, stand_name, request)
+            except Exception as e:
+                logger.error("复用派发失败（room=%s tid=%s）：%s", rid, tid, e)
+                log_audit("dispatch_failed", {
+                    "task_id": task_id, "mode": mode, "role": effective_role,
+                    "template": tid, "room_id": rid, "error": str(e),
+                    "rolled_back": room_created, "stand_reused": True,
+                })
+                if room_created:
+                    # 暖池房是自家的，发不出去就收掉别烧看板；预热房归 Thinker 链收口，不碰
+                    try:
+                        self.archive_room(rid)
+                        ledger_append("archived", rid, task_id=task_id,
+                                      status="dispatch_failed", by="rollback")
+                    except Exception as ae:
+                        logger.warning("回滚归档失败 room=%s: %s", rid, ae)
+                raise
+            return self._finish_dispatch(
+                task_id=task_id, team=team, rid=rid, room=room,
+                room_created=room_created, stand_name=stand_name,
+                stand_session_id=stand_session_id, msg_id=msg_id,
+                effective_task_type=effective_task_type, tid=tid,
+                effective_role=effective_role, mode=mode,
+                workspace_info=None, room_id_param=room_id,
+                isolated=isolated, explicit_reuse=explicit_reuse,
+                stand_reused=True, standby_hit=standby_hit,
+            )
 
         # 1.8 模板存在性前置校验：放在 create_room 之前。
         # 改动前 tid 不存在时会先建好房间、再在 add_stand 炸 RuntimeError，留下一个
@@ -1565,6 +1825,24 @@ class Caller:
                                   status="dispatch_failed", reason=f"rollback_failed: {ae}")
             raise
 
+        return self._finish_dispatch(
+            task_id=task_id, team=team, rid=rid, room=room,
+            room_created=room_created, stand_name=stand_name,
+            stand_session_id=stand_session_id, msg_id=msg_id,
+            effective_task_type=effective_task_type, tid=tid,
+            effective_role=effective_role, mode=mode,
+            workspace_info=workspace_info, room_id_param=room_id,
+            isolated=isolated, explicit_reuse=False,
+            stand_reused=False, standby_hit=False,
+        )
+
+    def _finish_dispatch(
+        self, *, task_id, team, rid, room, room_created, stand_name,
+        stand_session_id, msg_id, effective_task_type, tid, effective_role,
+        mode, workspace_info, room_id_param, isolated, explicit_reuse,
+        stand_reused, standby_hit,
+    ) -> dict:
+        """dispatch 收尾（冷启动/复用两条路共用）：result 组装、台账、审计、面包屑、补胎。"""
         result = {
             "task_id": task_id,
             "session_id": team,
@@ -1578,11 +1856,14 @@ class Caller:
             "template_id": tid,
             "role": effective_role,
             "mode": mode,
+            "stand_reused": stand_reused,
+            "standby": standby_hit,
             "workspace": (workspace_info or {}).get("path"),
             "workspace_cwd": bool((workspace_info or {}).get("applied", False)),
         }
-        if room_created:
-            # 补一条带 Stand 信息的台账（created 已在建房后先落，这里只是补全）
+        if room_created and not stand_reused:
+            # 补一条带 Stand 信息的台账（created 已在建房后先落，这里只是补全）；
+            # 复用路的 Stand 在补胎/预热时已各自落账，不重复。
             ledger_append(
                 "stand_added", rid,
                 task_id=task_id, stand_name=stand_name,
@@ -1598,10 +1879,13 @@ class Caller:
             "room_id": rid,
             "stand_name": stand_name,
             "room_reused": not room_created,
+            "stand_reused": stand_reused,
+            "standby": standby_hit,
         })
         logger.info(
-            "派发任务: session=%s room=%s stand=%s mode=%s role=%s task_type=%s tid=%s",
+            "派发任务: session=%s room=%s stand=%s mode=%s role=%s task_type=%s tid=%s reuse=%s",
             team, rid, stand_name, mode or "-", effective_role, effective_task_type, tid,
+            ("standby" if standby_hit else "prewarm") if stand_reused else "-",
         )
         hook = getattr(self, "_on_dispatch", None)
         if hook:
@@ -1609,6 +1893,11 @@ class Caller:
                 hook(result)  # 面包屑：等待者把房间/水位线即时落 state，供 reconcile 死后定位
             except Exception as e:
                 logger.warning("dispatch 面包屑回调失败（不影响派发）: %s", e)
+        # 补胎：暖池开着、本单没走显式复用（预热房另有归属）、也不是定向老房/隔离派发时，
+        # 用掉即补 / 冷启动播种——让下一单同模板免掉冷启动税。inline 只多 ~1s HTTP，
+        # 且发生在任务消息已入库之后，不拖慢本单注入。
+        if STANDBY_ENABLED and not isolated and room_id_param is None and not explicit_reuse:
+            self.standby_refill(tid)
         return result
 
     # ── 角色分派便利方法（Caller → Thinker / Worker）─────────────
@@ -1622,6 +1911,7 @@ class Caller:
         plan_only: bool = False,
         request_summary: str | None = None,
         mode: str = "think",
+        reuse_stand: dict | None = None,
     ) -> dict:
         """派给 Thinker（registry.default_thinker）：规划、分析、判断、路由
 
@@ -1643,6 +1933,7 @@ class Caller:
             role="thinker",
             request_summary=request_summary,
             mode=mode,
+            reuse_stand=reuse_stand,
         )
 
     def dispatch_worker(
@@ -1653,6 +1944,9 @@ class Caller:
         template_id: str | None = None,
         request_summary: str | None = None,
         mode: str = "worker",
+        reuse_stand: dict | None = None,
+        isolated: bool = False,
+        workspace_repo: str | None = None,
     ) -> dict:
         """派给 Worker（registry.default_worker）：代码、搜索、文书、下载、总结"""
         return self.dispatch(
@@ -1663,6 +1957,9 @@ class Caller:
             role="worker",
             request_summary=request_summary,
             mode=mode,
+            reuse_stand=reuse_stand,
+            isolated=isolated,
+            workspace_repo=workspace_repo,
         )
 
     def poll_result(
@@ -2515,6 +2812,8 @@ class Caller:
         dry_run: bool = False,
         plan_only: bool = False,
         mode: str = "",
+        isolated: bool = False,
+        workspace_repo: str | None = None,
     ) -> dict:
         """一键派发 → 主动轮询 → 代发微信
 
@@ -2542,6 +2841,8 @@ class Caller:
             role=role,
             request_summary=request_summary,
             mode=mode,
+            isolated=isolated,
+            workspace_repo=workspace_repo,
         )
         poll = self.poll_result(
             room_id=dispatch_result["room_id"],
@@ -2657,6 +2958,40 @@ class Caller:
             task_type=task_type,
             plan_only=True,
         )
+
+        # 1.5 预热 Worker（2026-07-26 提速批件）：趁 Thinker 跑计划（通常 1.5-3 分钟），
+        # 同房先把 Worker spawn 好但不发任务——投递按 to_agent 定向，Worker 不会误收
+        # Thinker 的消息；等计划出来直接向预热成员注入，第二段 12s 冷启动税在 Thinker
+        # 段里静默付清。预热失败回落原路（第二段现场 add_stand），不影响主链。
+        prewarmed = None
+        if PREWARM_WORKER:
+            try:
+                _pw_member = self.add_stand(plan_dispatch["room_id"], self.default_worker_id)
+                prewarmed = {
+                    "kind": "prewarm",
+                    "room_id": plan_dispatch["room_id"],
+                    "team": plan_dispatch["session_id"],
+                    "room_name": plan_dispatch.get("room_name", ""),
+                    "stand_name": _pw_member["name"],
+                    "stand_session_id": _pw_member.get("sessionId", ""),
+                    "template_id": self.default_worker_id,
+                    "room_created": False,  # 房归 Thinker 链收口，复用路不归档
+                }
+                ledger_append(
+                    "stand_added", plan_dispatch["room_id"],
+                    task_id=plan_dispatch.get("task_id", ""),
+                    stand_name=_pw_member["name"],
+                    stand_session_id=_pw_member.get("sessionId", ""),
+                    template_id=self.default_worker_id, by="prewarm",
+                )
+                log_audit("prewarm_worker", {
+                    "room_id": plan_dispatch["room_id"],
+                    "template": self.default_worker_id,
+                    "task_id": plan_dispatch.get("task_id", ""),
+                })
+            except Exception as e:
+                logger.warning("Worker 预热失败（第二段回落现场 spawn）: %s", e)
+
         plan_poll = self.poll_result(
             room_id=plan_dispatch["room_id"],
             session_id=plan_dispatch["session_id"],
@@ -2684,6 +3019,8 @@ class Caller:
                 "wechat": None,
                 "relayed": False,
                 "degraded": False,
+                # 预热的 Worker 随房留在看板（plan_failed 不归档），排查时可见
+                "prewarmed_wasted": bool(prewarmed),
                 "error": plan_poll.get("error", "Thinker 未产出计划"),
             }
 
@@ -2752,13 +3089,14 @@ class Caller:
         if not degraded:
             save_plan(plan_dispatch.get("task_id", ""), request, plan_text, plan)
 
-        # 2. Worker 按计划执行
+        # 2. Worker 按计划执行（预热成员优先，缺位回落现场 spawn）
         return self._execute_with_plan(
             request, plan_text, plan,
             task_type=task_type, request_summary=request_summary,
             file_path=file_path, poll_timeout=poll_timeout, dry_run=dry_run,
             plan_dispatch=plan_dispatch, plan_poll=plan_poll,
             degraded=degraded, degrade_reason=degrade_reason,
+            prewarmed=prewarmed,
         )
 
     def _execute_with_plan(
@@ -2777,11 +3115,14 @@ class Caller:
         degraded: bool,
         degrade_reason: str,
         reused_plan: dict | None = None,
+        prewarmed: dict | None = None,
     ) -> dict:
         """两段式的执行半段：拿着计划派 Worker → 轮询 → 代发 → 收口。
 
         抽出来是因为有两个入口共用它：正常的 Thinker→Worker，以及计划复用
         （plan_dispatch=None，直接从历史计划开工，跳过整个 Thinker 段）。
+        prewarmed：Thinker 段并行预热好的同房 Worker（见 plan_and_execute 1.5），
+        给定且共享房可用时直接向它注入，跳过第二段冷启动。
         """
         if degraded:
             exec_request = (
@@ -2815,6 +3156,7 @@ class Caller:
             task_type=task_type,
             room_id=plan_dispatch["room_id"] if plan_dispatch else None,
             mode="plan",
+            reuse_stand=prewarmed if plan_dispatch else None,
         )
         exec_poll = self.poll_result(
             room_id=exec_dispatch["room_id"],
@@ -2911,16 +3253,22 @@ class Caller:
 
         judgment = _hits(JUDGMENT_KEYWORDS)
         artifact = _hits(ARTIFACT_KEYWORDS)
-        plan_kw = _hits(PLAN_KEYWORDS)
+        plan_strong = _hits(PLAN_STRONG_KEYWORDS)
+        plan_weak = _hits(PLAN_WEAK_KEYWORDS)
+        plan_kw = plan_strong + plan_weak
         direct_kw = _hits(DIRECT_KEYWORDS)
         plan_only_kw = _hits(PLAN_ONLY_KEYWORDS)
         signals = {
             "judgment": judgment, "artifact": artifact,
-            "plan": plan_kw, "direct": direct_kw, "plan_only": plan_only_kw,
+            "plan": plan_kw, "plan_strong": plan_strong, "plan_weak": plan_weak,
+            "direct": direct_kw, "plan_only": plan_only_kw,
         }
 
-        # 结构维度：沿用 should_plan 的强否逻辑——只命中 DIRECT 不命中 PLAN 视为单步
-        multi_step = bool(plan_kw) and not (direct_kw and not plan_kw)
+        # 结构维度（2026-07-26 强弱分档，提速批件）：plan 两段式是最贵的模式，误入
+        # 的代价是一个 Thinker 段（中位 95s+）白烧。强信号（分几步/计划/拆解…明说
+        # 多步）单独成立；弱信号（设计/调研/方案…常出现在单步小任务里）要凑够两个，
+        # 且被 DIRECT 强命中（总结/翻译这类明确单步动词）压制。
+        multi_step = bool(plan_strong) or (len(plan_weak) >= 2 and not direct_kw)
         structure = "multi_step" if multi_step else "single_step"
 
         # 1) 显式「只要计划」
@@ -2946,10 +3294,11 @@ class Caller:
 
         # 3) 交付物 = 东西 且 多步有依赖 → 两段式
         if multi_step:
+            hit_desc = f"强 {plan_strong}" if plan_strong else f"弱×{len(plan_weak)} {plan_weak}"
             return {
                 "mode": "plan", "plan_only": False,
                 "deliverable": "artifact", "structure": "multi_step",
-                "reason": f"交付物是东西且多步有依赖（命中 {plan_kw}）→ Thinker 出计划、Worker 执行",
+                "reason": f"交付物是东西且多步有依赖（命中 {hit_desc}）→ Thinker 出计划、Worker 执行",
                 "signals": signals,
             }
 
@@ -3572,6 +3921,22 @@ def _result_to_aggregate_entry(state: dict) -> dict:
 
 # ── 异步回调 inbox 工具 ─────────────────────────────────────────────
 
+def _current_channel() -> str:
+    """本进程属于哪条微信通道（2026-07-26 双通道上线）。
+
+    判据 = HERMES_HOME：gateway 的 terminal 工具子进程继承它——
+    主通道 ~/.qclaw-hermes → "main"；profiles/<name> → "<name>"。
+    手动 CLI（无 HERMES_HOME）按 main 算。收信箱按通道隔离消化，
+    防止 A 通道派的任务被 B 通道的 digest 抢先汇报到错误的聊天窗口。
+    """
+    hh = (os.environ.get("HERMES_HOME") or "").rstrip("/")
+    if not hh:
+        return "main"
+    base = os.path.basename(hh)
+    parent = os.path.basename(os.path.dirname(hh))
+    return base if parent == "profiles" else "main"
+
+
 def _inbox_path(task_id: str) -> Path:
     return INBOX_DIR / f"{task_id}.json"
 
@@ -3926,6 +4291,7 @@ def _bg_worker(task_id: str) -> int:
             "files": [spec["file"]] if spec.get("file") else [],
             "request_summary": spec.get("summary"),
             "request": spec.get("request", "")[:200],
+            "channel": _current_channel(),
             "error": state.get("error"),
         }
         write_inbox(task_id, inbox_payload)
@@ -3955,6 +4321,7 @@ def _bg_worker(task_id: str) -> int:
                 "files": [spec["file"]] if spec.get("file") else [],
                 "request_summary": spec.get("summary"),
                 "request": spec.get("request", "")[:200],
+                "channel": _current_channel(),
                 "error": str(e),
             }
             write_inbox(task_id, inbox_payload)
@@ -4064,7 +4431,7 @@ def _run_by_mode(
                                for t in tasks if t.get("error")) or f"{len(tasks) - len(done)} 个子任务未完成",
         }
 
-    # think / worker：单段派发
+    # think / worker：单段派发（--isolated 只对 worker 有意义：per-session cwd 隔离工作区）
     res = caller.dispatch_and_relay(
         args.request,
         role=decision["role"],
@@ -4072,6 +4439,8 @@ def _run_by_mode(
         template_id=args.template,
         plan_only=decision["plan_only"],
         mode=mode,
+        isolated=bool(getattr(args, "isolated", False)),
+        workspace_repo=getattr(args, "workspace_repo", None),
         **common,
     )
     return {**res, "mode": mode}
@@ -4311,6 +4680,7 @@ def _cmd_run(args) -> int:
             "request": (args.request or "")[:200],
             "verification": verification,
             "cost": cost,
+            "channel": _current_channel(),
             "error": res.get("error"),
         })
         inbox_final = _inbox_path(task_id)
@@ -5103,7 +5473,8 @@ def _cmd_report(args) -> int:
     cutoff = time.time() - args.days * 86400
     ev: dict[str, int] = {}
     modes: dict[str, int] = {}
-    reused = settle_forced = go_blocked = go_operator = go_real = 0
+    reused = settle_forced = go_blocked = go_operator = go_real = stubbed = 0
+    standby_hits = prewarm_n = 0
     elapsed_sum, elapsed_n = 0.0, 0
     rec = {"harvested": 0, "stuck_marked": 0, "lost_marked": 0, "dead_marked": 0, "runs": 0}
     try:
@@ -5123,8 +5494,15 @@ def _cmd_report(args) -> int:
             continue
         if t < cutoff:
             continue
+        if _audit_is_stub(r):
+            stubbed += 1
+            continue
         e = r.get("event") or "?"
         ev[e] = ev.get(e, 0) + 1
+        if e == "standby_claim":
+            standby_hits += 1
+        elif e == "prewarm_worker":
+            prewarm_n += 1
         if e == "dispatch":
             m = r.get("mode") or "?"
             modes[m] = modes.get(m, 0) + 1
@@ -5161,6 +5539,9 @@ def _cmd_report(args) -> int:
         "plan_degraded": ev.get("plan_degraded", 0),
         "go": {"real": go_real, "blocked": go_blocked, "operator_rejected": go_operator},
         "reconcile": rec,
+        "standby_hits": standby_hits,
+        "prewarm_worker": prewarm_n,
+        "stub_excluded": stubbed,
     }
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
@@ -5174,6 +5555,10 @@ def _cmd_report(args) -> int:
     print(f"go 入口：真派 {go_real}｜红线拦截 {go_blocked}｜operator 拦回 {go_operator}")
     print(f"对账（{rec['runs']} 轮）：补收 {rec['harvested']}｜转stuck {rec['stuck_marked']}｜"
           f"标lost {rec['lost_marked']}｜标dead {rec['dead_marked']}")
+    if standby_hits or prewarm_n:
+        print(f"提速：暖池命中 {standby_hits}｜plan 预热 {prewarm_n}")
+    if stubbed:
+        print(f"（已剔除测试桩事件 {stubbed} 条——报表只算真实流量）")
     return 0
 
 
@@ -5204,12 +5589,21 @@ def _cmd_inbox(args) -> int:
         if not pending:
             print("收信箱空")
             return 0
+        # 通道隔离（2026-07-26 双通道上线）：收信箱是两条微信通道共用的目录，
+        # 不过滤的话 A 通道派的任务会被 B 通道的 digest 抢先标 .done 并汇报到
+        # 错误的聊天窗口。默认只消化本通道（channel 字段缺省按 main 算——
+        # 存量文件都来自主通道），--all-channels 才全收。
+        mine = _current_channel()
+        skipped_other = 0
         for p in pending:
             try:
                 d = json.loads(p.read_text())
             except Exception as e:
                 print(f"── {p.stem}（读取失败: {e}）")
                 continue
+            if not getattr(args, "all_channels", False) and (d.get("channel") or "main") != mine:
+                skipped_other += 1
+                continue  # 不显示也不标 .done，留给所属通道消化
             status = d.get("status", "?")
             concl = (d.get("request_summary") or "").strip()
             body = (d.get("result_text") or "").strip()
@@ -5257,9 +5651,12 @@ def _cmd_inbox(args) -> int:
                 except OSError as e:
                     print(f"   ⚠️ 标记 .done 失败: {e}")
         print(
-            f"共 {len(pending)} 条"
+            f"共 {len(pending) - skipped_other} 条"
             + ("（--keep 未标记，下次仍会出现）" if getattr(args, "keep", False) else "（已标 .done）")
+            + (f"；另通道 {skipped_other} 条未动（--all-channels 可看）" if skipped_other else "")
         )
+        if len(pending) == skipped_other:
+            print("（本通道收信箱空）")
         return 0
 
     if args.gc or args.unlock:
@@ -5674,6 +6071,49 @@ def _cmd_rooms(args) -> int:
     return 0
 
 
+def _cmd_pool(args) -> int:
+    """暖池运维：现状 / 播种（warm）/ 清扫（sweep）。
+
+    warm 是幂等的：每个目标模板池满即跳过，适合 cron 定时跑——areco 重启会把待命
+    TUI 全杀成 exited（认领时才发现 = 那一单退回冷启动），定时播种把这个窗口收窄。
+    """
+    caller = Caller()
+    out: dict = {"enabled": STANDBY_ENABLED, "pool_size": STANDBY_POOL_SIZE,
+                 "max_age_sec": STANDBY_MAX_AGE_SEC}
+    if args.sweep or args.warm:
+        out["sweep"] = caller.standby_sweep()
+    if args.warm:
+        if not STANDBY_ENABLED:
+            print("暖池已关（STANDCODE_STANDBY=off），不播种")
+            return 0
+        targets = [args.template] if args.template else list(dict.fromkeys(
+            [caller.default_worker_id, caller.default_thinker_id]))
+        refilled = []
+        for tpl in targets:
+            if not tpl:
+                continue
+            r = caller.standby_refill(tpl)
+            if r:
+                refilled.append({"template": tpl, "room_id": r["room_id"]})
+        out["refilled"] = refilled
+    out["standby"] = caller.standby_status()
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    print(f"暖池 {'on' if STANDBY_ENABLED else 'off'}（每模板 {STANDBY_POOL_SIZE} 位，"
+          f"保鲜 {STANDBY_MAX_AGE_SEC / 60:.0f} 分钟）")
+    for s in out["standby"]:
+        print(f"  ⚙ {s.get('template_id')}  room={s.get('room_id')}  "
+              f"龄 {s.get('age_sec', 0) / 60:.1f}min  会话={s.get('session_status')}")
+    if not out["standby"]:
+        print("  （空——下一单冷派发会自动播种，或 pool --warm 手动补）")
+    if args.warm:
+        print(f"播种 {len(out.get('refilled') or [])} 个；清扫 {out.get('sweep')}")
+    elif args.sweep:
+        print(f"清扫 {out.get('sweep')}")
+    return 0
+
+
 def _build_parser():
     import argparse
 
@@ -5735,6 +6175,16 @@ def _build_parser():
         help="[--wait] stdout 的 result_text 截到 700 字（全文仍在 inbox）。"
              "stdout 会进 Caller 会话历史被反复回放，长结果全文回放极烧 token——"
              "Hermes 派发一律带上（SKILL.md token 纪律）",
+    )
+    pr.add_argument(
+        "--isolated", action="store_true",
+        help="[worker] 工作区隔离：为本任务建独立目录（配 --workspace-repo 则 git worktree），"
+             "经 areco per-session cwd 让 Stand 落在隔离目录里跑（2026-07-26 起 areco 侧支持）。"
+             "隔离派发不走暖池（cwd 在 spawn 时定）",
+    )
+    pr.add_argument(
+        "--workspace-repo", dest="workspace_repo", default=None,
+        help="[--isolated] 基于哪个 git 仓库建 worktree；不给则只建空目录",
     )
     pr.set_defaults(func=_cmd_run)
 
@@ -5830,6 +6280,11 @@ def _build_parser():
              "替代 ls→cat→mv 三连（一次唤醒 1 个 tool call 搞定全部积压）",
     )
     pi.add_argument("--keep", action="store_true", help="配合 --digest：只读简报，不标 .done")
+    pi.add_argument(
+        "--all-channels", dest="all_channels", action="store_true",
+        help="配合 --digest：跨通道全收（默认只消化本通道——收信箱两条微信通道共用，"
+             "乱收会把别人通道的结果标 .done 并汇报到错误聊天窗口）",
+    )
     pi.add_argument("--json", action="store_true", help="结构化输出")
     pi.add_argument("--gc", action="store_true", help=f"清理 {DONE_SUFFIX}（默认干跑）")
     pi.add_argument("--older-than", type=float, default=7, help="配合 --gc：保留最近 N 天（默认 7）")
@@ -5880,6 +6335,17 @@ def _build_parser():
     pa.add_argument("task_ids", nargs="+", help="一个或多个 task_id")
     pa.add_argument("--send", action="store_true", help="直接发送微信（默认只打印）")
     pa.set_defaults(func=_cmd_aggregate)
+
+    pw = sub.add_parser(
+        "pool",
+        help="暖池运维：列出待命 Stand / warm 播种+清扫 / sweep 只清扫（2026-07-26 提速批件）",
+    )
+    pw.add_argument("--warm", action="store_true",
+                    help="播种：给默认 Worker/Thinker 模板各补满待命位（幂等，池满跳过）+顺手清扫过期位")
+    pw.add_argument("--sweep", action="store_true", help="只清扫：过期待命位归档回收，不播种")
+    pw.add_argument("--template", default=None, help="[--warm] 只给指定模板播种")
+    pw.add_argument("--json", action="store_true", help="结构化输出")
+    pw.set_defaults(func=_cmd_pool)
 
     return p
 
