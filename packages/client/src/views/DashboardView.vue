@@ -346,11 +346,46 @@ function handoff(id: string, templateId: string) {
   cursor: pointer;
 }
 @media (max-width: 768px) {
+  /* 手机端贴齐桌面边栏显示模式（2026-07-26 高律师定）：行间零间隔，卡片连成
+     连续列表，行与行 1px 分隔线，区块（活动中/分组/已归档）用分隔线+小节标题
+     衔接。只动手机端，桌面卡片流不变；回滚 = git revert 本段所在 commit。 */
   .grid {
     grid-template-columns: 1fr;
+    gap: 0;
   }
   .cards-move {
     transition: none !important;
+  }
+  .grid :deep(.card) {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-top: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .grid :deep(.card:last-child) {
+    border-bottom: 0;
+  }
+  .active-section {
+    margin-bottom: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .active-head {
+    padding: 8px 2px 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .group-section {
+    margin-top: 0;
+    border-top: 1px solid var(--border);
+  }
+  .archived-section {
+    margin-top: 0;
+    padding-top: 0;
+  }
+  .archived-grid {
+    margin-top: 0;
   }
 }
 </style>
