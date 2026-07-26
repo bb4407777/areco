@@ -45,7 +45,7 @@
     "start": "node dist/server/index.cjs",
     "prepublishOnly": "npm run build && npm test",
     "hash": "tsx packages/server/src/services/password.ts",
-    "test": "tsx --test packages/server/src/services/templates.test.ts packages/server/src/services/agent-transcript.test.ts packages/server/src/services/session-namer.test.ts packages/server/src/services/traffic-monitor.test.ts packages/server/src/services/rooms.test.ts packages/server/src/services/room-relay.test.ts packages/server/src/services/room-dispatch.test.ts packages/server/src/services/project-db.test.ts packages/server/src/services/project-files.test.ts packages/server/src/services/history.test.ts packages/server/src/services/session.test.ts packages/server/src/ws/resize-policy.test.ts packages/client/src/utils/format.test.ts packages/client/src/utils/sessionGroups.test.ts packages/client/src/utils/projectArtifacts.test.ts"
+    "test": "tsx --test \"packages/**/*.test.ts\""
   },
   "dependencies": {
     "node-pty": "^1.1.0",

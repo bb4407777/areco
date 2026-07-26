@@ -122,6 +122,14 @@ export function buildSpawnSpec(
     if (opts.resume) args.push('--resume', opts.claudeSessionId)
     else args.push('--session-id', opts.claudeSessionId)
   }
+  // 显式传入的 cwd 不存在 → 抛错，不静默回落 $HOME。
+  // 这是 worktree 隔离的成败点：调用方（StandCode）为并行 agent 各建一个 git worktree
+  // 并把路径传进来，若 worktree 没建成 / /tmp 被清 / 路径打错，静默回落会让四个「隔离」
+  // agent 全部落在同一个真仓库里各改各的 —— 正是隔离要防的那件事，而且无声无息。
+  // template.cwd 的陈旧路径保留原有回落行为（那不是调用方的意图，不该炸整台服务）。
+  if (opts.cwd && !fs.existsSync(opts.cwd)) {
+    throw new Error(`工作目录不存在: ${opts.cwd}`)
+  }
   const cwd = opts.cwd || template.cwd || resolved?.cwd || os.homedir()
   if (!resolveCommand(command)) {
     log.warn(`预检未找到命令 ${command}，仍尝试经登录 shell 启动`)
@@ -197,6 +205,14 @@ export class TemplateStore {
       autoStart: Boolean(input.autoStart),
       enabled: input.enabled !== false,
       ...(input.claudeHome?.trim() ? { claudeHome: input.claudeHome.trim() } : {}),
+      // harness/model/preset/transcriptDir 原先没被拷进来：create() 上面刚用
+      // `!input.command && !input.harness` 放行了 harness 模板，转头又把 harness 丢掉，
+      // 于是落库的是 command:"" 且无 harness —— buildSpawnSpec 拼出 `exec ''`，
+      // 会话起来即死且日志无线索。设置页的模板表单（a95b40d）也因此存不上这三个字段。
+      ...(input.harness?.trim() ? { harness: input.harness.trim() } : {}),
+      ...(input.model?.trim() ? { model: input.model.trim() } : {}),
+      ...(input.preset?.trim() ? { preset: input.preset.trim() } : {}),
+      ...(input.transcriptDir?.trim() ? { transcriptDir: input.transcriptDir.trim() } : {}),
     }
     this.config.templates.push(template)
     saveConfig(this.config)
@@ -216,6 +232,16 @@ export class TemplateStore {
       autoStart: patch.autoStart ?? template.autoStart,
       enabled: patch.enabled ?? template.enabled,
       claudeHome: patch.claudeHome !== undefined ? patch.claudeHome.trim() || undefined : template.claudeHome,
+      // 同 create()：这四个字段原先不在 Object.assign 列表里，导致已有模板的
+      // harness/model/preset **既改不了也清不掉**（设置页保存后静默还原）。
+      // 显式传空串 = 清除该字段（与 claudeHome 同语义）。
+      harness: patch.harness !== undefined ? patch.harness.trim() || undefined : template.harness,
+      model: patch.model !== undefined ? patch.model.trim() || undefined : template.model,
+      preset: patch.preset !== undefined ? patch.preset.trim() || undefined : template.preset,
+      transcriptDir:
+        patch.transcriptDir !== undefined
+          ? patch.transcriptDir.trim() || undefined
+          : template.transcriptDir,
     })
     saveConfig(this.config)
     return template

@@ -105,18 +105,27 @@ export class RoomControllers {
     }
   }
 
-  /** 加成员：{templateId} —— 项目内现场 spawn 专属新会话（roomId 强归属，删项目级联删）并登记进 members。
-   *  2026-07-22 收窄（维护者）：不再支持拉已有运行中会话进项目（上下文不统一），统一开新会话 */
+  /** 加成员：{templateId, cwd?} —— 项目内现场 spawn 专属新会话（roomId 强归属，删项目级联删）并登记进 members。
+   *  2026-07-22 收窄（维护者）：不再支持拉已有运行中会话进项目（上下文不统一），统一开新会话
+   *
+   *  cwd（2026-07-26 加）：本次会话的工作目录，覆盖模板的固定 cwd。
+   *  加它是为了解开编排层的死结——StandCode 要给并行 agent 各分一个 git worktree 做文件隔离，
+   *  而此前这条路只收 templateId，cwd 只能来自模板（所有会话共用一个目录），
+   *  于是「隔离」在编排层是空壳（StandCode 的 prepare_workspace 一直硬编码 applied:false）。
+   *  下游早就支持了：SessionManager.spawn 有 cwd 参数、buildSpawnSpec 也优先用它，
+   *  POST /api/sessions 也一直在传 —— 只有房间成员这条路把它丢了。
+   *  目录不存在时 buildSpawnSpec 会抛（不静默回落 $HOME），否则隔离就是假的。 */
   addMember = (ctx: Context) =>
     guard(ctx, () => {
       const room = this.rooms.get(ctx.params.id)
-      const body = (ctx.request.body ?? {}) as { templateId?: string }
+      const body = (ctx.request.body ?? {}) as { templateId?: string; cwd?: string }
       const template = this.templates.get(body.templateId ?? '')
       if (!template || !template.enabled) throw new Error('模板不存在或已停用')
       if (SHELLS.has(path.basename(template.command))) throw new Error('shell 模板不能进项目（没有 agent 可回话）')
       // 先校验后 spawn：归档项目 addMember 必抛，不能让 spawn 先发生留下孤儿会话
       if (room.archivedAt !== null) throw new Error(`项目「${room.name}」已归档，只能查看或恢复`)
-      const summary = this.manager.spawn(template.id, { roomId: room.id })
+      const cwd = body.cwd?.trim() || undefined
+      const summary = this.manager.spawn(template.id, { roomId: room.id, cwd })
       const member = this.rooms.addMember(room.id, { name: template.name, kind: 'session', sessionId: summary.id })
       this.relay.broadcastRooms()
       ok(ctx, member)
