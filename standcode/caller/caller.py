@@ -3814,6 +3814,10 @@ def _cmd_run(args) -> int:
             "stand_name": res.get("stand_name"),
             "template_id": res.get("template_id"),
             "role": res.get("role"),
+            # 消息水位线：stuck/失联后若人工解开选项、Stand 继续跑完，迟到结果
+            # 落在房间里 id>此值处——将来 reconcile 补收凭它增量取，不会翻旧账
+            "messages_count": res.get("messages_count"),
+            "stuck_last_line": res.get("stuck_last_line"),
             "error": res.get("error"),
         })
         _write_state(task_id, state)
