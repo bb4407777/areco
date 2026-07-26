@@ -138,6 +138,13 @@ POLL_INTERVAL_SEC = _conf_float("STANDCODE_POLL_INTERVAL", "poll_interval_sec", 
 STATE_PROBE_SEC = _conf_float("STANDCODE_STATE_PROBE", "state_probe_sec", 5)
 STUCK_CONFIRM_HITS = int(_conf_float("STANDCODE_STUCK_HITS", "stuck_confirm_hits", 2))
 SETTLE_MAX_SEC = _conf_float("STANDCODE_SETTLE_MAX", "settle_max_sec", 1800)
+# 2026-07-26 实战两洞（B4 e2e 现场捕获）：
+# OUTPUT_STALL_PROBES：tool 尾假 working 判别——agent 用 areco-msg 回执后 turn 以工具调用
+#   收尾，transcript 灯永不落绿；outputChars 连续 N 个探针零增长 = 没在干活，定稿。
+# IDLE_STALL_PROBES：注入丢失/模型秒退判别——任务落库但会话 idle 零回复；达 N 重投一次，
+#   翻倍仍空转返回 status='stall' 交人工。
+OUTPUT_STALL_PROBES = int(_conf_float("STANDCODE_OUTPUT_STALL_PROBES", "output_stall_probes", 6))
+IDLE_STALL_PROBES = int(_conf_float("STANDCODE_IDLE_STALL_PROBES", "idle_stall_probes", 9))
 
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
@@ -1599,7 +1606,7 @@ class Caller:
             {
                 "session_id": str,
                 "room_id": str | None,
-                "status": "completed" | "stuck" | "lost" | "timeout" | "error",
+                "status": "completed" | "stuck" | "stall" | "lost" | "timeout" | "error",
                 "result_text": str,         # Stand 回复合并文本（completed/stuck 才有，stuck 为部分结果）
                 "stand_replies": [...],     # 仅 Stand 的回复（排除 Hermes/用户）
                 "elapsed": float,           # 耗时（秒）
@@ -1620,6 +1627,10 @@ class Caller:
         sess_info: dict | None = None
         first_reply_at = 0.0
         last_reply_at = 0.0
+        last_output_chars: int | None = None
+        output_stall_probes = 0
+        idle_hits = 0
+        reinjected = False
 
         def _is_my_stand(sender: str) -> bool:
             """这条消息算不算「我派的那个 Stand 的回复」"""
@@ -1665,6 +1676,16 @@ class Caller:
                 if time.time() - last_status_check > STATE_PROBE_SEC:
                     last_status_check = time.time()
                     sess_info = self._session_info(stand_session_id)
+                    oc = (sess_info or {}).get("outputChars")
+                    if oc is not None and oc == last_output_chars:
+                        output_stall_probes += 1
+                    else:
+                        output_stall_probes = 0
+                        last_output_chars = oc
+                    if (sess_info or {}).get("trafficState") == "idle" and not stand_replies:
+                        idle_hits += 1
+                    else:
+                        idle_hits = 0
                 traffic = (sess_info or {}).get("trafficState")
 
                 # 2a) stuck：needs-user（终端内权限框/选择框/信任页，红绿灯黄灯）连续
@@ -1749,6 +1770,54 @@ class Caller:
                             "error": f"Stand 失联：{lost_reason}",
                         }
 
+            # 2c) 空转自愈（2026-07-26 B4 e2e 实战捕获）：任务消息落库但会话 idle 零回复
+            #     ——注入丢失或模型秒退。达 IDLE_STALL_PROBES 个探针重投一次任务原文
+            #     （从房间按 after_id 取回，新消息触发投递链重新注入）；翻倍仍空转
+            #     → status='stall' 交人工。after_id=0 的老调用方取不到原文，不重投只报 stall。
+            if stand_session_id and not stand_replies and idle_hits:
+                if idle_hits >= IDLE_STALL_PROBES and not reinjected and after_id > 0:
+                    reinjected = True
+                    try:
+                        origin = next(
+                            (m for m in self.get_messages(session_id, after_id=max(0, after_id - 1))
+                             if m.get("id") == after_id), None)
+                        if origin and origin.get("body"):
+                            self.send_message(session_id, stand_name or "all", origin["body"])
+                            logger.warning("Stand 空转（idle×%d），已重投任务消息: session=%s",
+                                           idle_hits, session_id)
+                            log_audit("poll_reinject", {
+                                "task_id": task_id, "role": role, "template": template,
+                                "blocked": False, "session_id": session_id, "room_id": room_id,
+                                "stand_session_id": stand_session_id, "idle_hits": idle_hits,
+                            })
+                    except Exception as e:
+                        logger.warning("重投失败: %s", e)
+                elif idle_hits >= IDLE_STALL_PROBES * 2:
+                    elapsed = round(time.time() - start_time, 2)
+                    last_line = (sess_info or {}).get("lastLine") or ""
+                    log_audit("poll_stall", {
+                        "task_id": task_id, "role": role, "template": template,
+                        "blocked": False, "session_id": session_id, "room_id": room_id,
+                        "stand_session_id": stand_session_id, "elapsed": elapsed,
+                        "reinjected": reinjected,
+                    })
+                    return {
+                        "session_id": session_id,
+                        "room_id": room_id,
+                        "status": "stall",
+                        "result_text": "",
+                        "stand_replies": [],
+                        "elapsed": elapsed,
+                        "completed_at": None,
+                        "messages_count": last_id,
+                        "stuck_last_line": last_line,
+                        "error": (
+                            "Stand 空转：任务已投递但会话零产出"
+                            + ("（已重投一次仍无效）" if reinjected else "")
+                            + "——疑注入丢失或模型秒退，去 areco 看板查看会话"
+                        ),
+                    }
+
             # 3) 定稿判定：有回复 ≠ 干完了（「先应一句收到再干十分钟」曾被截成最终结果）。
             #    读得到红绿灯时，working = 还在干 → 继续等并入后续回复；
             #    conclusion/idle/exited/读不到灯 → 静默 MERGE_WAIT_SEC 后定稿（原合并窗口径）；
@@ -1756,9 +1825,21 @@ class Caller:
             if stand_replies:
                 settle = False
                 settle_forced = False
+                settle_reason = None
                 if stand_session_id and traffic == "working":
-                    if time.time() - first_reply_at >= SETTLE_MAX_SEC:
+                    # tool 尾假 working（B4 e2e 实测多等 9 分钟）：agent 用 areco-msg 回执后
+                    # turn 以工具调用收尾，transcript 灯不落绿——outputChars 连续
+                    # OUTPUT_STALL_PROBES 个探针零增长 = 没在干活，收口。
+                    if output_stall_probes >= OUTPUT_STALL_PROBES:
                         settle = settle_forced = True
+                        settle_reason = "working_wedged"
+                        logger.info(
+                            "定稿: session=%s 灯 working 但输出 %d 探针零增长（tool 尾假 working），收口",
+                            session_id, output_stall_probes,
+                        )
+                    elif time.time() - first_reply_at >= SETTLE_MAX_SEC:
+                        settle = settle_forced = True
+                        settle_reason = "hold_cap"
                         logger.warning(
                             "定稿兜底: session=%s 首条回复已 %.0fs 灯仍 working，强制定稿",
                             session_id, time.time() - first_reply_at,
@@ -1796,6 +1877,7 @@ class Caller:
                         "elapsed": elapsed,
                         "messages_count": last_id,
                         "settle_forced": settle_forced,
+                        "settle_reason": settle_reason,
                     })
                     return {
                         "session_id": session_id,
@@ -1807,6 +1889,7 @@ class Caller:
                         "completed_at": _now_iso(),
                         "messages_count": last_id,
                         "settle_forced": settle_forced or None,
+                        "settle_reason": settle_reason,
                         "error": None,
                     }
 
@@ -3842,9 +3925,13 @@ def _cmd_run(args) -> int:
             "template_id": res.get("template_id"),
             "role": res.get("role"),
             # 消息水位线：stuck/失联后若人工解开选项、Stand 继续跑完，迟到结果
-            # 落在房间里 id>此值处——将来 reconcile 补收凭它增量取，不会翻旧账
+            # 落在房间里 id>此值处——reconcile 补收凭它增量取，不会翻旧账
             "messages_count": res.get("messages_count"),
             "stuck_last_line": res.get("stuck_last_line"),
+            # settle_forced 持久化（全量修复 A3）：灯坏死强制定稿的任务，真正干完的
+            # 迟到结果还会落房间——reconcile 凭此标志 + 水位线做增补扫描
+            "settle_forced": res.get("settle_forced"),
+            "settle_reason": res.get("settle_reason"),
             "error": res.get("error"),
         })
         _write_state(task_id, state)
@@ -3861,6 +3948,18 @@ def _cmd_run(args) -> int:
             "request": (args.request or "")[:200],
             "error": res.get("error"),
         })
+        inbox_final = _inbox_path(task_id)
+        if status == "completed":
+            # 双报去重（2026-07-26 高律师批全量修复 B4）：completed 的结果已随本进程退出
+            # 经 gateway notify 全文转述，inbox 再留 pending 会在下轮 digest 二次汇报
+            # （「发新命令时汇报之前的进度」即此）。完成即标 .done；
+            # stuck/lost/error/timeout 仍留 pending 由 digest 兜底。
+            try:
+                done = inbox_final.with_name(inbox_final.name + DONE_SUFFIX)
+                inbox_final.rename(done)
+                inbox_final = done
+            except OSError as e:
+                logger.warning("inbox 标 .done 失败（会出现一次重复汇报）: %s", e)
         # --brief：stdout 截断到简报级（全文已落 inbox，凭 inbox_path 可取）。
         # 这段 stdout 会整个进 Hermes 会话历史、随后续每次 API 调用回放——长结果
         # 全文回放是今天工具输出占历史 85% 的主因之一。缺省行为不变（决议口径：
@@ -3884,7 +3983,7 @@ def _cmd_run(args) -> int:
                 "degraded": res.get("degraded"),
                 "elapsed": res.get("elapsed"),
                 "completed_at": res.get("completed_at"),
-                "inbox_path": str(_inbox_path(task_id)),
+                "inbox_path": str(inbox_final),
                 "result_text": out_text,
                 "result_truncated": truncated,
                 "error": res.get("error"),
@@ -3963,6 +4062,21 @@ def _cmd_go(args) -> int:
         print(json.dumps({
             "cmd": "go", "status": "blocked", "blocked": True,
             "error": gk.get("reason", ""), "request_preview": request[:200],
+        }, ensure_ascii=False))
+        return 2
+
+    # 0b) operator 白名单快退（2026-07-26 全量修复 A1）：Hermes 把自持车道命令误喂 go
+    #     （如整段 caller.py status），派出去 = 白烧一个 Stand。显式 --mode 时不拦（改判权保留）。
+    if not args.mode and gk.get("category") == "operator":
+        log_audit("go", {
+            "mode": "operator", "blocked": False, "category": "operator",
+            "request_preview": request[:200],
+        })
+        print(json.dumps({
+            "cmd": "go", "status": "not_dispatchable", "mode": "operator",
+            "reason": gk.get("reason", ""),
+            "suggested_action": gk.get("suggested_action", ""),
+            "error": "operator 白名单动作——Caller 自己跑，不派发。",
         }, ensure_ascii=False))
         return 2
 
@@ -4094,6 +4208,14 @@ def _rec_finalize(task_id: str, st: dict, replies: list[dict], *, dry_run: bool)
     _write_state(task_id, st)
 
 
+def _last_stand_session(st: dict) -> str:
+    """从面包屑倒序找最近一次派发的 stand_session_id（没有则空串）。"""
+    for d in reversed(st.get("dispatches") or []):
+        if d.get("stand_session_id"):
+            return str(d["stand_session_id"])
+    return ""
+
+
 def _rec_notice(task_id: str, st: dict, room_id, status: str, error: str) -> None:
     """把 lost/stuck 判定落 inbox 通知一次（Hermes 下轮 digest 转述）。"""
     spec = st.get("spec") or {}
@@ -4146,7 +4268,7 @@ def _cmd_reconcile(args) -> int:
             task_id = st.get("task_id") or p.stem
             status = st.get("status")
 
-            if status == "stuck":
+            if status in ("stuck", "stall"):
                 counts["scanned"] += 1
                 team = st.get("session_id")
                 if not team:
@@ -4163,7 +4285,52 @@ def _cmd_reconcile(args) -> int:
                     counts["harvested"] += 1
                     actions.append(f"✅ {task_id} 卡死解开，补收 {len(replies)} 条迟到回复")
                 else:
+                    # 无新回复（全量修复 A2）：查会话态——卡死会话被人直接杀掉/归档
+                    # （exited）则升级 lost 落通知，否则（还卡着/查不到）留待下轮
+                    sid = _last_stand_session(st)
+                    info = (caller._session_info(sid) or {}) if sid else {}
+                    if info.get("status") == "exited":
+                        err = "卡死会话已退出且无回复——结果丢失，需人工重派"
+                        if not args.dry_run:
+                            st.update({"status": "lost", "error": err,
+                                       "reconciled_at": _now_iso()})
+                            _write_state(task_id, st)
+                            _rec_notice(task_id, st, st.get("room_id"), "lost", err)
+                        counts["lost_marked"] += 1
+                        actions.append(f"❌ {task_id} 卡死会话已退出（转 lost，通知落 inbox）")
+                    else:
+                        counts["waiting"] += 1
+
+            elif status == "completed" and st.get("settle_forced"):
+                # 全量修复 A3：灯坏死被强制定稿的任务，Stand 真正干完的迟到结果落在
+                # 房间水位线之后——增补进 inbox（completed_late）；确认无迟到货且会话
+                # 已收尾就销账（settle_forced 置 False），不再每轮重扫。
+                counts["scanned"] += 1
+                team = st.get("session_id")
+                if not team:
                     counts["waiting"] += 1
+                    continue
+                try:
+                    msgs = caller.get_messages(team, after_id=int(st.get("messages_count") or 0))
+                except Exception as e:
+                    actions.append(f"⚠️ {task_id} 读房间失败: {e}")
+                    continue
+                replies = _stand_msgs(msgs, st.get("stand_name") or "")
+                if replies:
+                    _rec_finalize(task_id, st, replies, dry_run=args.dry_run)
+                    counts["harvested"] += 1
+                    actions.append(f"✅ {task_id} settle_forced 后补收 {len(replies)} 条迟到回复")
+                else:
+                    sid = _last_stand_session(st)
+                    info = (caller._session_info(sid) or {}) if sid else {}
+                    if info.get("status") == "exited" or info.get("trafficState") in ("conclusion", "idle"):
+                        if not args.dry_run:
+                            st["settle_forced"] = False
+                            st["reconciled_at"] = _now_iso()
+                            _write_state(task_id, st)
+                        actions.append(f"☑️ {task_id} settle_forced 销账（会话已收尾，无迟到回复）")
+                    else:
+                        counts["waiting"] += 1
 
             elif status == "running":
                 if _waiter_alive(st.get("pid")):
@@ -4240,6 +4407,90 @@ def _cmd_reconcile(args) -> int:
     finally:
         if not args.dry_run:
             (TASKS_DIR / ".reconcile.lock").unlink(missing_ok=True)
+
+
+def _cmd_report(args) -> int:
+    """复盘报表（2026-07-26，08-05 试运行复盘口径）：聚合审计日志出派发质量统计。
+
+    输出为微信/房间可直接粘贴的紧凑几行；--json 供机器读。数据全部来自
+    ~/.standcode/audit.jsonl（dispatch/poll_*/go/reconcile/plan_degraded 事件），
+    与决议复盘四指标对齐：成功率、返工线索（stuck/lost/settle_forced/降级）、耗时。
+    """
+    cutoff = time.time() - args.days * 86400
+    ev: dict[str, int] = {}
+    modes: dict[str, int] = {}
+    reused = settle_forced = go_blocked = go_operator = go_real = 0
+    elapsed_sum, elapsed_n = 0.0, 0
+    rec = {"harvested": 0, "stuck_marked": 0, "lost_marked": 0, "dead_marked": 0, "runs": 0}
+    try:
+        lines = Path(AUDIT_LOG_PATH).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        print("无审计日志")
+        return 0
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        try:
+            t = datetime.strptime(r.get("timestamp") or "", "%Y-%m-%dT%H:%M:%SZ") \
+                .replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            continue
+        if t < cutoff:
+            continue
+        e = r.get("event") or "?"
+        ev[e] = ev.get(e, 0) + 1
+        if e == "dispatch":
+            m = r.get("mode") or "?"
+            modes[m] = modes.get(m, 0) + 1
+            if r.get("room_reused"):
+                reused += 1
+        elif e == "poll_completed":
+            if r.get("settle_forced"):
+                settle_forced += 1
+            if isinstance(r.get("elapsed"), (int, float)):
+                elapsed_sum += r["elapsed"]
+                elapsed_n += 1
+        elif e == "go":
+            if r.get("blocked"):
+                go_blocked += 1
+            elif r.get("mode") == "operator":
+                go_operator += 1
+            elif not r.get("dry_run"):
+                go_real += 1
+        elif e == "reconcile":
+            rec["runs"] += 1
+            for k in ("harvested", "stuck_marked", "lost_marked", "dead_marked"):
+                rec[k] += int(r.get(k) or 0)
+    out = {
+        "window_days": args.days,
+        "dispatch_total": sum(modes.values()),
+        "by_mode": modes,
+        "room_reused": reused,
+        "completed": ev.get("poll_completed", 0),
+        "avg_elapsed_sec": round(elapsed_sum / elapsed_n, 1) if elapsed_n else None,
+        "settle_forced": settle_forced,
+        "stuck": ev.get("poll_stuck", 0),
+        "lost": ev.get("poll_lost", 0),
+        "timeout": ev.get("poll_timeout", 0),
+        "plan_degraded": ev.get("plan_degraded", 0),
+        "go": {"real": go_real, "blocked": go_blocked, "operator_rejected": go_operator},
+        "reconcile": rec,
+    }
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
+    md = " / ".join(f"{k} {v}" for k, v in sorted(modes.items())) or "无"
+    avg = f"，均耗时 {out['avg_elapsed_sec']}s" if out["avg_elapsed_sec"] is not None else ""
+    print(f"📊 StandCode 派发报表（近 {args.days:g} 天）")
+    print(f"派发 {out['dispatch_total']} 单：{md}（复用房 {reused}）")
+    print(f"完成 {out['completed']}{avg}（强制定稿 {settle_forced}）｜"
+          f"卡死 {out['stuck']}｜失联 {out['lost']}｜超时 {out['timeout']}｜计划降级 {out['plan_degraded']}")
+    print(f"go 入口：真派 {go_real}｜红线拦截 {go_blocked}｜operator 拦回 {go_operator}")
+    print(f"对账（{rec['runs']} 轮）：补收 {rec['harvested']}｜转stuck {rec['stuck_marked']}｜"
+          f"标lost {rec['lost_marked']}｜标dead {rec['dead_marked']}")
+    return 0
 
 
 def _cmd_inbox(args) -> int:
@@ -4867,6 +5118,14 @@ def _build_parser():
     prr.add_argument("--dry-run", action="store_true", help="只报告不写")
     prr.add_argument("--max-age-days", type=float, default=7.0, help="只扫最近 N 天的 state（默认 7）")
     prr.set_defaults(func=_cmd_reconcile)
+
+    prp = sub.add_parser(
+        "report",
+        help="复盘报表：聚合审计出派发质量统计（08-05 试运行复盘口径，输出可直接贴房间/微信）",
+    )
+    prp.add_argument("--days", type=float, default=1.0, help="统计窗口天数（默认 1）")
+    prp.add_argument("--json", action="store_true", help="机器可读输出")
+    prp.set_defaults(func=_cmd_report)
 
     pp2 = sub.add_parser("plans", help="计划库：列出历史 Thinker 计划 / 查相似度（P1-3 复用）")
     pp2.add_argument("--show", default=None, metavar="TASK_ID", help="打印某条计划全文")
