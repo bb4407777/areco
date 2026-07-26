@@ -1,4 +1,21 @@
-# Areco
+# StandCode
+
+> 替身使者不亲自战斗——它召唤替身。
+> **StandCode 为主**：Caller / Thinker / Worker 三层 agent 编排框架——让一个常驻入口 agent（比如接微信的 Hermes）指挥任意 CLI agent 干活，任务全程看板可见，结果落收信箱，零轮询零多余 token。
+> **areco 为辅**：承载 Stand 的会话看板底座（网页远程座舱），StandCode 的执行场。
+
+本仓是两者的 monorepo（主仓 [bb4407777/standcode](https://github.com/bb4407777/standcode)，[bb4407777/areco](https://github.com/bb4407777/areco) 为每日自动同步的全量镜像）：
+
+| 组件 | 位置 | 是什么 | npm |
+|---|---|---|---|
+| **StandCode**（主） | `standcode/` | 三层编排框架：派单 CLI `caller.py` + 收信箱 + 角色/harness/preset 配置 | [`standcode`](https://www.npmjs.com/package/standcode)（已发布） |
+| **areco**（辅·底座） | `packages/` | 多 agent 会话座舱：pty 服务端、transcript、项目房间、设备接管 | `areco`（未发布） |
+
+StandCode 的用法见 [standcode/README.md](standcode/README.md)；以下为底座 areco 的文档。
+
+---
+
+# Areco（底座）
 
 > 原名 **agent-remote**，v2.2.0 起更名为 **areco**（A **Re**mote **Co**worker）。
 
@@ -19,7 +36,7 @@ CLI Agent 网页远程座舱 —— 在浏览器/手机上远程驾驶 Claude Co
 npm i -g areco && areco   # then open http://127.0.0.1:8790
 ```
 
-Apache-2.0 · [GitHub](https://github.com/bb4407777/areco) · 中文文档见下文
+Apache-2.0 · [GitHub](https://github.com/bb4407777/standcode)（main repo）· 中文文档见下文
 
 
 ## 能干什么

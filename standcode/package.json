@@ -6,7 +6,7 @@
   "author": "bb4407777",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bb4407777/areco.git",
+    "url": "git+https://github.com/bb4407777/standcode.git",
     "directory": "standcode"
   },
   "keywords": ["agent", "orchestration", "multi-agent", "areco", "cli", "dispatcher"],
