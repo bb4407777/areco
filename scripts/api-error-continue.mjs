@@ -15,18 +15,23 @@
 //
 // 用法：
 //   node scripts/api-error-continue.mjs               扫描全部 → 注入 → 验证 → 紧凑报告
-//   node scripts/api-error-continue.mjs --patrol      巡检模式（cc-connect cron 每 5 分钟跑）：
-//                                                     自动 continue；只有「救活/救不活/反复报错/
-//                                                     卡确认框超 8 分钟/进程 error 态」才 cc-send
-//                                                     推微信，干净则只写日志一行零打扰
+//   node scripts/api-error-continue.mjs --patrol      巡检模式（cc-connect cron 每 1 分钟跑，2026-07-26 高律师定）：
+//                                                     stalled 即注 continue（冷却 50s）；同一故障片段
+//                                                     持续 ≥5 分钟 → `freemodel-key next --probe` 切
+//                                                     key×节点组合（探活选通的那个），切完立刻再注
+//                                                     continue；仍不救 → 每 5 分钟再跳一个组合，全局
+//                                                     每小时最多 6 跳；片段注满 15 次 give-up 通知人工。
+//                                                     微信只报「切换/救不活/卡确认框/进程 error」，
+//                                                     干净或普通续跑只写日志。
 //   node scripts/api-error-continue.mjs --dry-run     只识别不注入
 //   node scripts/api-error-continue.mjs --session <id前缀> [--force]
 //                                                     只处理指定会话；--force 跳过 API Error
 //                                                     匹配要求（仍拒绝工作中/权限框/未发送文字）
 //   node scripts/api-error-continue.mjs --json        机器可读输出
-//   node scripts/api-error-continue.mjs --self-test   识别状态机纯函数自测（不联网）
+//   node scripts/api-error-continue.mjs --self-test   识别状态机+片段跟踪纯函数自测（不联网）
 //   --no-send（配 --patrol 调试：通知只打印不发微信） --test-notify（发一条通道测试消息）
-// 冷却：同一会话 10 分钟内不重复注入（--cooldown-min 调，--force 忽略）；24h 超 6 次标记需人工。
+//   --no-switch（配 --patrol 调试：升级判定照走但不真切 key）
+// 冷却：手动模式同一会话 10 分钟内不重复注入（--cooldown-min 调，--force 忽略）。
 
 import WebSocket from 'ws'
 import fs from 'node:fs'
@@ -51,11 +56,19 @@ const JSON_OUT = has('--json')
 const FORCE = has('--force')
 const PATROL = has('--patrol')
 const NO_SEND = has('--no-send')
+const NO_SWITCH = has('--no-switch')
 const ONLY = opt('--session', null)
-const COOLDOWN_MS = Number(opt('--cooldown-min', '10')) * 60_000
-const MAX_PER_DAY = 6
-// 卡在权限/信任框连续可见超此时长才告警（约两个巡检周期，瞬时确认框不打扰）
+// 巡检 1 分钟一跑：冷却 50s 保证每 tick 仍卡就再注；手动模式维持 10 分钟防连点
+const COOLDOWN_MS = Number(opt('--cooldown-min', PATROL ? '0.85' : '10')) * 60_000
+// 卡在权限/信任框连续可见超此时长才告警（瞬时确认框不打扰）
 const DIALOG_PERSIST_MS = 8 * 60_000
+// 故障片段（episode）参数：同一会话连续 API Error 的一段
+export const ESCALATE_AFTER_MS = Number(opt('--escalate-min', '5')) * 60_000 // 卡满 5 分钟才升级切 key/节点
+const SWITCH_MIN_GAP_MS = 4.5 * 60_000 // 两次切换全局最小间隔（对齐 5 分钟档，留巡检抖动余量）
+const SWITCH_MAX_PER_HOUR = 6 // 组合环才 6 个组合，1 小时兜一圈还没好就该人上了
+export const EP_MAX_INJECTIONS = 15 // 单片段 continue 上限，超过 give-up（防给死会话灌一夜 continue）
+export const EP_STALE_MS = 10 * 60_000 // 10 分钟没再看到错误 = 片段结束（人已救活/在忙别的）
+const FREEMODEL_KEY_BIN = '/Users/gao/skills/freemodel/scripts/freemodel-key'
 // 微信通知走 cc-connect 出站（与 deadline-patrol 同口径：显式会话键，裸 -m 会依赖活跃指针静默失败）
 const CC_SEND = '/Users/gao/scripts/cc-send.sh'
 const WEIXIN_SESSION = 'weixin:dm:o9cq802pfYrkgul79flJor4d7uQs@im.wechat'
@@ -116,6 +129,33 @@ export function classifyScreen(lines) {
   return { verdict: 'stalled', errorLine }
 }
 
+// ---- 故障片段跟踪（纯函数，--self-test 可测）---------------------------------
+//
+// episode = 同一会话一段连续的 API Error 故障：
+//   { firstTs, lastErrTs, injections, lastEscalateTs?, gaveUp? }
+// stalled/retrying 都算「错误还在」；clean/stale 立即收段；其余（busy/dialog/
+// pending-input）保持现段——busy 多半是我们注入的 continue 在重试，未必已痊愈。
+
+export function updateEpisode(st, verdict, now, staleMs = EP_STALE_MS) {
+  if (verdict === 'stalled' || verdict === 'retrying') {
+    if (!st.ep || now - st.ep.lastErrTs > staleMs) st.ep = { firstTs: now, lastErrTs: now, injections: 0 }
+    else st.ep.lastErrTs = now
+  } else if (verdict === 'clean' || verdict === 'stale') {
+    delete st.ep
+  } else if (st.ep && now - st.ep.lastErrTs > staleMs) {
+    delete st.ep
+  }
+  return st.ep
+}
+
+/** 该片段现在是否轮到升级切 key/节点（不含全局闸，全局闸在主流程里统一算） */
+export function episodeWantsSwitch(ep, now, afterMs = ESCALATE_AFTER_MS) {
+  if (!ep || ep.gaveUp) return false
+  if (now - ep.firstTs < afterMs) return false
+  if (ep.lastEscalateTs && now - ep.lastEscalateTs < afterMs) return false
+  return true
+}
+
 // ---- 自测 ------------------------------------------------------------------
 
 function selfTest() {
@@ -162,7 +202,47 @@ function selfTest() {
       console.error(`FAIL want=${want} got=${got} :: ${lines[0]}`)
     }
   }
-  console.log(fail === 0 ? `self-test PASS (${cases.length} cases)` : `self-test ${fail} FAIL`)
+
+  // 片段跟踪：时间轴推演（分钟 → 毫秒）
+  const M = 60_000
+  const epCases = []
+  const check = (name, cond) => epCases.push([name, cond])
+  {
+    const st = {}
+    updateEpisode(st, 'stalled', 0 * M)
+    check('开段', st.ep && st.ep.firstTs === 0)
+    updateEpisode(st, 'busy', 1 * M)
+    check('busy 保段', Boolean(st.ep))
+    updateEpisode(st, 'stalled', 2 * M)
+    check('续段不重开', st.ep.firstTs === 0)
+    check('4分钟未到不切', !episodeWantsSwitch(st.ep, 4 * M))
+    check('5分钟该切', episodeWantsSwitch(st.ep, 5 * M + 1))
+    st.ep.lastEscalateTs = 5 * M
+    check('刚切过5分钟内不再切', !episodeWantsSwitch(st.ep, 8 * M))
+    check('切后又满5分钟再切', episodeWantsSwitch(st.ep, 10 * M + 1))
+    updateEpisode(st, 'stale', 11 * M)
+    check('stale 收段', !st.ep)
+  }
+  {
+    const st = {}
+    updateEpisode(st, 'retrying', 0)
+    check('retrying 也开段', Boolean(st.ep))
+    updateEpisode(st, 'busy', 5 * M)
+    check('busy 中未过期保段', Boolean(st.ep))
+    updateEpisode(st, 'busy', 11 * M)
+    check('10分钟无错自动收段', !st.ep)
+    updateEpisode(st, 'stalled', 12 * M)
+    check('新故障重新开段', st.ep && st.ep.firstTs === 12 * M)
+    st.ep.gaveUp = true
+    check('give-up 后不再切', !episodeWantsSwitch(st.ep, 30 * M))
+  }
+  for (const [name, cond] of epCases) {
+    if (!cond) {
+      fail++
+      console.error(`FAIL episode :: ${name}`)
+    }
+  }
+  console.log(fail === 0 ? `self-test PASS (${cases.length + epCases.length} cases)` : `self-test ${fail} FAIL`)
   process.exit(fail === 0 ? 0 : 1)
 }
 
@@ -249,7 +329,7 @@ function audit(entry) {
   } catch { /* 审计失败不阻断主流程 */ }
 }
 
-/** 单实例锁：巡检 5 分钟一跑，与手动运行重叠时防对同一会话双发 continue。陈锁（>2min）视为死进程接管 */
+/** 单实例锁：巡检 1 分钟一跑，运行重叠/与手动并发时防对同一会话双发 continue。陈锁（>2min）视为死进程接管 */
 function acquireLock() {
   fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true })
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -270,6 +350,31 @@ function acquireLock() {
     }
   }
   return false
+}
+
+/** 升级动作：freemodel-key next --probe 切到第一个探活成功的 key×节点组合。
+ *  exit 0=已切；3=全组合探活失败、保持原配置未动；其余=脚本故障。 */
+function runKeySwitch() {
+  if (NO_SWITCH) return { code: 0, out: '[no-switch] 调试模式，未真切', dry: true }
+  const r = spawnSync(FREEMODEL_KEY_BIN, ['next', '--probe'], {
+    env: { ...process.env, HOME: '/Users/gao' },
+    timeout: 150_000,
+    encoding: 'utf-8',
+  })
+  const out = `${r.stdout || ''}${r.stderr || ''}`.trim()
+  return { code: r.status, out }
+}
+
+/** 从 freemodel-key 输出提炼一句话（切到哪个组合 / 探活情况） */
+function summarizeSwitch(out) {
+  const wrote = out.split('\n').find((l) => l.startsWith('wrote config for'))
+  const probes = out.split('\n').filter((l) => l.startsWith('probe ')).map((l) => l.replace(/^probe /, ''))
+  if (wrote) {
+    const m = wrote.match(/wrote config for (\S+).*node=(\S+)/)
+    const combo = m ? `${m[1]}×${m[2].replace(/^https?:\/\//, '')}` : wrote
+    return `已切到 ${combo}${probes.length ? `（探活：${probes.join('；')}）` : ''}`
+  }
+  return probes.length ? `未切换（探活：${probes.join('；')}）` : out.slice(0, 200)
 }
 
 /** 推微信（返回是否成功）。--no-send 时只打印，便于调试巡检文案 */
@@ -293,7 +398,7 @@ function notifyWeixin(text) {
 async function main() {
   if (has('--self-test')) selfTest()
   if (has('--test-notify')) {
-    notifyWeixin('🩺 areco 会话巡检通道测试：每 5 分钟自动体检 claude 系会话，API Error 卡死自动 continue，异常才提醒。')
+    notifyWeixin('🩺 areco 会话巡检通道测试：每分钟体检 claude 系会话，API Error 卡死自动 continue；持续 5 分钟自动切 FreeModel key×节点（探活选通）再续，异常才提醒。')
     return
   }
   if (PATROL && (DRY || FORCE || ONLY)) {
@@ -321,8 +426,8 @@ async function main() {
 
   const results = []
   if (PATROL) {
-    // 状态剪枝：会话已从看板删除的条目不再保留
-    for (const key of Object.keys(state)) if (!all.some((s) => s.id === key)) delete state[key]
+    // 状态剪枝：会话已从看板删除的条目不再保留（_g 是全局切换台账，豁免）
+    for (const key of Object.keys(state)) if (key !== '_g' && !all.some((s) => s.id === key)) delete state[key]
     // 进程 error 态（pty 级异常，非 API Error）：只通报不动手——生命周期操作归人
     for (const s of all) {
       if (!isClaudeFamily(s) || s.archived) continue
@@ -338,12 +443,14 @@ async function main() {
       }
     }
   }
+
+  // ---- 第一遍：全量读屏普查（喂片段跟踪 + 定升级）----
+  const scans = []
   for (const s of targets) {
     const short = s.id.slice(0, 8)
     const name = s.name.slice(0, 24)
     const st = state[s.id] || (state[s.id] = { times: [] })
     st.times = (st.times || []).filter((t) => now - t < 86_400_000)
-    if (st.gaveUp && st.times.length < MAX_PER_DAY) delete st.gaveUp // 24h 窗滚动，重新放行
     let cls
     try {
       cls = classifyScreen(await screenOf(s.id))
@@ -351,6 +458,8 @@ async function main() {
       results.push({ id: short, name, action: 'skip', why: `读屏失败 ${err.message}` })
       continue
     }
+    updateEpisode(st, cls.verdict, now)
+    scans.push({ s, short, name, st, cls })
     // 巡检：确认框滞留跟踪——瞬时权限框不吵，连续可见超 DIALOG_PERSIST_MS 才告警一次，消失即复位
     if (PATROL) {
       if (cls.verdict === 'dialog') {
@@ -365,6 +474,48 @@ async function main() {
         delete st.dialog
       }
     }
+  }
+
+  // ---- 升级：故障片段卡满 5 分钟 → 切 key×节点组合（探活选通），切完再注 continue ----
+  if (PATROL && !DRY) {
+    const g = state._g || (state._g = {})
+    g.switchTimes = (g.switchTimes || []).filter((t) => now - t < 3600_000)
+    const wanting = scans.filter(
+      ({ st, cls }) => (cls.verdict === 'stalled' || cls.verdict === 'retrying') && episodeWantsSwitch(st.ep, now)
+    )
+    if (wanting.length) {
+      const gapOk = !g.lastSwitchTs || now - g.lastSwitchTs >= SWITCH_MIN_GAP_MS
+      const capOk = g.switchTimes.length < SWITCH_MAX_PER_HOUR
+      if (gapOk && capOk) {
+        const names = wanting.map((w) => w.name)
+        const sw = runKeySwitch()
+        g.lastSwitchTs = now
+        g.switchTimes.push(now)
+        // 一次切换是全局补救：所有活跃片段一并盖时间戳，别让多个卡死会话连环触发
+        for (const { st } of scans) if (st.ep) st.ep.lastEscalateTs = now
+        const summary = summarizeSwitch(sw.out)
+        if (sw.code === 0) {
+          results.push({ action: 'key-switch', why: `API Error 持续≥${Math.round(ESCALATE_AFTER_MS / 60000)} 分钟（${names.join('、')}），${summary}，随即重注 continue` })
+        } else if (sw.code === 3) {
+          results.push({ action: 'switch-failed', why: `API Error 持续但全部 key×节点组合探活失败，配置未动（疑似全面断网/上游故障）：${summary}` })
+        } else {
+          results.push({ action: 'switch-failed', why: `freemodel-key 执行失败(code=${sw.code})：${sw.out.slice(0, 200)}` })
+        }
+        audit({ action: 'key-switch', code: sw.code, sessions: names, out: sw.out.slice(0, 500) })
+      } else if (!capOk && !g.capNotified) {
+        g.capNotified = true
+        results.push({ action: 'switch-failed', why: `1 小时内已切换 ${g.switchTimes.length} 次仍反复故障，停止自动切换，需人工` })
+        audit({ action: 'switch-cap', switches: g.switchTimes.length })
+      }
+    } else {
+      if (g.capNotified && g.switchTimes.length < SWITCH_MAX_PER_HOUR) delete g.capNotified
+    }
+  }
+
+  // ---- 第二遍：注入（巡检模式切换耗时较长，注前重新读屏防误注）----
+  for (const scan of scans) {
+    const { s, short, name, st } = scan
+    let cls = scan.cls
     if (cls.verdict !== 'stalled' && !FORCE) {
       if (cls.verdict !== 'clean' && cls.verdict !== 'busy') {
         results.push({ id: short, name, action: 'skip', why: cls.verdict, errorLine: cls.errorLine })
@@ -376,16 +527,14 @@ async function main() {
       continue
     }
     if (!FORCE && st.times.length && now - st.times[st.times.length - 1] < COOLDOWN_MS) {
-      results.push({ id: short, name, action: 'skip', why: '冷却期内（10 分钟）' })
+      results.push({ id: short, name, action: 'skip', why: `冷却期内（${Math.round(COOLDOWN_MS / 1000)}s）` })
       continue
     }
-    if (!FORCE && st.times.length >= MAX_PER_DAY) {
-      if (!st.gaveUp) {
-        st.gaveUp = true
-        results.push({ id: short, name, action: 'give-up', why: `24h 已注入 ${st.times.length} 次仍反复 API Error，需人工` })
-        audit({ sessionId: s.id, name: s.name, action: 'give-up', errorLine: cls.errorLine })
-      } else if (!PATROL) {
-        results.push({ id: short, name, action: 'skip', why: '24h 上限已达（此前已提醒）' })
+    if (PATROL && st.ep && st.ep.injections >= EP_MAX_INJECTIONS) {
+      if (!st.ep.gaveUp) {
+        st.ep.gaveUp = true
+        results.push({ id: short, name, action: 'give-up', why: `本轮故障已注入 ${st.ep.injections} 次仍卡死${st.ep.lastEscalateTs ? '（已切过 key/节点）' : ''}，停手待人工` })
+        audit({ sessionId: s.id, name: s.name, action: 'give-up', injections: st.ep.injections, errorLine: cls.errorLine })
       }
       continue
     }
@@ -393,10 +542,19 @@ async function main() {
       results.push({ id: short, name, action: 'would-send', errorLine: cls.errorLine })
       continue
     }
+    if (PATROL) {
+      // 普查到现在隔了读屏+可能的切换探活，屏幕可能已自行恢复，注前复核一次
+      try {
+        cls = classifyScreen(await screenOf(s.id))
+      } catch {
+        continue
+      }
+      if (cls.verdict !== 'stalled') continue
+    }
     try {
       await sendContinue(s.id)
       st.times.push(now)
-      state[s.id] = st
+      if (st.ep) st.ep.injections += 1
       const verdict = await verifyResumed(s.id)
       results.push({ id: short, name, action: 'sent', verify: verdict, errorLine: cls.errorLine })
       audit({ sessionId: s.id, name: s.name, action: 'sent', verify: verdict, errorLine: cls.errorLine, forced: FORCE })
@@ -412,10 +570,12 @@ async function main() {
     const line = (r) =>
       r.action === 'sent' ? `✅ ${r.name}：API Error 已注入 continue → ${vmapW[r.verify] || r.verify}`
       : r.action === 'send-failed' ? `❌ ${r.name}：注入失败（${r.why}）`
+      : r.action === 'key-switch' ? `🔑 ${r.why}`
+      : r.action === 'switch-failed' ? `🆘 ${r.why}`
       : r.action === 'give-up' ? `🆘 ${r.name}：${r.why}`
       : r.action === 'dialog-stuck' ? `⚠️ ${r.name}：${r.why}，请到看板处理`
       : `💥 ${r.name}：${r.why}`
-    const logworthy = results.filter((r) => ['sent', 'send-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
+    const logworthy = results.filter((r) => ['sent', 'send-failed', 'key-switch', 'switch-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
     const stamp = new Date().toISOString()
     if (!logworthy.length) {
       console.log(`${stamp} 巡检 clean（${targets.length} 个 claude 系会话）`)
