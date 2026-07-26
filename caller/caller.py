@@ -182,6 +182,24 @@ PLAN_TEMPLATE = (
     "最终产物落点：<最终交付文件的绝对路径，或『无』>\n"
 )
 
+# 模式 4（think，无下游 Worker）的角色约束。
+#
+# 这段本来写在 config/presets.json 的 `thinker_only.system` 里——但 2026-07-26 查证：
+# areco 的 standcode-resolver 只在 harness==="openclaw" 时读 preset，且只读 timeout；
+# `system` 与 `thinking` 在任何分支下都从未被读取，而本机 harnesses.json 里压根没有
+# openclaw。也就是说 presets 的角色提示词是**纯装饰，从未传给任何模型**。
+# 真正生效的机制是「把约束写进 dispatch 的 request 正文」——PLAN_TEMPLATE 一直这么干。
+# 所以搬过来。
+THINK_TEMPLATE = (
+    "{request}\n\n"
+    "---\n"
+    "【本次角色：Thinker，没有下游 Worker——你的输出直接交给用户】\n"
+    "· 要的是**判断**：结论先行，讲清取舍与依据，标明不确定处与前提。\n"
+    "· 不要输出待办清单或执行步骤（用户没要计划），不要动手执行任何操作。\n"
+    "· 查得到的先自查，别把能查的问题抛回给用户。\n"
+    "· 拿不准就说拿不准，并说明需要什么才能定——编一个确定的答案比说不知道更贵。\n"
+)
+
 # 计划重申模板（P0-2 降级第 1 级）：首轮计划缺「步骤」段时，在同房间同 Stand 上重申格式。
 # 只讲格式、不重述任务——Stand 就在房里，任务上下文它有；重述反而可能让它从头再想一遍。
 PLAN_RETRY_TEMPLATE = (
@@ -1102,15 +1120,23 @@ class Caller:
 
     # ── Stand（成员）管理 ───────────────────────────────────────
 
-    def add_stand(self, room_id: str, template_id: str) -> dict:
+    def add_stand(self, room_id: str, template_id: str, cwd: str | None = None) -> dict:
         """在房间中添加一个 Stand（worker agent session）
-        
+
+        cwd：本次会话的工作目录，覆盖模板固定 cwd（areco 2026-07-26 起支持）。
+        用于 isolated=True 的 git worktree 隔离。areco 侧目录不存在会直接 400 ——
+        刻意的，静默回落 $HOME 会让「隔离的」并行 agent 全落在同一个真仓库里。
+
         返回成员信息，包含 name（用于发消息时定位）和 sessionId。
         """
-        member = self._api_post(f"/rooms/{room_id}/members", {"templateId": template_id})
+        payload: dict = {"templateId": template_id}
+        if cwd:
+            payload["cwd"] = cwd
+        member = self._api_post(f"/rooms/{room_id}/members", payload)
         logger.info(
-            "添加 Stand: room=%s template=%s → name=%s session=%s",
-            room_id, template_id, member.get("name"), member.get("sessionId"),
+            "添加 Stand: room=%s template=%s cwd=%s → name=%s session=%s",
+            room_id, template_id, cwd or "(模板默认)",
+            member.get("name"), member.get("sessionId"),
         )
         return member
 
@@ -1249,11 +1275,9 @@ class Caller:
             isolated:   工作区隔离（建议 4b）。True 时为本任务准备独立工作目录
                         （/tmp/standcode-workspaces/{task_id}/）；workspace_repo 给定时
                         走真正的 git worktree，否则只 mkdir 空目录。
-                        ⚠️ 当前仅「准备目录 + 回填 workspace_cwd 到结果」，并不真正
-                        把 Stand 的 cwd 改过去——areco addMember 只收 {templateId}
-                        （rooms.ts:113），cwd 来自模板（固定模板 cwd），Caller 无权
-                        覆盖。需 areco 支持 per-session cwd 后才能落地（见 prepare_workspace）。
-                        默认 False，行为与改动前完全一致。
+                        2026-07-26 起真正生效：areco addMember 已支持 per-session cwd，
+                        dispatch 会把工作目录传给 Stand（worktree 建失败时不传，如实标
+                        applied=False）。默认 False——隔离要花磁盘和 git 操作，按需开。
             workspace_repo: isolated=True 时基于哪个 git 仓库建 worktree；None=只建空目录。
 
         返回:
@@ -1359,7 +1383,15 @@ class Caller:
         # 3-5 步任一失败都要回滚：自建的房间归档掉，别留着烧额度。
         try:
             # 3. 添加 Stand（agent session）
-            member = self.add_stand(rid, tid)
+            # 隔离工作区落地：areco 2026-07-26 起 addMember 收 cwd。
+            # 只在 worktree 真建成时才传——kind 以 failed: 开头说明 git 没成，
+            # 这时传过去 areco 会 400，不如让它用模板默认目录并在结果里如实标 applied=False。
+            ws_cwd = None
+            if workspace_info and not str(workspace_info.get("kind", "")).startswith("failed"):
+                ws_cwd = workspace_info.get("path")
+            member = self.add_stand(rid, tid, cwd=ws_cwd)
+            if ws_cwd:
+                workspace_info["applied"] = True
             stand_name = member["name"]
             stand_session_id = member.get("sessionId", "")
 
@@ -1715,10 +1747,16 @@ class Caller:
           （`git -C <repo> worktree add ...`），这是设计文档说的「worktree 隔离」正解。
         - source_repo 省略：只 mkdir 空目录（不是 git worktree，无隔离实效，仅占位）。
 
-        返回 {path, kind, applied}。applied 恒为 False：Caller 无权把 Stand 的 cwd 切到
-        此目录（areco addMember 只收 templateId，cwd 来自模板固定值）。真正落地
-        需 areco 支持 per-session cwd（见 docs/architecture-optimization.md 技术依赖）。
-        所以这里只「准备目录 + 回填路径」，不改 Stand 行为。
+        返回 {path, kind, applied}。
+
+        applied 语义（2026-07-26 起真的会是 True）：areco 的 addMember 此前只收
+        templateId，cwd 只能来自模板固定值，Caller 无权覆盖——所以隔离一直是空壳，
+        applied 硬编码 False。现在 areco 支持 per-session cwd（rooms.ts addMember 收 cwd，
+        buildSpawnSpec 对不存在的显式 cwd 直接抛而非静默回落 $HOME），dispatch 会把
+        本目录传过去，applied 随之置 True。
+
+        ⚠️ 仍然只有 source_repo 给定时才是**真隔离**；不给就只是个空目录，
+        多个 Stand 各写各的空目录，对「并发改同一个仓库」没有任何保护。
         """
         ws = WORKSPACE_DIR / task_id
         kind = "empty"
@@ -1976,8 +2014,10 @@ class Caller:
 
         返回: dispatch() + poll_result() + {relay_summary, wechat, relayed}
         """
-        if plan_only and role == "thinker":
-            request = PLAN_TEMPLATE.format(request=request)
+        if role == "thinker":
+            # plan_only → 六段结构化计划；否则 → 模式 4 的「给判断不给待办」约束。
+            # 两者都必须走 request 正文：presets.system 那条路是死的（见 THINK_TEMPLATE 注释）。
+            request = (PLAN_TEMPLATE if plan_only else THINK_TEMPLATE).format(request=request)
         dispatch_result = self.dispatch(
             request=request,
             task_type=task_type,

@@ -126,9 +126,11 @@ class _FakeCaller(C.Caller):
     def get_room(self, room_id):
         return {"id": room_id, "team": f"team-{room_id}", "name": "reused", "archivedAt": None}
 
-    def add_stand(self, rid, tid):
+    def add_stand(self, rid, tid, cwd=None):
         name = f"Stand-{tid}-{len(self._stands)}"
         self._stands.append(name)
+        self._cwds = getattr(self, "_cwds", [])
+        self._cwds.append(cwd)
         self._script[name] = (list(self._thinker_replies) if tid == "thinker-tpl"
                               else ["Worker 干完了，产物在 /tmp/out.txt"])
         return {"name": name, "sessionId": f"ses-{name}"}
@@ -217,7 +219,7 @@ def test_dispatch_hardening() -> None:
 
         # 2) add_stand 中途失败 → 自建的房间被回滚归档
         c = _FakeCaller(tmp / "b.db")
-        c.add_stand = lambda rid, tid: (_ for _ in ()).throw(RuntimeError("areco 起 Stand 失败"))
+        c.add_stand = lambda rid, tid, cwd=None: (_ for _ in ()).throw(RuntimeError("areco 起 Stand 失败"))
         try:
             c.dispatch("任务")
             check(False, "add_stand 失败应向上抛")
@@ -236,6 +238,28 @@ def test_dispatch_hardening() -> None:
             check("已归档" in str(e), "归档房间 → 当场拒绝（改动前 --wait 会静默挂死）")
     finally:
         C.time.sleep = _sleep
+
+
+def test_workspace_isolation() -> None:
+    """isolated=True 时工作目录要真传给 areco（此前 applied 硬编码 False，隔离是空壳）。"""
+    print("\n[workspace] 隔离工作区落地")
+    _sleep, _ws = C.time.sleep, C.WORKSPACE_DIR
+    C.time.sleep = lambda *a, **k: None
+    C.WORKSPACE_DIR = pathlib.Path(tempfile.mkdtemp()) / "ws"
+    try:
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        c = _FakeCaller(tmp / "iso.db")
+        r = c.dispatch("任务", isolated=True)
+        check(r["workspace"] and str(C.WORKSPACE_DIR) in r["workspace"], "工作目录已准备")
+        check(c._cwds[-1] == r["workspace"], "cwd 已传给 add_stand（areco per-session cwd）")
+        check(r["workspace_cwd"] is True, "applied=True（此前硬编码 False）")
+
+        # 不开隔离时不传 cwd，走模板默认
+        c2 = _FakeCaller(tmp / "noiso.db")
+        c2.dispatch("任务")
+        check(c2._cwds[-1] is None, "未开隔离 → 不传 cwd，用模板默认目录")
+    finally:
+        C.time.sleep, C.WORKSPACE_DIR = _sleep, _ws
 
 
 def test_conf_float() -> None:
@@ -321,7 +345,7 @@ def test_plan_reuse() -> None:
 
 def main() -> int:
     for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute,
-              test_dispatch_hardening, test_conf_float, test_inbox_lock,
+              test_dispatch_hardening, test_workspace_isolation, test_conf_float, test_inbox_lock,
               test_wechat_target_guard, test_plan_reuse):
         t()
     print()
