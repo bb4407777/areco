@@ -4,7 +4,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NEmpty, NInput, NModal, NPopconfirm, NPopover, NSelect, NSpin, useMessage } from 'naive-ui'
-import type { DeliveryStatus, DispatchMode, RoomInfo, RoomKind, RoomMember, SessionSummary } from '../../../shared/protocol'
+import type { DeliveryStatus, DispatchMode, ProjectCatalogEntry, ProjectCatalogGroup, RoomInfo, RoomKind, RoomMember, SessionSummary } from '../../../shared/protocol'
 import type { TrafficState } from '../../../shared/traffic'
 import { useRoomsStore } from '../stores/rooms'
 import { useSessionsStore } from '../stores/sessions'
@@ -432,6 +432,129 @@ const filteredArchivedRooms = computed(() => {
   return q ? archivedRooms.value.filter((r) => r.name.toLowerCase().includes(q)) : archivedRooms.value
 })
 
+// ---- 项目目录册（2026-07-27 维护者定）：分组标题 → 每文件夹一栏，点开才按需开房；
+// 分组支持 入组/出组/重命名/新建。任务 tab 不走目录册，保持原房间列表。 ----
+const catalogGroups = ref<ProjectCatalogGroup[]>([])
+const catalogLoaded = ref(false)
+const catalogConfigured = ref(true)
+const catalogSupported = ref(true) // 旧服务端无 /api/projects/catalog（待重启窗口）→ false
+const expandedGroups = ref(new Set<string>())
+const openingPath = ref('')
+
+async function loadCatalog() {
+  if (kind.value !== 'project') return
+  try {
+    const d = await api.get<{ configured: boolean; groups: ProjectCatalogGroup[] }>('/api/projects/catalog')
+    catalogGroups.value = d.groups
+    catalogConfigured.value = d.configured
+    catalogSupported.value = true
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('未找到')) catalogSupported.value = false
+    else message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    catalogLoaded.value = true
+  }
+}
+
+const filteredCatalog = computed(() => {
+  const q = nameFilter.value.trim().toLowerCase()
+  if (!q) return catalogGroups.value
+  return catalogGroups.value
+    .map((g) => ({ ...g, entries: g.entries.filter((e) => e.name.toLowerCase().includes(q)) }))
+    .filter((g) => g.entries.length)
+})
+// 搜索时全组展开（结果都可见），平时按手动展开集
+const groupOpen = (g: ProjectCatalogGroup) => !!nameFilter.value.trim() || expandedGroups.value.has(g.id)
+function toggleGroup(id: string) {
+  const s = new Set(expandedGroups.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  expandedGroups.value = s
+}
+
+function entryDot(e: ProjectCatalogEntry): string {
+  const r = e.roomId ? rooms.byId(e.roomId) : undefined
+  return r ? roomDotColor(r) : 'var(--border-strong)'
+}
+
+/** 点文件夹一栏：已有房直接开，没有则幂等开房（服务端按 rootPath 匹配/去重命名） */
+async function openEntry(e: ProjectCatalogEntry) {
+  if (e.roomId) {
+    openRoom(e.roomId)
+    return
+  }
+  if (openingPath.value) return
+  openingPath.value = e.path
+  try {
+    const room = await api.post<RoomInfo>('/api/projects/open', { path: e.path })
+    await rooms.refresh()
+    openRoom(room.id)
+    loadCatalog() // 回填 roomId 绑定
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    openingPath.value = ''
+  }
+}
+
+// 分组操作共用一个输入弹窗：rename=改名 / add=入组(收路径) / newgroup=新建
+const dlg = ref<{ mode: 'rename' | 'add' | 'newgroup'; group?: ProjectCatalogGroup } | null>(null)
+const dlgValue = ref('')
+const dlgShow = computed({
+  get: () => dlg.value !== null,
+  set: (v: boolean) => {
+    if (!v) dlg.value = null
+  },
+})
+const dlgTitle = computed(() =>
+  dlg.value?.mode === 'rename'
+    ? `重命名分组「${dlg.value.group?.label}」`
+    : dlg.value?.mode === 'add'
+      ? `入组：加文件夹到「${dlg.value.group?.label}」`
+      : '新建分组'
+)
+const dlgPlaceholder = computed(() =>
+  dlg.value?.mode === 'add' ? '文件夹绝对路径（如 /Users/gao/Desktop/民事案件/26民0xxx…）' : '分组名'
+)
+function openDlg(mode: 'rename' | 'add' | 'newgroup', group?: ProjectCatalogGroup) {
+  dlg.value = { mode, group }
+  dlgValue.value = mode === 'rename' ? (group?.label ?? '') : ''
+}
+async function submitDlg() {
+  if (!dlg.value) return
+  const value = dlgValue.value.trim()
+  if (!value) return
+  const { mode, group } = dlg.value
+  try {
+    if (mode === 'newgroup') await api.post('/api/projects/groups', { label: value })
+    else if (mode === 'rename') await api.post(`/api/projects/groups/${group!.id}/rename`, { label: value })
+    else await api.post(`/api/projects/groups/${group!.id}/members`, { path: value })
+    dlg.value = null
+    await loadCatalog()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** 出组：只动分组归属，文件夹与已开的房间都不动 */
+async function removeFromGroup(g: ProjectCatalogGroup, e: ProjectCatalogEntry) {
+  try {
+    await api.post(`/api/projects/groups/${g.id}/members/remove`, { path: e.path })
+    await loadCatalog()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** 项目房里不在任何目录册栏位上的（手工建的、或文件夹已出组）：单列一节，别让它失踪 */
+const catalogRoomIds = computed(
+  () => new Set(catalogGroups.value.flatMap((g) => g.entries.map((e) => e.roomId)).filter((id): id is string => !!id))
+)
+const ungroupedRooms = computed(() => {
+  if (kind.value !== 'project') return []
+  return filteredRooms.value.filter((r) => !catalogRoomIds.value.has(r.id))
+})
+
 type MsgHit = { id: number; roomId: string; roomName: string; archived: boolean; from: string; to: string; body: string; createdAt: string }
 const msgQuery = ref('')
 const searchResults = ref<MsgHit[]>([])
@@ -472,6 +595,7 @@ watch(kind, (k) => {
   showArchived.value = false
   mobileRoomsOpen.value = false
   msgQuery.value = ''
+  if (k === 'project') loadCatalog()
 })
 
 onMounted(async () => {
@@ -479,6 +603,7 @@ onMounted(async () => {
   try {
     await rooms.refresh()
     if (!activeId.value && activeRooms.value.length) activeId.value = activeRooms.value[0].id
+    if (kind.value === 'project') await loadCatalog()
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -493,23 +618,83 @@ onMounted(async () => {
     <aside class="rooms" :class="{ overlay: ui.isMobile, open: !ui.isMobile || mobileRoomsOpen }">
       <div class="rooms-head">
         <span class="rooms-title">当前{{ kindLabel }}</span>
-        <button class="icon-btn" :title="`新建${kindLabel}`" @click="showCreate = true">＋</button>
+        <button
+          class="icon-btn"
+          :title="kind === 'project' ? '新建项目分组' : '新建任务'"
+          @click="kind === 'project' ? openDlg('newgroup') : (showCreate = true)"
+        >＋</button>
       </div>
       <NInput v-model:value="nameFilter" :placeholder="`搜${kindLabel}名`" size="tiny" clearable class="rooms-search" />
       <div class="rooms-list">
-        <button
-          v-for="r in filteredRooms"
-          :key="r.id"
-          class="room-item"
-          :class="{ active: r.id === activeId }"
-          @click="openRoom(r.id)"
-        >
-          <span class="room-dot" :style="{ background: roomDotColor(r) }" />
-          <span class="room-name">{{ r.name }}</span>
-          <span class="room-count">{{ r.members.filter((m) => m.kind === 'session').length }} agent</span>
-          <span v-if="rooms.unread(r.id)" class="badge">{{ rooms.unread(r.id) }}</span>
-        </button>
-        <NEmpty v-if="!activeRooms.length && rooms.loaded" :description="`当前没有${kindLabel}，点右上角 ＋ 建一个`" class="rooms-empty" />
+        <!-- 项目 tab = 目录册：分组标题 → 每文件夹一栏，点开才按需开房；任务 tab 保持原房间列表 -->
+        <template v-if="kind === 'project'">
+          <div v-if="!catalogSupported" class="cat-hint">目录册需 8790 重启后生效（前端已就绪）</div>
+          <div v-else-if="catalogLoaded && !catalogConfigured" class="cat-hint">还没有分组：点下方「＋ 新建分组」建一个，再用 ＋ 入组加文件夹</div>
+          <template v-for="g in filteredCatalog" :key="g.id">
+            <div class="cat-head">
+              <button class="cat-toggle" @click="toggleGroup(g.id)">
+                <span class="cat-caret">{{ groupOpen(g) ? '▾' : '▸' }}</span>
+                <span class="cat-label">{{ g.label }}</span>
+                <span class="cat-count">{{ g.entries.length }}</span>
+              </button>
+              <button class="cat-op" title="重命名分组" @click="openDlg('rename', g)">✎</button>
+              <button class="cat-op" :title="`入组：把文件夹加进「${g.label}」`" @click="openDlg('add', g)">＋</button>
+            </div>
+            <template v-if="groupOpen(g)">
+              <div
+                v-for="e in g.entries"
+                :key="e.path"
+                class="room-item cat-entry"
+                :class="{ active: !!e.roomId && e.roomId === activeId }"
+              >
+                <button class="cat-open" :disabled="openingPath === e.path" :title="e.path" @click="openEntry(e)">
+                  <span class="room-dot" :style="{ background: entryDot(e) }" />
+                  <span class="room-name">{{ e.name }}</span>
+                  <span v-if="e.roomId && rooms.unread(e.roomId)" class="badge">{{ rooms.unread(e.roomId) }}</span>
+                </button>
+                <NPopconfirm @positive-click="removeFromGroup(g, e)">
+                  <template #trigger><button class="chip-x" title="出组（不删文件夹，不删已开的房间）">×</button></template>
+                  把「{{ e.name }}」移出分组「{{ g.label }}」？
+                </NPopconfirm>
+              </div>
+              <div v-if="!g.entries.length" class="cat-empty">空组：点 ＋ 入组</div>
+            </template>
+          </template>
+          <button v-if="catalogSupported" class="archive-toggle" @click="openDlg('newgroup')">
+            <span>＋ 新建分组</span>
+            <span></span>
+          </button>
+          <template v-if="ungroupedRooms.length">
+            <div class="cat-head ungrouped-head"><span class="cat-label">未分组项目</span></div>
+            <button
+              v-for="r in ungroupedRooms"
+              :key="r.id"
+              class="room-item"
+              :class="{ active: r.id === activeId }"
+              @click="openRoom(r.id)"
+            >
+              <span class="room-dot" :style="{ background: roomDotColor(r) }" />
+              <span class="room-name">{{ r.name }}</span>
+              <span class="room-count">{{ r.members.filter((m) => m.kind === 'session').length }} agent</span>
+              <span v-if="rooms.unread(r.id)" class="badge">{{ rooms.unread(r.id) }}</span>
+            </button>
+          </template>
+        </template>
+        <template v-else>
+          <button
+            v-for="r in filteredRooms"
+            :key="r.id"
+            class="room-item"
+            :class="{ active: r.id === activeId }"
+            @click="openRoom(r.id)"
+          >
+            <span class="room-dot" :style="{ background: roomDotColor(r) }" />
+            <span class="room-name">{{ r.name }}</span>
+            <span class="room-count">{{ r.members.filter((m) => m.kind === 'session').length }} agent</span>
+            <span v-if="rooms.unread(r.id)" class="badge">{{ rooms.unread(r.id) }}</span>
+          </button>
+          <NEmpty v-if="!activeRooms.length && rooms.loaded" :description="`当前没有${kindLabel}，点右上角 ＋ 建一个`" class="rooms-empty" />
+        </template>
         <button v-if="archivedRooms.length" class="archive-toggle" @click="showArchived = !showArchived">
           <span>已归档</span>
           <span>{{ archivedRooms.length }} {{ showArchived ? '▾' : '▸' }}</span>
@@ -546,7 +731,7 @@ onMounted(async () => {
       <NEmpty
         v-else-if="!room"
         :description="kind === 'project'
-          ? '项目 = 驻扎在文件夹里的常驻域：绑定根目录，PROJECT.md 承接长期上下文，agent 随叫随醒'
+          ? '从左侧分组里点一个文件夹开工：首次点击会为它开项目房，长期上下文落在该文件夹的 PROJECT.md'
           : '建一个任务，把 agent 拉进来协作'"
         class="center"
       />
@@ -744,6 +929,13 @@ onMounted(async () => {
 
     <FileDropOverlay :visible="dragging" />
     <FilePreview :path="previewPath" @close="previewPath = null" />
+    <NModal v-model:show="dlgShow" preset="card" :title="dlgTitle" style="max-width: 440px">
+      <NInput v-model:value="dlgValue" :placeholder="dlgPlaceholder" @keyup.enter="submitDlg" />
+      <p v-if="dlg?.mode === 'add'" class="create-hint">入组/出组只改分组归属，不动文件夹本身，也不影响已开的房间。</p>
+      <template #footer>
+        <NButton type="primary" :disabled="!dlgValue.trim()" @click="submitDlg">确定</NButton>
+      </template>
+    </NModal>
     <NModal v-model:show="showCreate" preset="card" :title="`新建${kindLabel}`" style="max-width: 400px">
       <div class="create-form">
         <NInput
@@ -843,6 +1035,100 @@ onMounted(async () => {
 }
 .room-item.active {
   background: var(--chip-bg);
+}
+.cat-hint,
+.cat-empty {
+  padding: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cat-head {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  margin-top: 5px;
+  border-radius: 7px;
+  color: var(--muted);
+}
+.cat-head:hover {
+  background: var(--hover);
+}
+.cat-toggle,
+.cat-open,
+.cat-op {
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.cat-toggle {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 4px 7px 7px;
+  text-align: left;
+}
+.cat-caret {
+  width: 12px;
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+.cat-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+.cat-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--faint);
+}
+.cat-op {
+  width: 25px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--faint);
+}
+.cat-op:hover {
+  color: var(--text);
+  background: var(--chip-bg);
+}
+.cat-entry {
+  padding: 0 5px 0 17px;
+  gap: 2px;
+}
+.cat-entry .chip-x {
+  flex: 0 0 auto;
+  opacity: 0;
+}
+.cat-entry:hover .chip-x,
+.cat-entry:focus-within .chip-x {
+  opacity: 1;
+}
+.cat-open {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  text-align: left;
+}
+.cat-open:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.ungrouped-head {
+  padding: 0 9px;
 }
 .room-name {
   flex: 1;

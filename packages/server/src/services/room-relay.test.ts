@@ -62,7 +62,8 @@ test('人类无 @ 发言全体收到：串行先放行第一位，回复后轮�
   assert.match(note, /context\.md/, '应给出纪要文件路径')
   assert.match(note, /必须执行下面命令/, '应附回执命令')
   relay.postMessage(roomId, 'A', '我看完了，没问题') // 回复驱动轮转
-  assert.ok(sent['sb']?.length, 'A 回复后 B 被放行，收到同一条根消息')
+  // 前一条 assert 把 sent['sb'] 控制流收窄成 undefined；postMessage 会原位写入桩对象，显式恢复字典类型。
+  assert.ok((sent as Sent)['sb']?.length, 'A 回复后 B 被放行，收到同一条根消息')
 })
 
 test('agent 无 @ 发言不广播（防 agent 互调失控）', () => {
@@ -165,7 +166,7 @@ function futureStart(relay: unknown) {
 }
 
 test('外部直写消息正文无 @ 时按 to_agent 列投递（CLI 收件人不再被吞）', () => {
-  const { rooms, roomId, team } = setup()
+  const { rooms, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   futureStart(relay)
@@ -196,7 +197,7 @@ test('外部编排者（非花名册）连续委派不触发互调深度闸；�
 })
 
 test('初见房间：中继启动前的存量快进不补投，之后的新帖照投', () => {
-  const { rooms, roomId, team } = setup()
+  const { rooms, team } = setup()
   projectDb.send(team, 'Owner', 'all', '@all 启动前的存量消息')
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})

@@ -57,6 +57,12 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   // 项目协作（Phase 6：项目 = 人 + 活会话，@mention 投递终端，消息 SoT 在项目消息库）
   router.get('/rooms', rc.list)
   router.post('/rooms', rc.create)
+  router.get('/projects/catalog', rc.catalog)
+  router.post('/projects/open', rc.openProject)
+  router.post('/projects/groups', rc.createGroup)
+  router.post('/projects/groups/:id/rename', rc.renameGroup)
+  router.post('/projects/groups/:id/members', rc.addGroupMember)
+  router.post('/projects/groups/:id/members/remove', rc.removeGroupMember)
   router.post('/rooms/:id/archive', rc.archive)
   router.post('/rooms/:id/unarchive', rc.unarchive)
   router.delete('/rooms/:id', rc.remove)

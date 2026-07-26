@@ -351,6 +351,24 @@ export interface ProjectFileList {
   truncated: boolean
 }
 
+// ---- 项目目录册（2026-07-27）：项目 tab 侧栏 = 分组标题 → 每个文件夹一栏，房间点开才按需创建 ----
+
+export interface ProjectCatalogEntry {
+  /** 文件夹名（显示名 = 案件夹名/skill 名） */
+  name: string
+  /** 文件夹绝对路径（POST /api/projects/open 的入参） */
+  path: string
+  /** 已为该文件夹开过项目房则带 id（按 rootPath realpath 匹配），否则 null */
+  roomId: string | null
+}
+
+export interface ProjectCatalogGroup {
+  /** 分组稳定 id（重命名不变，入组/出组/改名接口用它定位） */
+  id: string
+  label: string
+  entries: ProjectCatalogEntry[]
+}
+
 // ---- 房间调度（确定性轮转，2026-07-22）：底账在 projects.db 的 dispatch/delivery 表 ----
 
 /** 房间级并行模式已砍（2026-07-26 维护者定：@不同成员派不同任务天然并行，房间一律串行轮转）。

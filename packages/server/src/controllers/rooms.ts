@@ -8,6 +8,7 @@ import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { RoomStore } from '../services/rooms'
 import { CHARTER_FILE } from '../services/rooms'
+import * as catalog from '../services/project-catalog'
 import type { RoomRelay } from '../services/room-relay'
 import * as projectDb from '../services/project-db'
 import { MSG_CLI_PATH } from '../config'
@@ -31,6 +32,15 @@ function guard(ctx: Context, fn: () => void) {
 }
 
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
+
+/** realpath 兜底：目标暂不可达（iCloud dataless 等）时按原路径比较，不炸请求 */
+function realpathSafe(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return p
+  }
+}
 
 /** 建项目时在根目录脚手架驻留上下文骨架。只补缺，绝不覆盖已有文件（案件目录等已有 README/资料）。 */
 function scaffoldCharter(root: string, name: string) {
@@ -231,6 +241,76 @@ export class RoomControllers {
     guard(ctx, () => {
       const room = this.rooms.get(ctx.params.id)
       ok(ctx, projectDb.listDispatches(room.team))
+    })
+
+  /** 项目目录册：分组标题 → 组内每文件夹一栏（2026-07-27 维护者定：房间不按大类建，按具体文件夹按需开） */
+  catalog = (ctx: Context) =>
+    guard(ctx, () => {
+      ok(ctx, { configured: catalog.catalogConfigured(), groups: catalog.listCatalog(this.rooms.list()) })
+    })
+
+  /** 新建分组 {label}；成员靠入组/出组维护（纯手动组无 roots） */
+  createGroup = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as { label?: string }
+      const g = catalog.createGroup(body.label ?? '')
+      ok(ctx, { id: g.id, label: g.label })
+    })
+
+  /** 重命名分组 {label}（id 稳定不变） */
+  renameGroup = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as { label?: string }
+      const g = catalog.renameGroup(ctx.params.id, body.label ?? '')
+      ok(ctx, { id: g.id, label: g.label })
+    })
+
+  /** 入组 {path}：把文件夹加进分组（只动目录册归属，不建房不动文件） */
+  addGroupMember = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as { path?: string }
+      catalog.addMember(ctx.params.id, body.path ?? '')
+      ok(ctx, { added: body.path })
+    })
+
+  /** 出组 {path}：把文件夹移出分组（不删文件夹、不删已开的房间） */
+  removeGroupMember = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as { path?: string }
+      catalog.removeMember(ctx.params.id, body.path ?? '')
+      ok(ctx, { removed: body.path })
+    })
+
+  /** 按文件夹幂等开项目房：已有（rootPath realpath 相同）直接返回，没有则以文件夹名创建。
+   *  重名（不同文件夹同名，如在办与已归档各有一个"张三咨询"）自动 ·2 后缀，与成员重名同法。 */
+  openProject = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as { path?: string }
+      const requested = body.path?.trim()
+      if (!requested) throw new Error('缺少文件夹路径')
+      const canonical = this.projectFiles.bindRoot(requested)
+      const canonicalReal = realpathSafe(canonical)
+      const existing = this.rooms
+        .list()
+        .find((r) => r.kind === 'project' && r.rootPath && realpathSafe(r.rootPath) === canonicalReal)
+      if (existing) {
+        ok(ctx, existing)
+        return
+      }
+      const base = path.basename(canonical)
+      let room: RoomInfo | null = null
+      for (let n = 1; n <= 9 && !room; n++) {
+        const name = n === 1 ? base : `${base}·${n}`
+        try {
+          room = this.rooms.create(name, 'project', canonical)
+        } catch (err) {
+          if (!(err instanceof Error) || !err.message.includes('已存在')) throw err
+        }
+      }
+      if (!room) throw new Error(`同名项目过多，无法为「${base}」自动起名`)
+      scaffoldCharter(canonical, room.name)
+      this.relay.broadcastRooms()
+      ok(ctx, room)
     })
 
   /** 显式绑定项目/案件根目录，不从任何成员 cwd 推断。 */

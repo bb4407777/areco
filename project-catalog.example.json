@@ -1,0 +1,25 @@
+{
+  "groups": [
+    {
+      "id": "cases",
+      "label": "全量案卷",
+      "marker": "README.md",
+      "roots": [
+        "/path/to/active-cases",
+        "/path/to/archived-cases"
+      ],
+      "extras": [],
+      "exclusions": []
+    },
+    {
+      "id": "skills",
+      "label": "全量 skills",
+      "marker": "SKILL.md",
+      "roots": [
+        "/path/to/skills"
+      ],
+      "extras": [],
+      "exclusions": []
+    }
+  ]
+}
