@@ -2,7 +2,8 @@
 // api-error-continue.mjs — 一键识别 API Error 卡住的 claude 系会话并自动注入 continue
 // （2026-07-26 高律师点名建设：微信里对 Hermes 说「续跑」即触发本脚本，Hermes 白名单直干。）
 //
-// 只做一件事：running 的 claude 系会话，尾屏停在「API Error…」且已回到空闲输入框
+// 只做一件事：running 的 claude 系会话，尾屏停在错误上（API Error/Connection error/
+// 超时/Please run \/login/限流/网络错误码等，见 RE_ERROR）且已回到空闲输入框
 // （非 Retrying、非工作中、非权限框、输入框无未发送文字）→ 注入字面量 "continue" + 回车。
 //
 // 通道说明（为什么走 WS input 而不是 room / sendline）：
@@ -76,7 +77,11 @@ const LOCK_FILE = path.join(ROOT, 'data', 'api-error-continue.lock')
 
 // ---- 识别状态机（纯函数，--self-test 可测）----------------------------------
 
-const RE_ERROR = /API Error/
+// 卡死错误不止「API Error」一种字样（2026-07-26 高律师定：类型很多，统一按同一套处理）：
+// 连接错/超时/登录失效/限流/网络错误码等都算。误报防线不在词表在形态学——必须是
+// 「错误行之后直到空闲输入框再无实质内容」才判 stalled，聊天内容里出现这些词不会中招。
+const RE_ERROR =
+  /API Error|Connection error|Request timed out|fetch failed|Please run \/login|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|overloaded|rate.?limit|usage limit|Internal server error/i
 const RE_BUSY = /esc to interrupt/i
 const RE_RETRYING = /Retrying in \d+|attempt \d+\/\d+/i
 // 与 shared/traffic.ts PENDING_CHOICE_RE 同口径：权限框/信任页永不注入
@@ -193,6 +198,16 @@ function selfTest() {
       '',
       box, '❯ ', box, status,
     ]],
+    // 卡死类型不止 API Error 字样（2026-07-26 高律师定统一处理）
+    ['stalled', ['  ⎿  Connection error.', '', box, '❯ ', box, status]],
+    ['stalled', ['  ⎿  Request timed out.', box, '❯ ', box, status]],
+    ['stalled', ['  ⎿  fetch failed', '', box, '❯ ', box, status]],
+    ['stalled', ['⏺ Please run /login', '', box, '❯ ', box, status]],
+    ['stalled', ['  ⎿  rate_limit_error: requests per minute exceeded', '', box, '❯ ', box, status]],
+    ['stalled', ['  ⎿  TypeError: fetch failed · cause: connect ECONNREFUSED 127.0.0.1:443', '', box, '❯ ', box, status]],
+    // 这些词出现在聊天内容里、后面已有实质输出 = 不是卡死
+    ['stale', ['⏺ 日志里有一行 Connection error 需要排查', '⏺ 我先看下网络配置', box, '❯ ', box, status]],
+    ['busy', ['  ⎿  Connection error.', '✻ Reconnecting… (esc to interrupt)']],
   ]
   let fail = 0
   for (const [want, lines] of cases) {
