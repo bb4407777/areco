@@ -1488,6 +1488,12 @@ class Caller:
             "派发任务: session=%s room=%s stand=%s mode=%s role=%s task_type=%s tid=%s",
             team, rid, stand_name, mode or "-", effective_role, effective_task_type, tid,
         )
+        hook = getattr(self, "_on_dispatch", None)
+        if hook:
+            try:
+                hook(result)  # 面包屑：等待者把房间/水位线即时落 state，供 reconcile 死后定位
+            except Exception as e:
+                logger.warning("dispatch 面包屑回调失败（不影响派发）: %s", e)
         return result
 
     # ── 角色分派便利方法（Caller → Thinker / Worker）─────────────
@@ -3771,6 +3777,27 @@ def _cmd_run(args) -> int:
         }
         _write_state(task_id, state)
         caller = Caller()
+
+        # 派发面包屑（2026-07-26 reconcile 前置）：dispatch 一返回就把房间/Stand/消息
+        # 水位线写进 state——等待者此后任何时刻死掉，reconcile 都能凭它去房间补收。
+        # 没有面包屑的死等待者连房间都定位不到（room_id 旧逻辑只在收尾时才回填）。
+        _bc_lock = threading.Lock()
+
+        def _breadcrumb(d: dict) -> None:
+            with _bc_lock:  # fanout/plan 多次 dispatch 并发回调，追加要互斥
+                # 直接改闭包里的 state 对象——收尾 state.update 后的整体落盘才不会把面包屑冲掉
+                state.setdefault("dispatches", []).append({
+                    "task_id": d.get("task_id"),
+                    "room_id": d.get("room_id"),
+                    "session_id": d.get("session_id"),
+                    "stand_name": d.get("stand_name"),
+                    "stand_session_id": d.get("stand_session_id"),
+                    "message_id": d.get("message_id"),
+                    "at": _now_iso(),
+                })
+                _write_state(task_id, state)
+
+        caller._on_dispatch = _breadcrumb
         try:
             # dry_run=True：relay_to_wechat 只拼不发——微信回复由 gateway notify 唤醒 Hermes 后自行组织
             res = _run_by_mode(caller, decision, args, timeout, dry_run=True)
@@ -3988,6 +4015,231 @@ def _cmd_go(args) -> int:
         no_relay=False, dry_run=False, reuse_plan=bool(args.reuse_plan),
     )
     return _cmd_run(ns)
+
+
+def _reconcile_lock() -> bool:
+    """reconcile 单实例锁：O_EXCL 创建；>5 分钟视为陈锁可夺。False = 另一实例在跑。"""
+    lock = TASKS_DIR / ".reconcile.lock"
+    try:
+        TASKS_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - lock.stat().st_mtime > 300:
+                lock.unlink(missing_ok=True)
+                return _reconcile_lock()
+        except OSError:
+            pass
+        return False
+
+
+def _waiter_alive(pid) -> bool:
+    """等待者进程还活着吗。pid 复用防误判：还叫 python/caller.py 的才算。
+    查不动时保守当活着——误判死会双写 inbox，误判活只是晚一轮。"""
+    if not pid:
+        return False
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True, timeout=5)
+        cmd = (out.stdout or "").strip()
+        return bool(cmd) and ("caller.py" in cmd or "python" in cmd.lower())
+    except Exception:
+        return True
+
+
+def _stand_msgs(msgs: list[dict], stand_name: str) -> list[dict]:
+    """按 poll_result 同一口径过滤「我派的那个 Stand」的消息。"""
+    out = []
+    for m in msgs:
+        s = m.get("from_agent", "")
+        if not s or s in NON_STAND_SENDERS:
+            continue
+        if stand_name and s != stand_name:
+            continue
+        out.append(m)
+    return out
+
+
+def _rec_finalize(task_id: str, st: dict, replies: list[dict], *, dry_run: bool) -> None:
+    """迟到回复落 inbox + state → completed_late（状态一变，下轮不再扫 = 幂等）。"""
+    text = "\n\n".join(m.get("body", "") for m in replies if m.get("body")).strip()
+    watermark = max((m.get("id", 0) for m in replies),
+                    default=int(st.get("messages_count") or 0))
+    if dry_run:
+        return
+    spec = st.get("spec") or {}
+    write_inbox(task_id, {
+        "task_id": task_id,
+        "room_id": st.get("room_id"),
+        "stand": st.get("stand_name") or "?",
+        "role": st.get("role") or spec.get("role") or "",
+        "status": "completed_late",
+        "result_text": text,
+        "files": [],
+        "request_summary": (spec.get("summary") or "") + "（迟到补收）",
+        "request": (spec.get("request") or "")[:200],
+        "error": None,
+    })
+    st.update({
+        "status": "completed_late",
+        "result_text": text,
+        "result_preview": text[:500],
+        "messages_count": watermark,
+        "completed_at": _now_iso(),
+        "reconciled_at": _now_iso(),
+    })
+    _write_state(task_id, st)
+
+
+def _rec_notice(task_id: str, st: dict, room_id, status: str, error: str) -> None:
+    """把 lost/stuck 判定落 inbox 通知一次（Hermes 下轮 digest 转述）。"""
+    spec = st.get("spec") or {}
+    tag = {"stuck": "（卡在选项待人工）", "lost": "（任务丢失）"}.get(status, "")
+    write_inbox(task_id, {
+        "task_id": task_id,
+        "room_id": room_id,
+        "stand": st.get("stand_name") or "?",
+        "role": st.get("role") or spec.get("role") or "",
+        "status": status,
+        "result_text": "",
+        "files": [],
+        "request_summary": (spec.get("summary") or "") + tag,
+        "request": (spec.get("request") or "")[:200],
+        "error": error,
+    })
+
+
+def _cmd_reconcile(args) -> int:
+    """对账补收（2026-07-26 方案C）：等待者死亡 / 卡死解开后的迟到结果，从房间捞回 inbox。
+
+    扫 ~/.standcode/tasks/ 两类账：
+      · status=stuck：人到看板点掉选项后 Stand 继续跑完——凭 messages_count 水位线
+        增量取新回复，补写 inbox（completed_late）。
+      · status=running 且等待者进程已死：凭 dispatches 面包屑定位房间——有新回复补收；
+        无回复且 Stand 卡选项 → 转 stuck 落通知（下轮按上一类处理）；无回复且 Stand
+        已退出 → 标 lost 落通知；Stand 还在干 → 留待下轮。
+        无面包屑的存量死等待者标 dead 一次不再扫（定位不到房间，人工看板兜底）。
+
+    幂等：只补不删，状态推进后不复扫；inbox 通知每任务至多一次（随状态迁移）。
+    设计为 cron 佣工（每 10 分钟），零 LLM、零消息推送——结果只落 inbox，
+    Hermes 下次被唤醒时 digest 自然带出，符合拉模式决议（2026-07-25）。
+    """
+    if not args.dry_run and not _reconcile_lock():
+        print("另一 reconcile 实例在跑，跳过")
+        return 0
+    try:
+        caller = Caller()
+        cutoff = time.time() - args.max_age_days * 86400
+        counts = {"scanned": 0, "harvested": 0, "stuck_marked": 0,
+                  "lost_marked": 0, "dead_marked": 0, "waiting": 0}
+        actions: list[str] = []
+        for p in sorted(TASKS_DIR.glob("*.json")):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    continue
+                st = json.loads(p.read_text())
+            except Exception:
+                continue
+            task_id = st.get("task_id") or p.stem
+            status = st.get("status")
+
+            if status == "stuck":
+                counts["scanned"] += 1
+                team = st.get("session_id")
+                if not team:
+                    counts["waiting"] += 1
+                    continue
+                try:
+                    msgs = caller.get_messages(team, after_id=int(st.get("messages_count") or 0))
+                except Exception as e:
+                    actions.append(f"⚠️ {task_id} 读房间失败: {e}")
+                    continue
+                replies = _stand_msgs(msgs, st.get("stand_name") or "")
+                if replies:
+                    _rec_finalize(task_id, st, replies, dry_run=args.dry_run)
+                    counts["harvested"] += 1
+                    actions.append(f"✅ {task_id} 卡死解开，补收 {len(replies)} 条迟到回复")
+                else:
+                    counts["waiting"] += 1
+
+            elif status == "running":
+                if _waiter_alive(st.get("pid")):
+                    continue
+                counts["scanned"] += 1
+                disp = st.get("dispatches") or []
+                if not disp:
+                    if not args.dry_run:
+                        st.update({
+                            "status": "dead",
+                            "error": "等待者死亡且无派发面包屑（旧版任务），定位不到房间——人工看板兜底",
+                            "reconciled_at": _now_iso(),
+                        })
+                        _write_state(task_id, st)
+                    counts["dead_marked"] += 1
+                    actions.append(f"💀 {task_id} 等待者死亡（无面包屑，标 dead）")
+                    continue
+                last = disp[-1]
+                team = last.get("session_id")
+                stand = last.get("stand_name") or ""
+                after = int(last.get("message_id") or 0)
+                st.setdefault("room_id", last.get("room_id"))
+                st.setdefault("session_id", team)
+                st.setdefault("stand_name", stand)
+                try:
+                    msgs = caller.get_messages(team, after_id=after) if team else []
+                except Exception as e:
+                    actions.append(f"⚠️ {task_id} 读房间失败: {e}")
+                    continue
+                replies = _stand_msgs(msgs, stand)
+                if replies:
+                    _rec_finalize(task_id, st, replies, dry_run=args.dry_run)
+                    counts["harvested"] += 1
+                    actions.append(
+                        f"✅ {task_id} 死等待者补收 {len(replies)} 条回复（房间 {last.get('room_id')}）")
+                    continue
+                info = caller._session_info(last.get("stand_session_id") or "") or {}
+                traffic, sess = info.get("trafficState"), info.get("status")
+                if traffic == "needs-user":
+                    err = (
+                        f"等待者死亡且 Stand 卡在交互选项"
+                        f"（尾屏：{(info.get('lastLine') or '')[:120]}）——去 areco 看板处理"
+                    )
+                    if not args.dry_run:
+                        st.update({
+                            "status": "stuck",
+                            "messages_count": after,
+                            "stuck_last_line": info.get("lastLine") or "",
+                            "error": err,
+                            "reconciled_at": _now_iso(),
+                        })
+                        _write_state(task_id, st)
+                        _rec_notice(task_id, st, last.get("room_id"), "stuck", err)
+                    counts["stuck_marked"] += 1
+                    actions.append(f"🟡 {task_id} Stand 卡在选项（转 stuck，通知落 inbox）")
+                elif sess == "exited":
+                    err = "等待者死亡，Stand 已退出且无回复——结果丢失，需人工重派"
+                    if not args.dry_run:
+                        st.update({"status": "lost", "error": err, "reconciled_at": _now_iso()})
+                        _write_state(task_id, st)
+                        _rec_notice(task_id, st, last.get("room_id"), "lost", err)
+                    counts["lost_marked"] += 1
+                    actions.append(f"❌ {task_id} Stand 已退出无回复（标 lost，通知落 inbox）")
+                else:
+                    counts["waiting"] += 1
+                    actions.append(f"⏳ {task_id} Stand 仍在跑（{traffic or '状态未知'}），下轮再看")
+
+        log_audit("reconcile", {**counts, "dry_run": bool(args.dry_run), "blocked": False})
+        for line in actions:
+            print(line)
+        print(json.dumps({"cmd": "reconcile", **counts, "dry_run": bool(args.dry_run)},
+                         ensure_ascii=False))
+        return 0
+    finally:
+        if not args.dry_run:
+            (TASKS_DIR / ".reconcile.lock").unlink(missing_ok=True)
 
 
 def _cmd_inbox(args) -> int:
@@ -4607,6 +4859,14 @@ def _build_parser():
     pi.add_argument("--force", action="store_true", help="配合 --unlock：连未过期的锁一并解")
     pi.add_argument("--yes", action="store_true", help="真执行（--gc / --unlock 默认只干跑）")
     pi.set_defaults(func=_cmd_inbox)
+
+    prr = sub.add_parser(
+        "reconcile",
+        help="对账补收（cron 佣工，每10分钟）：等待者死亡/卡死解开后的迟到结果从房间捞回 inbox；幂等只补不删",
+    )
+    prr.add_argument("--dry-run", action="store_true", help="只报告不写")
+    prr.add_argument("--max-age-days", type=float, default=7.0, help="只扫最近 N 天的 state（默认 7）")
+    prr.set_defaults(func=_cmd_reconcile)
 
     pp2 = sub.add_parser("plans", help="计划库：列出历史 Thinker 计划 / 查相似度（P1-3 复用）")
     pp2.add_argument("--show", default=None, metavar="TASK_ID", help="打印某条计划全文")
