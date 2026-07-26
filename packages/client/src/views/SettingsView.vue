@@ -11,12 +11,13 @@ import {
   NInput,
   NInputNumber,
   NModal,
+  NSelect,
   NSwitch,
   NTag,
   useDialog,
   useMessage,
 } from 'naive-ui'
-import type { StatsSummary, Template } from '../../../shared/protocol'
+import type { StandCodeConfig, StatsSummary, Template } from '../../../shared/protocol'
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
@@ -50,6 +51,37 @@ const system = ref<SystemInfo | null>(null)
 const stats = ref<StatsSummary | null>(null)
 const maxSessionsInput = ref<number>(0) // 会话上限编辑值，0 = 无上限
 const savingMaxSessions = ref(false)
+
+// —— StandCode 默认角色：areco 是编辑面与 SoT，StandCode caller.py 启动时读
+// GET /api/standcode/defaults 覆盖 registry.json；角色留空 = 回落 registry.json
+const STANDCODE_ROLES = [
+  { key: 'caller', label: 'Caller' },
+  { key: 'thinker', label: 'Thinker' },
+  { key: 'worker', label: 'Worker' },
+  { key: 'fastWorker', label: '快速 Worker' },
+] as const
+const standcodeSaved = ref<StandCodeConfig>({})
+const standcodeInput = ref<StandCodeConfig>({})
+const savingStandcode = ref(false)
+const standcodeOptions = computed(() =>
+  store.templates.filter((t) => t.enabled).map((t) => ({ label: `${t.name}（${t.id}）`, value: t.id }))
+)
+const standcodeDirty = computed(
+  () => JSON.stringify(standcodeInput.value) !== JSON.stringify(standcodeSaved.value)
+)
+async function saveStandcode() {
+  savingStandcode.value = true
+  try {
+    const r = await api.put<StandCodeConfig>('/api/standcode/defaults', standcodeInput.value)
+    standcodeSaved.value = { ...r }
+    standcodeInput.value = { ...r }
+    message.success('StandCode 默认角色已保存')
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    savingStandcode.value = false
+  }
+}
 const showEdit = ref(false)
 const editing = ref<Template>(emptyTemplate())
 const isCreate = ref(false)
@@ -77,6 +109,8 @@ onMounted(async () => {
     system.value = await api.get<SystemInfo>('/api/system')
     maxSessionsInput.value = system.value.maxSessions
     stats.value = await api.get<StatsSummary>('/api/stats')
+    standcodeSaved.value = await api.get<StandCodeConfig>('/api/standcode/defaults')
+    standcodeInput.value = { ...standcodeSaved.value }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -404,6 +438,37 @@ function clearLog() {
           <n-button size="tiny" quaternary @click="openEdit(template)">编辑</n-button>
           <n-button size="tiny" quaternary type="error" @click="confirmRemove(template)">删</n-button>
         </div>
+      </div>
+    </n-card>
+
+    <n-card size="small" class="block">
+      <template #header>StandCode 默认角色</template>
+      <template #header-extra>
+        <n-button
+          size="tiny"
+          secondary
+          type="primary"
+          :loading="savingStandcode"
+          :disabled="!standcodeDirty"
+          @click="saveStandcode"
+        >保存</n-button>
+      </template>
+      <div v-for="role in STANDCODE_ROLES" :key="role.key" class="pref-row">
+        <div>
+          <div class="pref-label">{{ role.label }}</div>
+        </div>
+        <n-select
+          v-model:value="standcodeInput[role.key]"
+          :options="standcodeOptions"
+          clearable
+          filterable
+          size="small"
+          placeholder="留空 = 回落 registry.json"
+          style="max-width: 320px"
+        />
+      </div>
+      <div class="log-tip" style="margin-top: 8px">
+        StandCode caller.py 派发时优先用这里的角色默认；角色留空 = 回落 StandCode stand/registry.json 的对应默认。
       </div>
     </n-card>
 

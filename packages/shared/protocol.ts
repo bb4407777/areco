@@ -52,6 +52,17 @@ export interface Template {
   transcriptDir?: string
 }
 
+/**
+ * StandCode 角色默认模板映射（areco 设置页编辑，config.json 的 standcode 段）。
+ * 值 = 模板 id；字段缺省/空串 = 未设置，消费方（StandCode caller.py）回落 registry.json。
+ */
+export interface StandCodeConfig {
+  caller?: string
+  thinker?: string
+  worker?: string
+  fastWorker?: string
+}
+
 export interface SessionSummary {
   id: string
   name: string

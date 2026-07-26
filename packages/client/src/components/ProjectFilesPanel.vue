@@ -134,7 +134,7 @@ async function saveRoot() {
     const path = bindDraft.value.trim() || null
     await rooms.setRoot(props.roomId, path)
     await rooms.refresh()
-    toast.success(path ? '已绑定项目文件根目录' : '已解绑项目文件根目录')
+    toast.success(path ? '已绑定任务文件根目录' : '已解绑任务文件根目录')
   } catch (err) {
     toast.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -165,7 +165,7 @@ async function toggle(node: ProjectFileNode) {
         v-model:value="bindDraft"
         size="small"
         :disabled="archived"
-        placeholder="粘贴项目根目录绝对路径，例如 /Users/you/Projects/我的项目…"
+        placeholder="粘贴任务根目录绝对路径，例如 /Users/you/Projects/我的任务…"
         @keyup.enter="saveRoot"
       />
       <NButton size="small" :loading="saving" :disabled="archived" @click="saveRoot">绑定目录</NButton>
@@ -173,7 +173,7 @@ async function toggle(node: ProjectFileNode) {
     <div v-if="rootPath" class="root" :title="rootPath">📁 {{ rootPath }}</div>
 
     <template v-if="rootPath">
-      <NInput v-model:value="query" size="small" clearable placeholder="搜索整个项目的文件名或相对路径" class="search" />
+      <NInput v-model:value="query" size="small" clearable placeholder="搜索整个任务的文件名或相对路径" class="search" />
       <div class="tree">
         <NSpin v-if="loading && !rows.length" class="state" />
         <div v-else-if="error" class="state error">{{ error }}</div>
@@ -206,7 +206,7 @@ async function toggle(node: ProjectFileNode) {
 
     <div v-else class="unbound">
       <div class="unbound-icon">🗂️</div>
-      <strong>先绑定这个项目的案件目录</strong>
+      <strong>先绑定这个任务的案件目录</strong>
       <p>Files 只读取该目录，不会根据 Agent 的 cwd 或聊天时间猜位置，也不会提供删除和在线编辑。</p>
     </div>
   </section>

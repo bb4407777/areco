@@ -52,5 +52,12 @@
       "enabled": false,
       "transcriptDir": "/home/you/.qoder-cn/projects"
     }
+  ],
+  "apiKeys": [
+    "test-key-1"
+  ],
+  "modelWhitelist": [
+    "claude",
+    "stand-thinker-workbuddy"
   ]
 }

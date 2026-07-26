@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Template } from '../../shared/protocol'
+import type { StandCodeConfig, Template } from '../../shared/protocol'
 import { createLogger } from './logger'
 
 const log = createLogger('config')
@@ -33,6 +33,14 @@ export interface AppConfig {
   /** 允许「转述人类原话」的 agent 白名单（如微信通道 Hermes）：其带 human_relay 标记的
    *  项目消息按人类语义投递（清零链深+默认投全体）。缺省空=功能关闭。 */
   humanRelayAgents?: string[]
+  /** API Key 白名单：请求头 X-API-Key 命中其一即视为程序化访问已认证（与 cookie 登录是 OR 关系，
+   *  命中后绕过 cookie 登录）。缺省空数组 = 关闭 API Key 认证，仅走原有 cookie 登录。 */
+  apiKeys?: string[]
+  /** 模型白名单：GET /api/config/whitelist 返回，供 agent 客户端发现允许的模型。缺省空数组。 */
+  modelWhitelist?: string[]
+  /** StandCode 角色默认模板（设置页编辑，GET/PUT /api/standcode/defaults）。缺省 = 未配置，
+   *  消费方（StandCode caller.py）回落其 registry.json。 */
+  standcode?: StandCodeConfig
 }
 
 const HOME = process.env.HOME || '/'
@@ -146,6 +154,23 @@ export function loadConfig(): AppConfig {
     ...(Array.isArray(raw.humanRelayAgents)
       ? { humanRelayAgents: raw.humanRelayAgents.map(String).filter((s) => s.trim()) }
       : {}),
+    ...(Array.isArray(raw.apiKeys)
+      ? { apiKeys: raw.apiKeys.map(String).filter((s) => s.trim()) }
+      : { apiKeys: [] }),
+    ...(Array.isArray(raw.modelWhitelist)
+      ? { modelWhitelist: raw.modelWhitelist.map(String).filter((s) => s.trim()) }
+      : { modelWhitelist: [] }),
+    // standcode 同 claudeHome 口径：白名单拷贝必须带上（只收四个角色键、只留非空字符串），
+    // 漏掉 = 重启剥字段 + 下次保存回写永久丢失
+    ...(() => {
+      const rawSc = (raw.standcode ?? {}) as Partial<StandCodeConfig>
+      const sc: StandCodeConfig = {}
+      for (const k of ['caller', 'thinker', 'worker', 'fastWorker'] as const) {
+        const v = rawSc[k]
+        if (typeof v === 'string' && v.trim()) sc[k] = v.trim()
+      }
+      return Object.keys(sc).length ? { standcode: sc } : {}
+    })(),
   }
   if (!fs.existsSync(CONFIG_PATH)) saveConfig(config)
   return config

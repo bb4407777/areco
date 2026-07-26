@@ -9,6 +9,15 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.get('/system', c.system)
   router.put('/settings', c.updateSettings)
   router.post('/server/restart', c.restartServer)
+  router.get('/config/whitelist', c.whitelist)
+
+  // StandCode 角色默认模板（caller/thinker/worker/fastWorker）：设置页编辑，caller.py 消费
+  router.get('/standcode/defaults', c.getStandcodeDefaults)
+  router.put('/standcode/defaults', c.updateStandcodeDefaults)
+
+  // StandCode 任务管理：列出 caller.py 后台任务状态 / 提交新任务（subprocess 调 caller.py run --bg）
+  router.get('/tasks', c.listTasks)
+  router.post('/tasks/submit', c.submitTask)
 
   router.get('/templates', c.listTemplates)
   router.post('/templates', c.createTemplate)

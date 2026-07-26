@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from 'koa'
-import type { ScreenTailPayload, StatsSummary, Template, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
+import type { ScreenTailPayload, StandCodeConfig, StatsSummary, Template, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
@@ -32,6 +32,12 @@ import { effectiveClaudeHome } from '../services/templates'
 import { FileService } from '../services/files'
 
 const execFileAsync = promisify(execFile)
+
+// StandCode caller.py 集成（任务管理 API）：
+//   - 任务状态目录与 caller.py 的 STANDCODE_TASKS_DIR 同口径（默认 ~/.standcode/tasks）
+//   - caller 脚本默认绝对路径 /Users/gao/Code/StandCode/caller/caller.py，可用 STANDCODE_CALLER 覆盖
+const STANDCODE_TASKS_DIR = process.env.STANDCODE_TASKS_DIR || path.join(os.homedir(), '.standcode', 'tasks')
+const STANDCODE_CALLER = process.env.STANDCODE_CALLER || '/Users/gao/Code/StandCode/caller/caller.py'
 
 function ok(ctx: Context, data: unknown) {
   ctx.body = { ok: true, data }
@@ -110,6 +116,10 @@ export class ApiControllers {
     })
   }
 
+  /** GET /api/config/whitelist：返回模型白名单，供 agent 客户端发现允许的模型。
+   *  只回 modelWhitelist——绝不回 apiKeys（那等于公开可用凭证）。 */
+  whitelist = (ctx: Context) => ok(ctx, { modelWhitelist: this.config.modelWhitelist ?? [] })
+
   /** 一键重启（维护者 2026-07-22）：等价命令行 `cd 仓根 && ./start.sh restart`。
    *  脚本会杀掉本进程——先回响应，延时 500ms 再派 detached 子进程执行，避免响应被掐断。
    *  ARECO_RESTART_VIA_API=1 告知脚本调用方是服务自己的子进程：launchd 下只走 kickstart -k，
@@ -145,6 +155,34 @@ export class ApiControllers {
       if (Object.keys(out).length === 0) throw new Error('未提供可更新字段（maxSessions）')
       saveConfig(this.config)
       ok(ctx, out)
+    })
+
+  /** GET /api/standcode/defaults：StandCode 角色默认模板（设置页编辑面；
+   *  StandCode caller.py 启动时读它覆盖 registry.json 默认）。 */
+  getStandcodeDefaults = (ctx: Context) => ok(ctx, this.config.standcode ?? {})
+
+  /** PUT /api/standcode/defaults：逐角色设置/清除默认模板 id。写回 config.json 即时生效。
+   *  空串 = 清除该角色（消费方回落 registry.json）；非空必须是已存在的模板 id
+   *  （防写了不存在的 id，派发时才炸）。 */
+  updateStandcodeDefaults = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as Partial<StandCodeConfig>
+      const keys = ['caller', 'thinker', 'worker', 'fastWorker'] as const
+      const provided = keys.filter((k) => body[k] !== undefined)
+      if (!provided.length) throw new Error(`未提供可更新字段（${keys.join('/')}）`)
+      const sc: StandCodeConfig = { ...(this.config.standcode ?? {}) }
+      for (const k of provided) {
+        const v = String(body[k] ?? '').trim()
+        if (!v) delete sc[k]
+        else {
+          if (!this.templates.get(v)) throw new Error(`模板不存在: ${v}（角色 ${k}）`)
+          sc[k] = v
+        }
+      }
+      if (Object.keys(sc).length) this.config.standcode = sc
+      else delete this.config.standcode
+      saveConfig(this.config)
+      ok(ctx, this.config.standcode ?? {})
     })
 
   // ---- templates ----
@@ -734,5 +772,86 @@ export class ApiControllers {
       }, 0),
     }
     ok(ctx, summary)
+  }
+
+  // ---- StandCode 任务管理（caller.py 后台任务）----
+
+  /** 取 task state 的 created_at 为排序键（缺失/非法 → NaN，排末尾） */
+  private static createdAtOf(t: Record<string, unknown>): number {
+    const v = t.created_at
+    return typeof v === 'string' ? Date.parse(v) : Number.NaN
+  }
+
+  /** GET /api/tasks：列出所有后台任务状态（读 caller.py 的 ~/.standcode/tasks/*.json，最新在前） */
+  listTasks = (ctx: Context) => {
+    const dir = STANDCODE_TASKS_DIR
+    let names: string[]
+    try {
+      names = fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
+    } catch {
+      // 目录不存在 = 还没有任务
+      ok(ctx, { tasks: [], dir })
+      return
+    }
+    const tasks: Record<string, unknown>[] = []
+    for (const name of names) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'))
+        if (parsed && typeof parsed === 'object') tasks.push(parsed as Record<string, unknown>)
+      } catch {
+        // 损坏的 state 文件跳过（与 caller.py _cmd_list 同口径）
+      }
+    }
+    tasks.sort((a, b) => {
+      const ta = ApiControllers.createdAtOf(a)
+      const tb = ApiControllers.createdAtOf(b)
+      if (Number.isNaN(ta) && Number.isNaN(tb)) return 0
+      if (Number.isNaN(ta)) return 1
+      if (Number.isNaN(tb)) return -1
+      return tb - ta // created_at 倒序：最新在前
+    })
+    ok(ctx, { tasks, dir })
+  }
+
+  /** POST /api/tasks/submit：{request, role?, template?} → subprocess 调 caller.py run --bg，返回 task_id */
+  submitTask = async (ctx: Context) => {
+    const body = (ctx.request.body ?? {}) as { request?: unknown; role?: unknown; template?: unknown }
+    const request = typeof body.request === 'string' ? body.request.trim() : ''
+    if (!request) return fail(ctx, 400, 'bad_request', 'request 不能为空')
+    const role = typeof body.role === 'string' ? body.role.trim() : ''
+    if (role && role !== 'thinker' && role !== 'worker') {
+      return fail(ctx, 400, 'bad_request', 'role 只能是 thinker 或 worker')
+    }
+    const template = typeof body.template === 'string' ? body.template.trim() : ''
+
+    const callerPy = STANDCODE_CALLER
+    if (!fs.existsSync(callerPy)) {
+      return fail(ctx, 500, 'caller_missing', `caller.py 不存在：${callerPy}`)
+    }
+    // cwd = StandCode 根（caller/ 的父目录），命令即 python3 caller/caller.py run --bg
+    const standRoot = path.dirname(path.dirname(callerPy))
+    const args = ['caller/caller.py', 'run', '--bg', request]
+    if (role) args.push('--role', role)
+    if (template) args.push('--template', template)
+
+    try {
+      const { stdout } = await execFileAsync('python3', args, {
+        cwd: standRoot,
+        env: { ...process.env, HOME: os.homedir() },
+        timeout: 30_000,
+        maxBuffer: 1 * 1024 * 1024,
+      })
+      // caller.py --bg 首行 stdout = task_id（形如 bg-1784970123-bd5416）；取首个 ^bg- 行兜底首行
+      const taskId =
+        stdout
+          .split('\n')
+          .map((l) => l.trim())
+          .find((l) => /^bg-/.test(l)) || stdout.trim().split('\n')[0] || ''
+      ok(ctx, { task_id: taskId, submitted: true, stdout: stdout.trim() })
+    } catch (err) {
+      const e = err as { stderr?: string; stdout?: string; message?: string }
+      const detail = (e.stderr || e.stdout || e.message || '').toString().slice(-800)
+      fail(ctx, 500, 'caller_failed', `caller.py 调用失败：${detail}`)
+    }
   }
 }

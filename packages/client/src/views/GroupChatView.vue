@@ -99,7 +99,7 @@ const spawnableTemplates = computed(() => {
 const addOptions = computed(() => {
   const groups: { type: string; label: string; key: string; children: { label: string; value: string }[] }[] = []
   if (spawnableTemplates.value.length)
-    groups.push({ type: 'group', label: '新建 agent 进项目', key: 'g-spawn', children: spawnableTemplates.value })
+    groups.push({ type: 'group', label: '新建 agent 进任务', key: 'g-spawn', children: spawnableTemplates.value })
   return groups
 })
 
@@ -107,7 +107,7 @@ async function onAddMember(value: string | null) {
   if (!value || !room.value) return
   try {
     await rooms.addMember(room.value.id, value)
-    message.success('已拉起新 agent 并加入项目')
+    message.success('已拉起新 agent 并加入任务')
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -134,7 +134,7 @@ async function archiveRoom() {
   try {
     await rooms.archive(archivedId)
     activeId.value = rooms.rooms.find((r) => r.archivedAt === null && r.id !== archivedId)?.id ?? ''
-    message.success('项目已归档，消息和成员快照均已保留')
+    message.success('任务已归档，消息和成员快照均已保留')
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -150,7 +150,7 @@ async function removeRoom() {
       ?? rooms.rooms.find((r) => r.id !== removedId)
     activeId.value = next?.id ?? ''
     if (next && typeof next.archivedAt === 'number') showArchived.value = true
-    message.success(`项目「${removedName}」已删除`)
+    message.success(`任务「${removedName}」已删除`)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -160,7 +160,7 @@ async function unarchiveRoom() {
   if (!room.value) return
   try {
     await rooms.unarchive(room.value.id)
-    message.success('项目已恢复')
+    message.success('任务已恢复')
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
@@ -470,10 +470,10 @@ onMounted(async () => {
     <!-- 项目栏：桌面常驻侧栏，手机为浮层 -->
     <aside class="rooms" :class="{ overlay: ui.isMobile, open: !ui.isMobile || mobileRoomsOpen }">
       <div class="rooms-head">
-        <span class="rooms-title">当前项目</span>
-        <button class="icon-btn" title="新建项目" @click="showCreate = true">＋</button>
+        <span class="rooms-title">当前任务</span>
+        <button class="icon-btn" title="新建任务" @click="showCreate = true">＋</button>
       </div>
-      <NInput v-model:value="nameFilter" placeholder="搜项目名" size="tiny" clearable class="rooms-search" />
+      <NInput v-model:value="nameFilter" placeholder="搜任务名" size="tiny" clearable class="rooms-search" />
       <div class="rooms-list">
         <button
           v-for="r in filteredRooms"
@@ -487,7 +487,7 @@ onMounted(async () => {
           <span class="room-count">{{ r.members.filter((m) => m.kind === 'session').length }} agent</span>
           <span v-if="rooms.unread(r.id)" class="badge">{{ rooms.unread(r.id) }}</span>
         </button>
-        <NEmpty v-if="!activeRooms.length && rooms.loaded" description="当前没有项目，点右上角 ＋ 建一个" class="rooms-empty" />
+        <NEmpty v-if="!activeRooms.length && rooms.loaded" description="当前没有任务，点右上角 ＋ 建一个" class="rooms-empty" />
         <button v-if="archivedRooms.length" class="archive-toggle" @click="showArchived = !showArchived">
           <span>已归档</span>
           <span>{{ archivedRooms.length }} {{ showArchived ? '▾' : '▸' }}</span>
@@ -513,14 +513,14 @@ onMounted(async () => {
       <NSpin v-if="loading" class="center" />
       <NEmpty
         v-else-if="rooms.stale"
-        description="项目协作需要新版服务端：8790 重启后可用（前端已就绪）"
+        description="任务协作需要新版服务端：8790 重启后可用（前端已就绪）"
         class="center"
       />
-      <NEmpty v-else-if="!room" description="建一个项目，把 agent 拉进来协作" class="center" />
+      <NEmpty v-else-if="!room" description="建一个任务，把 agent 拉进来协作" class="center" />
 
       <template v-else>
         <header class="head">
-          <button v-if="ui.isMobile" class="icon-btn" title="项目列表" @click="mobileRoomsOpen = true">☰</button>
+          <button v-if="ui.isMobile" class="icon-btn" title="任务列表" @click="mobileRoomsOpen = true">☰</button>
           <h2 class="title">{{ room.name }}</h2>
           <span v-if="viewingArchived" class="archived-label">已归档 · 只读</span>
           <div class="members">
@@ -534,8 +534,8 @@ onMounted(async () => {
               <span class="mname" :style="{ color: memberColor(m) }">{{ m.name }}</span>
               <em v-if="memberWorking(m)" class="working">工作中</em>
               <NPopconfirm v-if="m.kind === 'session' && !viewingArchived" @positive-click="rooms.removeMember(room.id, m.name)">
-                <template #trigger><button class="chip-x" title="移出项目">×</button></template>
-                把 {{ m.name }} 移出项目？
+                <template #trigger><button class="chip-x" title="移出任务">×</button></template>
+                把 {{ m.name }} 移出任务？
               </NPopconfirm>
             </span>
             <NSelect
@@ -553,29 +553,29 @@ onMounted(async () => {
           <NPopover v-if="!viewingArchived" trigger="click" placement="bottom-end" style="max-width: 420px">
             <template #trigger><button class="icon-btn" title="邀请外部终端的 agent">⇗</button></template>
             <div class="invite">
-              <p>本机任何终端都可向本项目发消息（team：<code>{{ room.team }}</code>）：</p>
+              <p>本机任何终端都可向本任务发消息（team：<code>{{ room.team }}</code>）：</p>
               <code class="invite-cmd">node {{ rooms.msgCli || 'scripts/areco-msg.mjs' }} {{ room.team }} '&lt;名字&gt;' '&lt;收件人或 all&gt;' '&lt;消息&gt;'</code>
               <p>消息会实时出现在这里；房里 @成员 的消息会投递到对应会话终端（外部终端的名字仅作显示，收不到投递）。</p>
             </div>
           </NPopover>
-          <NButton v-if="viewingArchived" size="tiny" secondary @click="unarchiveRoom">恢复项目</NButton>
+          <NButton v-if="viewingArchived" size="tiny" secondary @click="unarchiveRoom">恢复任务</NButton>
           <NButton
             v-else
             size="tiny"
             secondary
             :disabled="!rooms.archiveSupported"
-            :title="rooms.archiveSupported ? '归档项目' : '重启 8790 后可归档'"
+            :title="rooms.archiveSupported ? '归档任务' : '重启 8790 后可归档'"
             @click="archiveRoom"
-          >归档项目</NButton>
+          >归档任务</NButton>
           <NPopconfirm v-if="viewingArchived" @positive-click="removeRoom">
             <template #trigger>
-              <NButton size="tiny" secondary type="error">删除项目</NButton>
+              <NButton size="tiny" secondary type="error">删除任务</NButton>
             </template>
-            确定删除项目「{{ room.name }}」？项目及其项目内会话将一并删除（多项目共享的会话保留），此操作不可恢复。
+            确定删除任务「{{ room.name }}」？任务及其任务内会话将一并删除（多任务共享的会话保留），此操作不可恢复。
           </NPopconfirm>
         </header>
 
-        <nav class="project-tabs" aria-label="项目视图">
+        <nav class="project-tabs" aria-label="任务视图">
           <button :class="{ active: activePane === 'chat' }" @click="activePane = 'chat'">💬 协作</button>
           <button :class="{ active: activePane === 'files' }" @click="activePane = 'files'">📁 文件</button>
         </nav>
@@ -635,7 +635,7 @@ onMounted(async () => {
         </div>
 
         <!-- 消息搜索固定钉在消息流顶部（不随滚动走），结果仍在流内展示 -->
-        <NInput v-model:value="msgQuery" placeholder="搜消息内容（跨所有项目）" size="small" clearable class="msg-search" />
+        <NInput v-model:value="msgQuery" placeholder="搜消息内容（跨所有任务）" size="small" clearable class="msg-search" />
         <div ref="scroller" class="stream">
           <template v-if="msgQuery.trim()">
             <div v-if="searching" class="search-hint">搜索中…</div>
@@ -690,7 +690,7 @@ onMounted(async () => {
           @locate="locateProjectFile"
         />
 
-        <div v-if="viewingArchived" class="archived-notice">该项目已归档：消息和成员快照仅供查看，恢复后才能继续协作。</div>
+        <div v-if="viewingArchived" class="archived-notice">该任务已归档：消息和成员快照仅供查看，恢复后才能继续协作。</div>
         <div v-else class="composer">
           <div v-if="mentionOpen" class="mention-pop">
             <button
@@ -725,8 +725,8 @@ onMounted(async () => {
 
     <FileDropOverlay :visible="dragging" />
     <FilePreview :path="previewPath" @close="previewPath = null" />
-    <NModal v-model:show="showCreate" preset="card" title="新建项目" style="max-width: 360px">
-      <NInput v-model:value="newRoomName" placeholder="项目名（如：官网改版攻坚组）" @keyup.enter="createRoom" />
+    <NModal v-model:show="showCreate" preset="card" title="新建任务" style="max-width: 360px">
+      <NInput v-model:value="newRoomName" placeholder="任务名（如：官网改版攻坚组）" @keyup.enter="createRoom" />
       <template #footer>
         <NButton type="primary" :disabled="!newRoomName.trim()" @click="createRoom">创建</NButton>
       </template>

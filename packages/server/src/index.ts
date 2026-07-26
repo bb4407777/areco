@@ -19,7 +19,7 @@ import { RoomRelay } from './services/room-relay'
 import { RoomControllers } from './controllers/rooms'
 import { createAuthRouter } from './routes/auth'
 import { createApiRouter } from './routes/api'
-import { createHostOriginGuard, createSessionGuard } from './middleware/auth'
+import { createHostOriginGuard, createApiKeyGuard, createSessionGuard } from './middleware/auth'
 import { Gateway } from './ws/gateway'
 import { FileService } from './services/files'
 import { ProjectFileService } from './services/project-files'
@@ -121,7 +121,10 @@ async function main() {
   const authRouter = createAuthRouter(auth, limiter, config.server.title)
   app.use(authRouter.routes()).use(authRouter.allowedMethods())
 
-  // protected：以下全部需要登录
+  // 程序化访问守卫（X-API-Key）：必须注册在 sessionGuard 之前——后者全局前置，
+  // 若放后面，只带 X-API-Key（无 cookie）的请求会先被 cookie 守卫 401 掉。未配置 apiKeys 时为 no-op。
+  app.use(createApiKeyGuard(config))
+  // protected：以下全部需要登录（cookie 登录，或已被 apiKeyGuard 标记的 X-API-Key）
   app.use(createSessionGuard(auth))
   const apiRouter = createApiRouter(controllers, roomControllers)
   app.use(apiRouter.routes()).use(apiRouter.allowedMethods())
