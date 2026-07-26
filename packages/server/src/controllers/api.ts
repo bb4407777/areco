@@ -338,21 +338,22 @@ export class ApiControllers {
       const beforeRaw = Number(ctx.query.before)
       const before = Number.isFinite(beforeRaw) && beforeRaw >= 0 ? beforeRaw : undefined
       const cursor = Math.max(0, Number(ctx.query.cursor ?? 0) || 0)
-      // 定位 transcript 文件：claude 系按 --session-id 直取；缺 claudeSessionId 的
-      // claude 包装器（模板 claudeHome 曾丢失）按时间窗兜底定位；其余走 agent 自家落盘
+      // 定位 transcript 文件：claude 系按 --session-id 直取；在册 agent（codex/codebuddy/
+      // reasonix 等）自家落盘解析必须先于 transcriptDir——自动探测会误命中在册 agent 的
+      // 同名目录（codebuddy → ~/.codebuddy/projects 是 codebuddy 自家格式，按 claude 布局
+      // 解析必得 0 条，2026-07-27 workbuddy 对话模式空白报障）；其余 claude 布局衍生 CLI
+      //（qoder 等）走 transcriptDir，缺 claudeSessionId 的 claude 包装器按时间窗兜底
+      const kind = agentKindOf(session.command)
+      if (kind && !session.claudeSessionId) {
+        ok(ctx, readAgentTranscript(session, kind, { cursor, before }))
+        return
+      }
       let filePath: string | null = null
       if (session.claudeSessionId) {
         filePath = transcriptPath(session)
       } else if (session.transcriptDir) {
-        // claude 布局衍生 CLI（qoder 等，模板 transcriptDir 声明/自动探测）：时间窗定位 + claude 解析
         filePath = locateClaudeLayoutTranscript(session, session.transcriptDir)
       } else {
-        const kind = agentKindOf(session.command)
-        if (kind) {
-          // codex/codebuddy/reasonix：直读 agent 自己的会话落盘，消息级游标
-          ok(ctx, readAgentTranscript(session, kind, { cursor, before }))
-          return
-        }
         const template = this.templates.get(session.templateId)
         const home = template ? effectiveClaudeHome(template) : null
         filePath = home ? locateClaudeTranscript(session, home) : null
