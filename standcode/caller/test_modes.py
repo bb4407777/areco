@@ -50,7 +50,8 @@ def test_route_mode() -> None:
         ("评估这三条迁移路线的可行性", "think", True),   # 弱×2（评估+可行性）→ 多步判断出结构化计划
         ("先出个计划，别动手", "think", True),
         ("把恩平法院的判决书下载下来", "worker", False),
-        ("总结一下这份文书", "worker", False),
+        # 2026-07-27 fast 车道：明确轻量动词（总结）+ 单步 + ≤120 字 → hy3 快速 Worker
+        ("总结一下这份文书", "fast", False),
         ("调研 X 并输出一份报告存到桌面", "worker", False),   # 弱×1+落盘：单段自研自写
         ("把这个下载下来然后设计一个归档方案", "worker", False),  # DIRECT（下载）压制弱双信号
         ("调研三个方案对比后写入报告存到桌面", "plan", False),   # 弱×3 无压制 → 两段式
@@ -69,6 +70,36 @@ def test_route_mode() -> None:
         check(C.Caller.route_mode(req)["mode"] == "think", f"回归·不再错配到 plan：{req[:20]}")
 
 
+# ── route_mode：fast 车道（2026-07-27）────────────────────────────
+def test_route_mode_fast() -> None:
+    print("\n[route_mode] fast 车道（轻量单步 → hy3）")
+    hit = [
+        "查一下 25民1000 案件状态",
+        "翻译这段话",
+        "提取这份合同的金额和日期",
+        "确认一下明天开庭时间",
+    ]
+    for req in hit:
+        r = C.Caller.route_mode(req)
+        check(r["mode"] == "fast" and not r["plan_only"],
+              f"命中 {req[:18]:20s} → {r['mode']}（期望 fast）")
+
+    miss = [
+        # 长文本 >120 字：再多轻量动词也不进 fast
+        "总结一下" + "这份文书很长，" * 30,
+        # FAST_BLOCK 一票否决：批量 / 修复 是重量信号
+        "批量总结一下这批判决书",
+        "帮我修复这个脚本再总结一下报错原因",
+        # 多步（强计划信号）不进 fast
+        "分几步总结这份文书并归档",
+        # 无轻量动词：照原路由
+        "把恩平法院的判决书下载下来",
+    ]
+    for req in miss:
+        r = C.Caller.route_mode(req)
+        check(r["mode"] != "fast", f"不命中 {req[:18]:20s} → {r['mode']}（期望非 fast）")
+
+
 # ── resolve_mode：两代参数收敛 ─────────────────────────────────────
 def test_resolve_mode() -> None:
     print("\n[resolve_mode] 显式 --mode 与旧 --role/--plan 的收敛")
@@ -77,6 +108,7 @@ def test_resolve_mode() -> None:
         (dict(mode="think", plan_only=True), "think", True),
         (dict(mode="plan"), "plan", False),
         (dict(mode="fanout", subs=["a", "b"]), "fanout", False),
+        (dict(mode="fast"), "fast", False),
         (dict(plan=True), "plan", False),
         (dict(role="thinker"), "think", False),
         (dict(plan_only=True), "think", True),
@@ -86,6 +118,9 @@ def test_resolve_mode() -> None:
     for kw, exp_mode, exp_po in accept:
         r = C.resolve_mode(**kw)
         check(r["mode"] == exp_mode and r["plan_only"] == exp_po, f"接受 {kw} → {r['mode']}")
+    # fast 的 role 必须是 None——dispatch 模板优先级 role > task_type，
+    # 给 role 会让 default_worker（claude）顶掉 task_map["fast"]（hy3）
+    check(C.resolve_mode(mode="fast")["role"] is None, "--mode fast → role=None（不顶掉 fast 模板）")
 
     reject = [
         dict(mode="plan", plan_only=True),      # 两段式含执行 vs 只出计划
@@ -103,6 +138,54 @@ def test_resolve_mode() -> None:
             check(False, f"应拒绝但放行了：{kw}")
         except C.ModeConflictError:
             check(True, f"拒绝 {kw}")
+
+
+# ── finish_room：提前收口/Stand 存活两道守卫（2026-07-27）─────────────
+def test_finish_room_guards() -> None:
+    """归档 = 级联 SIGTERM 房内 Stand；「看到中途结果误判完成而提前关闭」链的闸。"""
+    print("\n[finish_room] settle_forced / stand_still_working 守卫")
+
+    class _FC(C.Caller):
+        def __init__(self, info):
+            self._info = info
+            self.archived: list[str] = []
+
+        def archive_room(self, rid):
+            self.archived.append(rid)
+
+        def _session_info(self, sid):
+            return self._info
+
+    d = {"room_id": "r1", "room_created": True, "task_id": "t1",
+         "stand_session_id": "s1"}
+
+    # 1) settle_forced：提前收口 ≠ 干完，不归档（留 reconcile 补收后归档）
+    c = _FC({"status": "running", "trafficState": "working"})
+    r = c.finish_room(d, "completed", settle_forced=True)
+    check(not r["archived"] and r["reason"] == "settle_forced" and not c.archived,
+          "settle_forced → 不归档（reason=settle_forced）")
+
+    # 2) 存活探针：completed 但 Stand 仍 running + working → 不归档
+    c = _FC({"status": "running", "trafficState": "working"})
+    r = c.finish_room(d, "completed")
+    check(not r["archived"] and r["reason"] == "stand_still_working" and not c.archived,
+          "Stand 仍在干活（running+working）→ 不归档")
+
+    # 3) Stand 已收尾（idle）→ 正常归档
+    c = _FC({"status": "running", "trafficState": "idle"})
+    r = c.finish_room(d, "completed")
+    check(r["archived"] and c.archived == ["r1"], "Stand 已收尾 → 正常归档")
+
+    # 4) 探针故障（查不到会话）→ best-effort 不拦归档
+    c = _FC(None)
+    r = c.finish_room(d, "completed")
+    check(r["archived"] and c.archived == ["r1"], "探针查不到 → 不拦归档（探针故障不卡死收口）")
+
+    # 5) 非 completed 照旧不归档（守卫不改变既有口径）
+    c = _FC(None)
+    r = c.finish_room(d, "timeout")
+    check(not r["archived"] and r["reason"] == "not_completed",
+          "非 completed → 留看板（既有口径不变）")
 
 
 # ── _parse_plan：结构化校验 ────────────────────────────────────────
@@ -361,7 +444,8 @@ def test_plan_reuse() -> None:
 
 
 def main() -> int:
-    for t in (test_route_mode, test_resolve_mode, test_parse_plan, test_plan_and_execute,
+    for t in (test_route_mode, test_route_mode_fast, test_resolve_mode, test_finish_room_guards,
+              test_parse_plan, test_plan_and_execute,
               test_dispatch_hardening, test_workspace_isolation, test_conf_float, test_inbox_lock,
               test_wechat_target_guard, test_plan_reuse):
         t()

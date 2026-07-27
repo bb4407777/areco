@@ -147,9 +147,11 @@ MIN_TIMEOUT_SEC = _conf_float("STANDCODE_MIN_TIMEOUT", "min_timeout_sec", 600)
 # 2026-07-26 实战两洞（B4 e2e 现场捕获）：
 # OUTPUT_STALL_PROBES：tool 尾假 working 判别——agent 用 areco-msg 回执后 turn 以工具调用
 #   收尾，transcript 灯永不落绿；outputChars 连续 N 个探针零增长 = 没在干活，定稿。
+#   2026-07-27 6→12（≈60s 零增长才判）：30s 对慢工具/长思考太短，误判提前收口会连带
+#   归档杀 Stand（见 finish_room 守卫）——fast 轻量车道的 Stand 回答间隔更不均匀，宁多等。
 # IDLE_STALL_PROBES：注入丢失/模型秒退判别——任务落库但会话 idle 零回复；达 N 重投一次，
 #   翻倍仍空转返回 status='stall' 交人工。
-OUTPUT_STALL_PROBES = int(_conf_float("STANDCODE_OUTPUT_STALL_PROBES", "output_stall_probes", 6))
+OUTPUT_STALL_PROBES = int(_conf_float("STANDCODE_OUTPUT_STALL_PROBES", "output_stall_probes", 12))
 IDLE_STALL_PROBES = int(_conf_float("STANDCODE_IDLE_STALL_PROBES", "idle_stall_probes", 9))
 
 # ── 暖池 standby pool + plan 预热（2026-07-26 提速批件）──────────────────
@@ -327,8 +329,9 @@ DIRECT_KEYWORDS = (
 #   think    — → Thinker：交付物是「判断」（结论/取舍/评估）；+plan_only 则只出结构化计划
 #   plan     — → Thinker → Worker 两段式：多步有依赖，且交付物是「东西」
 #   fanout   — → Worker × N 并行：N 个互不依赖的子任务
-MODES = ("operator", "worker", "think", "plan", "fanout")
-DISPATCH_MODES = ("worker", "think", "plan", "fanout")  # run 能派的（operator 不派发）
+#   fast     — → 快速 Worker（hy3）：单步轻量任务
+MODES = ("operator", "worker", "think", "plan", "fanout", "fast")
+DISPATCH_MODES = ("worker", "think", "plan", "fanout", "fast")  # run 能派的（operator 不派发）
 
 # route_mode 的两个维度：
 #  交付物维度 · 要「判断」——产物是文本结论，不落盘、不改外部系统 → Thinker（模式 4）
@@ -350,6 +353,17 @@ ARTIFACT_KEYWORDS = (
 PLAN_ONLY_KEYWORDS = (
     "只要计划", "先出计划", "出个计划", "出份计划", "只规划", "不要执行",
     "先规划", "别动手", "先别做", "只出方案不执行",
+)
+
+#  fast 车道（2026-07-27）：明确轻量动词 → 快速 Worker（hy3），省掉 claude 重车的冷启动税。
+#  保守优先——误判大的进 hy3 比误判小的进 claude 贵得多，所以词表只收「明确轻量」，
+#  且有 FAST_BLOCK 重量信号一票否决。
+FAST_KEYWORDS = (
+    "查一下", "查下", "查看", "看一下", "看下", "找找", "找一下",
+    "翻译", "总结", "摘要", "提取", "转成", "改成", "格式化", "确认一下",
+)
+FAST_BLOCK_KEYWORDS = (
+    "批量", "全量", "重构", "部署", "迁移", "调试", "修复", "改代码", "实现", "开发",
 )
 
 
@@ -1230,12 +1244,17 @@ class Caller:
             return data.get("sessions", [])
         return data or []
 
-    def finish_room(self, dispatch_result: dict, status: str) -> dict:
+    def finish_room(self, dispatch_result: dict, status: str, settle_forced: bool = False) -> dict:
         """一次派发的收口：成功即归档自建房间，其余情况留在看板。
 
         只归档「StandCode 自己新建」的房间（dispatch_result["room_created"]）——
         用户传 room_id 复用的房间是人家的地盘，收口时一律不动。
         归档失败只告警：房间没清掉是脏数据，把整条任务链带崩才是事故。
+
+        两道「别急着归档」守卫（2026-07-27 拆「看到中途结果误判完成而提前关闭」链——
+        areco 归档房间会级联 SIGTERM 房内 Stand 会话，Stand 还在干活就被杀）：
+          1. settle_forced：提前收口（working_wedged/hold_cap/deadline）≠ 干完；
+          2. 存活探针：completed 但房内 Stand 仍是 running + working。
 
         返回 {"archived": bool, "room_id": str|None, "reason": str}
         """
@@ -1253,6 +1272,21 @@ class Caller:
             # 失败/超时/失联：留在看板才看得见，别把现场归档掉
             ledger_append("kept", room_id, task_id=task_id, status=status, reason="not_completed")
             return {"archived": False, "room_id": room_id, "reason": "not_completed"}
+        if settle_forced:
+            # 提前收口 ≠ 干完：working_wedged/hold_cap/deadline 都是「手里有货但 Stand 可能
+            # 还在干」，此时归档 = 级联 SIGTERM 杀 Stand。房留看板，迟到结果留给 reconcile
+            # 补收后归档（_rec_archive_room）。
+            ledger_append("kept", room_id, task_id=task_id, status=status, reason="settle_forced")
+            return {"archived": False, "room_id": room_id, "reason": "settle_forced"}
+        # 存活探针：completed 但房内 Stand 仍在干活（会话 running + 灯 working）→ 不归档。
+        # best-effort：_session_info 查不到（None/异常）不拦归档——探针故障不该把收口卡死。
+        sid = dispatch_result.get("stand_session_id")
+        if sid:
+            info = self._session_info(sid)
+            if info and info.get("status") == "running" and info.get("trafficState") == "working":
+                ledger_append("kept", room_id, task_id=task_id, status=status,
+                              reason="stand_still_working")
+                return {"archived": False, "room_id": room_id, "reason": "stand_still_working"}
         try:
             self.archive_room(room_id)
         except Exception as e:
@@ -2991,7 +3025,8 @@ class Caller:
             relayed = wechat.get("ok", False)
 
         # 收口：结果已收完（且已代发/已落 inbox），成功就把自建房间归档，别在看板堆着
-        archive = self.finish_room(dispatch_result, status)
+        archive = self.finish_room(dispatch_result, status,
+                                   settle_forced=bool(poll.get("settle_forced")))
 
         return {
             **dispatch_result,
@@ -3292,9 +3327,12 @@ class Caller:
         # 收口：成败按「整条链」算——执行段没成时连计划房一起留着，
         # 排查要看的是完整链路，不是半截。（共享房时 finish_room 天然幂等，见其实现）
         exec_status = exec_poll.get("status")
-        archive = {"execute": self.finish_room(exec_dispatch, exec_status)}
+        exec_forced = bool(exec_poll.get("settle_forced"))
+        archive = {"execute": self.finish_room(exec_dispatch, exec_status,
+                                               settle_forced=exec_forced)}
         if plan_dispatch:
-            archive["plan"] = self.finish_room(plan_dispatch, exec_status)
+            archive["plan"] = self.finish_room(plan_dispatch, exec_status,
+                                               settle_forced=exec_forced)
 
         return {
             "stage": "execute",
@@ -3332,10 +3370,12 @@ class Caller:
 
         判定顺序（先到先得）：
             1. 命中 PLAN_ONLY_KEYWORDS（「只要计划」「别动手」）→ think + plan_only
-            2. 交付物 = 判断（命中 JUDGMENT 且未命中 ARTIFACT）→ think
+            2. 轻量单步（≤120 字、命中 FAST_KEYWORDS、无 FAST_BLOCK/强计划信号）→ fast
+               （→ 快速 Worker（hy3）；保守优先，误判大的进 hy3 比误判小的进 claude 贵）
+            3. 交付物 = 判断（命中 JUDGMENT 且未命中 ARTIFACT）→ think
                （多步则 plan_only=True——多步判断的自然产物就是结构化计划）
-            3. 交付物 = 东西 且 多步有依赖 → plan（两段式）
-            4. 其余 → worker
+            4. 交付物 = 东西 且 多步有依赖 → plan（两段式）
+            5. 其余 → worker
 
         刻意不返回 fanout / operator：
             fanout 要求「N 个互不依赖的子任务」，关键词启发式判不出子任务边界——
@@ -3344,7 +3384,7 @@ class Caller:
 
         返回:
             {
-                "mode": "worker" | "think" | "plan",
+                "mode": "worker" | "think" | "plan" | "fast",
                 "plan_only": bool,
                 "deliverable": "judgment" | "artifact",
                 "structure": "multi_step" | "single_step",
@@ -3365,10 +3405,13 @@ class Caller:
         plan_kw = plan_strong + plan_weak
         direct_kw = _hits(DIRECT_KEYWORDS)
         plan_only_kw = _hits(PLAN_ONLY_KEYWORDS)
+        fast_kw = _hits(FAST_KEYWORDS)
+        fast_block = _hits(FAST_BLOCK_KEYWORDS)
         signals = {
             "judgment": judgment, "artifact": artifact,
             "plan": plan_kw, "plan_strong": plan_strong, "plan_weak": plan_weak,
             "direct": direct_kw, "plan_only": plan_only_kw,
+            "fast": fast_kw, "fast_block": fast_block,
         }
 
         # 结构维度（2026-07-26 强弱分档，提速批件）：plan 两段式是最贵的模式，误入
@@ -3387,7 +3430,18 @@ class Caller:
                 "signals": signals,
             }
 
-        # 2) 交付物 = 判断（要结论，不要东西）
+        # 2) 轻量单步 → fast（快速 Worker hy3）。保守优先：长度闸 + 重量信号一票否决，
+        #    拿不准就落后面的 worker（claude），宁重勿轻。
+        if (not multi_step and len(text) <= 120 and fast_kw
+                and not fast_block and not plan_strong):
+            return {
+                "mode": "fast", "plan_only": False,
+                "deliverable": "artifact", "structure": "single_step",
+                "reason": f"轻量单步任务（命中 {fast_kw}，无重量信号）→ 快速 Worker（hy3）",
+                "signals": signals,
+            }
+
+        # 3) 交付物 = 判断（要结论，不要东西）
         if judgment and not artifact:
             return {
                 "mode": "think", "plan_only": multi_step,
@@ -3399,7 +3453,7 @@ class Caller:
                 "signals": signals,
             }
 
-        # 3) 交付物 = 东西 且 多步有依赖 → 两段式
+        # 4) 交付物 = 东西 且 多步有依赖 → 两段式
         if multi_step:
             hit_desc = f"强 {plan_strong}" if plan_strong else f"弱×{len(plan_weak)} {plan_weak}"
             return {
@@ -3409,7 +3463,7 @@ class Caller:
                 "signals": signals,
             }
 
-        # 4) 单步执行
+        # 5) 单步执行
         return {
             "mode": "worker", "plan_only": False,
             "deliverable": "artifact", "structure": "single_step",
@@ -3565,7 +3619,8 @@ class Caller:
         # 收口：auto_dispatch 的直派分支此前**从不 finish_room**，每次调用泄一个房间到
         # 看板（dispatch_and_relay / plan_and_execute / dispatch_parallel 都收口了，
         # 只有这条路漏了）。归档只发生在 completed，失败照旧留看板看现场。
-        archive = self.finish_room(exec_dispatch, exec_poll.get("status"))
+        archive = self.finish_room(exec_dispatch, exec_poll.get("status"),
+                                   settle_forced=bool(exec_poll.get("settle_forced")))
         return {
             "mode": "direct",
             **exec_dispatch,
@@ -3717,7 +3772,8 @@ class Caller:
                     template=d.get("template_id", ""),
                 )
                 # 各项自己收口：谁先完成谁先归档，不必等整批（失败项照旧留看板）
-                d["archive"] = self.finish_room(d, poll.get("status"))
+                d["archive"] = self.finish_room(d, poll.get("status"),
+                                                settle_forced=bool(poll.get("settle_forced")))
                 return idx, d, summary, poll
             except Exception as e:
                 logger.warning("dispatch_parallel 第 %d 项失败: %s", idx, e)
@@ -4538,6 +4594,27 @@ def _run_by_mode(
                      "; ".join(f"{t.get('summary') or '?'}: {t.get('error')}"
                                for t in tasks if t.get("error")) or f"{len(tasks) - len(done)} 个子任务未完成",
         }
+
+    # fast：快速 Worker（hy3）单段派发（2026-07-27）。
+    # role 必须 None——dispatch 模板优先级是 template_id > role > task_type，传 role="worker"
+    # 会被 default_worker（claude）顶掉，task_map["fast"] 永远轮不到。
+    # args.task_type 的 argparse 缺省是 "general"（= 用户没指定），此时回落 "fast" 让
+    # task_map["fast"]（areco 设置页 fastWorker=workbuddy）接住；显式给了别的 task_type 则尊重。
+    if mode == "fast":
+        res = caller.dispatch_and_relay(
+            args.request,
+            role=None,
+            task_type=(args.task_type if args.task_type not in (None, "general") else "fast"),
+            room_id=args.room_id,
+            template_id=args.template,
+            plan_only=False,
+            mode="fast",
+            poll_timeout=timeout,
+            dry_run=dry_run,
+            request_summary=args.summary,
+            file_path=args.file,
+        )
+        return {**res, "mode": mode}
 
     # think / worker：单段派发（--isolated 只对 worker 有意义：per-session cwd 隔离工作区）
     res = caller.dispatch_and_relay(
@@ -5390,10 +5467,20 @@ def _rec_archive_room(caller, st: dict, dry_run: bool, actions: list[str]) -> No
 
     2026-07-27 实证：timeout/stuck 补收只落 inbox 不归档，六个 worker 会话
     completed_late 后仍 running 空转半天没人收尸。归档失败不阻塞对账主流程。
+
+    存活探针（2026-07-27 与 finish_room 同款守卫）：补收到新回复 ≠ Stand 干完——
+    灯仍 working 说明后面还有货，此时归档 = 级联 SIGTERM 杀 Stand（「看到中途结果
+    误判完成而提前关闭」）。留到下轮 reconcile 再收。
     """
     room_id = st.get("room_id")
     if not room_id or dry_run:
         return
+    sid = _last_stand_session(st)
+    if sid:
+        info = caller._session_info(sid)
+        if info and info.get("status") == "running" and info.get("trafficState") == "working":
+            actions.append(f"⏸ 房间 {room_id} 暂不归档（Stand 仍在干活，下轮再收）")
+            return
     try:
         caller.archive_room(str(room_id))
         actions.append(f"▣ 房间 {room_id} 已归档（补收收尾）")

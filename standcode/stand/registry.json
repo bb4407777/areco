@@ -2,13 +2,13 @@
   "version": "2",
   "default_thinker": "workbuddy-deepseek-pro",
   "default_worker": "claude",
-  "default_fast_worker": "workbuddy-deepseek",
+  "default_fast_worker": "workbuddy",
   "task_type_defaults": {
     "think": "workbuddy-deepseek-pro",
     "plan": "workbuddy-deepseek-pro",
     "execute": "claude",
     "work": "claude",
-    "fast": "workbuddy-deepseek"
+    "fast": "workbuddy"
   },
   "templates": [
     {

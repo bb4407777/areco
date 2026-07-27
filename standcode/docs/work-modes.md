@@ -44,8 +44,11 @@
                      │
                      ├─ 模式 4  → Thinker ⚠️未命名 ─────  1 room · 1 session（--role thinker 已通）
                      │
-                     └─ 模式 5  → Worker × N ⚠️无 CLI ──  N room · N session（并行）
-                              dispatch_parallel（仅 Python API）
+                     ├─ 模式 5  → Worker × N ⚠️无 CLI ──  N room · N session（并行）
+                     │        dispatch_parallel（仅 Python API）
+                     │
+                     └─ 模式 6  → 快速 Worker（hy3）─────  1 room · 1 session · 1 poll
+                              dispatch_and_relay(role=None, task_type="fast")
 ```
 
 | 模式 | 代码落点 | CLI | 自动路由可达 | SKILL.md 有 |
@@ -55,6 +58,7 @@
 | 3 Thinker→Worker | `plan_and_execute` (1699) | `run --wait --plan` | ✅ `should_plan=True` | ✅ |
 | **4 Thinker only** | `dispatch_thinker` (1145) | `run --wait --role thinker` ✅**已通** | ❌ 二元门控够不着 | ❌ |
 | **5 Fan-out** | `dispatch_parallel` (2033) | ❌ 无子命令 | ❌ | ❌ |
+| **6 Fast（快速 Worker）** | `_run_by_mode` fast 分支 → `task_map["fast"]` | `run/go --mode fast` | ✅ `route_mode` FAST 词表（2026-07-27） | ❌ |
 
 `auto_dispatch`（caller.py:1916）的门控是**二元的**——`should_plan(request)` 真则 `plan_and_execute`，假则 `dispatch_worker`。模式 4、5 在自动路由里**结构性不可达**：不是没实现，是没有分支能选到它们。
 
@@ -257,6 +261,11 @@ python3 caller/caller.py run --wait --role thinker "分析 X 的三种路线并�
 
 四格填满，没有空格也没有重叠。这是判断「模式集合完整了」的标准——**不是数量对了，是划分维度闭合了**。
 
+> **模式 6 fast（2026-07-27 落地）是四格外的一条预算车道**：左下格（单步要东西）里
+> 明显轻量的活（查一下/翻译/总结/提取/转成…，≤120 字、无重量信号）不再进 claude 重车，
+> `route_mode` 直出 `mode="fast"` → `task_map["fast"]`（areco 设置页 `fastWorker`，hy3）。
+> 保守优先——FAST_BLOCK 词（批量/重构/修复/实现…）一票否决，拿不准一律回落模式 2。
+
 ### 4.4 反方意见，以及为什么不成立
 
 | 反对 | 回应 |
@@ -284,6 +293,7 @@ python3 caller/caller.py run --wait --role thinker "分析 X 的三种路线并�
 | 3 | **→ Thinker → Worker** | 多步有依赖、要东西 | 2 / 2 串行 | ✅ `_parse_plan` | ✅ 在用 |
 | 4 | **→ Thinker** ★ | 要判断不要东西；或只要计划 | 1 / 1 | — | 🟡 **能跑，未命名** |
 | 5 | **→ Worker × N** | N 个互不依赖子任务 | N / N 并行 | — | 🟡 **有 API，无 CLI** |
+| 6 | **→ 快速 Worker（hy3）** | 轻量单步（查/翻译/总结/提取，≤120 字） | 1 / 1 | FAST_BLOCK 一票否决 | ✅ 2026-07-27 落地（route 自动可达） |
 
 > **1b「Caller 直干生产类活」不在此表**——那不是模式，是违规，归 Gatekeeper 管，归直干率审计数。
 
@@ -292,7 +302,7 @@ python3 caller/caller.py run --wait --role thinker "分析 X 的三种路线并�
 > 这活要**东西**还是要**判断**？
 > → 判断 → **模式 4**（Thinker）
 > → 东西 → 步骤之间有依赖吗？
->   → 有 → **模式 3**（Thinker→Worker）　→ 没有 → **模式 2**（Worker）
+>   → 有 → **模式 3**（Thinker→Worker）　→ 没有 → 明显轻量（查一下/翻译/总结…）？→ **模式 6**（fast，hy3）；否则 **模式 2**（Worker）
 > → 是 N 个互不相干的子任务？ → **模式 5**（fan-out）
 > → 以上都不是，是我自己的派发/回执动作？ → **模式 1**（白名单核对后直跑）
 

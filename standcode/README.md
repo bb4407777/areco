@@ -42,6 +42,9 @@ python3 caller/caller.py run --wait "调研 X 并输出报告" --role worker --s
 # 两段式：Thinker 出计划 → Worker 执行
 python3 caller/caller.py run --wait "设计一个方案" --plan
 
+# 轻量小任务 → 快速 Worker（hy3）：go 自动分诊（route 判出 fast 自动走），或显式 --mode fast
+python3 caller/caller.py go "查一下 X 案件状态"
+
 # 查任务 / 列任务
 python3 caller/caller.py status <task_id>
 python3 caller/caller.py list
