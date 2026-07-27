@@ -21,6 +21,7 @@ import {
   readAgentTrafficState,
   registerOccupancyProvider,
 } from './agent-transcript'
+import { duplicateBindingVictims } from './session-dedup'
 import { isTopicContinuation, NameTracker, nameCandidateOf } from './session-namer'
 import { createLogger } from '../logger'
 import { transcriptPath } from './transcript'
@@ -93,7 +94,36 @@ export class SessionManager extends EventEmitter {
       this.sessions.set(session.id, session)
     }
     if (this.sessions.size) log.info(`恢复 ${this.sessions.size} 个历史会话`)
+    this.dedupBindings()
     this.persist()
+  }
+
+  /**
+   * 双绑体检（2026-07-27）：占用闸只查 running 会话，会话「退出又恢复」会漏过双绑——
+   * A 绑底层 X → A 退出 → B 绑 X（A 退出时不占）→ A 恢复 → 两个会话同绑 X；重启清 locateCache
+   * 后占用闸互斥，两边对话模式都空白（是日 2579f70e 与 b85b8b53 同绑 session_c385d78c 即此）。
+   * 启动扫一次：同 nativeId 多会话只留 startedAt 最早的（原主），其余解绑并清缓存，让其重新
+   * locate 自己的真文件。spawn 注入唯一 id（见 handoff 提案）才是根治，此为存量兜底。
+   */
+  private dedupBindings() {
+    const victims = duplicateBindingVictims(
+      [...this.sessions.values()].map((s) => ({
+        id: s.id,
+        agentSessionId: s.agentSessionId,
+        startedAt: s.startedAt,
+        createdAt: s.createdAt,
+      })),
+    )
+    for (const id of victims) {
+      const s = this.sessions.get(id)
+      if (!s?.agentSessionId) continue
+      log.warn(
+        `双绑体检:解绑会话 ${id.slice(0, 8)}（与他人同绑底层 ${s.agentSessionId.slice(0, 8)}）让其重 locate`,
+      )
+      s.clearAgentBinding()
+      dropAgentTranscriptCache(id)
+    }
+    if (victims.length) log.info(`双绑体检:解绑 ${victims.length} 个重复绑定会话`)
   }
 
   autoStart() {
