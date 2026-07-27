@@ -8,6 +8,7 @@ export const useSessionsStore = defineStore('sessions', {
     ready: false,
     title: 'Areco',
     serverVersion: '',
+    cleanupExitedSupported: false,
     sessions: [] as SessionSummary[],
     templates: [] as Template[],
   }),
@@ -38,6 +39,7 @@ export const useSessionsStore = defineStore('sessions', {
         case 'init':
           this.title = msg.title
           this.serverVersion = msg.version
+          this.cleanupExitedSupported = msg.cleanupExitedSupported === true
           this.sessions = msg.sessions
           this.templates = msg.templates
           this.ready = true

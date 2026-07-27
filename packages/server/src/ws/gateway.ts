@@ -104,6 +104,7 @@ export class Gateway {
       protocolVersion: PROTOCOL_VERSION,
       title: this.config.server.title,
       version: this.version,
+      cleanupExitedSupported: true,
       sessions: this.manager.list(),
       templates: this.templates.list(),
     })

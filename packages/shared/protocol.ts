@@ -177,6 +177,8 @@ export interface InitMsg {
   protocolVersion: number
   title: string
   version: string
+  /** 旧 8790 不带此字段；新前端据此禁用需要新服务端的批量清理按钮。 */
+  cleanupExitedSupported?: boolean
   sessions: SessionSummary[]
   templates: Template[]
 }

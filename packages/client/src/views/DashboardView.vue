@@ -22,7 +22,7 @@ const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
-const { cleanableCount, cleaning, confirmCleanupExited } = useExitedSessionCleanup()
+const { cleanupSupported, cleanableCount, cleaning, confirmCleanupExited } = useExitedSessionCleanup()
 
 const showSpawn = ref(false)
 const showArchived = ref(false)
@@ -133,8 +133,9 @@ function handoff(id: string, templateId: string) {
           type="error"
           secondary
           size="small"
-          :disabled="!cleanableCount"
+          :disabled="!cleanupSupported || !cleanableCount"
           :loading="cleaning"
+          :title="cleanupSupported ? '删除全部未归档且已退出的会话' : '重启 8790 后可用'"
           @click="confirmCleanupExited"
         >一键清理</n-button>
         <n-button type="primary" size="small" @click="showSpawn = true">＋ 新建会话</n-button>

@@ -19,7 +19,7 @@ const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
-const { cleanableCount, cleaning, confirmCleanupExited } = useExitedSessionCleanup()
+const { cleanupSupported, cleanableCount, cleaning, confirmCleanupExited } = useExitedSessionCleanup()
 
 const emit = defineEmits<{ new: [] }>()
 
@@ -147,9 +147,9 @@ function onMenu(key: string, s: SessionSummary) {
           size="tiny"
           type="error"
           secondary
-          :disabled="!cleanableCount"
+          :disabled="!cleanupSupported || !cleanableCount"
           :loading="cleaning"
-          title="删除全部未归档且已退出的会话"
+          :title="cleanupSupported ? '删除全部未归档且已退出的会话' : '重启 8790 后可用'"
           @click="confirmCleanupExited"
         >一键清理</n-button>
         <n-button size="tiny" type="primary" @click="emit('new')">＋ 新建</n-button>

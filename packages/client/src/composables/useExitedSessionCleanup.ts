@@ -11,11 +11,12 @@ export function useExitedSessionCleanup() {
   const dialog = useDialog()
   const message = useMessage()
   const cleaning = ref(false)
+  const cleanupSupported = computed(() => store.cleanupExitedSupported)
   const cleanableCount = computed(() => store.cleanableExitedSessions.length)
 
   function confirmCleanupExited() {
     const count = cleanableCount.value
-    if (!count || cleaning.value) return
+    if (!cleanupSupported.value || !count || cleaning.value) return
 
     dialog.warning({
       title: '一键清理退出会话',
@@ -39,5 +40,5 @@ export function useExitedSessionCleanup() {
     })
   }
 
-  return { cleanableCount, cleaning, confirmCleanupExited }
+  return { cleanupSupported, cleanableCount, cleaning, confirmCleanupExited }
 }
