@@ -747,6 +747,13 @@ export function trafficStateFromCodex(raw: string): Exclude<TrafficState, 'exite
       if (payload.type === 'task_started') state = 'working'
       else if (payload.type === 'task_complete') state = 'conclusion'
       else if (payload.type === 'turn_aborted') state = 'needs-user' // 中断无结论，会话空等输入
+      else if (payload.type === 'agent_message') {
+        // Codex 新版会把过程更新和最终答复都记为 agent_message，只能按 phase 区分。
+        // traffic monitor 只读文件尾窗；重型 turn 超过尾窗后 task_started 会被挤出去，
+        // 此时 commentary 是仍在工作的强证据，不能再退回“assistant 文本=结论”的旧启发式。
+        if (payload.phase === 'commentary') state = 'working'
+        else if (payload.phase === 'final_answer') state = 'conclusion'
+      }
       continue
     }
     if (obj.type !== 'response_item') continue
@@ -756,10 +763,22 @@ export function trafficStateFromCodex(raw: string): Exclude<TrafficState, 'exite
         const callId = String(payload.call_id ?? payload.id ?? '')
         if (callId) pendingInputCalls.add(callId)
         state = 'needs-user'
-      }
+      } else state = 'working'
     } else if (payload.type === 'function_call_output') {
       const callId = String(payload.call_id ?? '')
-      if (callId && pendingInputCalls.delete(callId)) state = 'working'
+      if (callId) pendingInputCalls.delete(callId)
+      state = 'working'
+    } else if (
+      payload.type === 'reasoning' ||
+      payload.type === 'custom_tool_call' ||
+      payload.type === 'custom_tool_call_output'
+    ) {
+      // gpt-5.6 等新版 Codex 的 thinking/exec 走 reasoning + custom_tool_call*，
+      // 旧 parser 全部忽略，task_started 离开 512KB 尾窗后就会把正在思考误判为已出结论。
+      state = 'working'
+    } else if (payload.type === 'message') {
+      if (payload.phase === 'commentary') state = 'working'
+      else if (payload.phase === 'final_answer') state = 'conclusion'
     }
   }
 

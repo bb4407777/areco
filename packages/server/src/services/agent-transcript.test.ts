@@ -66,6 +66,31 @@ test('Codex traffic follows task lifecycle instead of assistant progress message
   assert.equal(trafficStateFromCodex(rows.map((row) => JSON.stringify(row)).join('\n')), 'conclusion')
 })
 
+test('Codex traffic stays working when a large turn pushes task_started out of the tail window', () => {
+  const rows: Array<Record<string, unknown>> = [
+    {
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'commentary', message: '正在检查。' },
+    },
+    {
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', phase: 'commentary', content: [] },
+    },
+    { type: 'response_item', payload: { type: 'reasoning', summary: [] } },
+    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'call-1' } },
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call-1' } },
+  ]
+
+  // 模拟 readTailText：只有当前 turn 的过程事件，生命周期起点已在 512KB 窗口之外。
+  assert.equal(trafficStateFromCodex(rows.map((row) => JSON.stringify(row)).join('\n')), 'working')
+
+  rows.push({
+    type: 'response_item',
+    payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [] },
+  })
+  assert.equal(trafficStateFromCodex(rows.map((row) => JSON.stringify(row)).join('\n')), 'conclusion')
+})
+
 test('Codex traffic is yellow only while request_user_input is pending', () => {
   const rows: Array<Record<string, unknown>> = [
     { type: 'event_msg', payload: { type: 'task_started' } },
