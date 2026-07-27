@@ -28,6 +28,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
 
   router.get('/sessions', c.listSessions)
   router.post('/sessions', c.spawnSession)
+  router.post('/sessions/cleanup-exited', c.cleanupExitedSessions)
   router.get('/sessions/:id', c.getSession)
   router.post('/sessions/:id/stop', c.stopSession)
   router.post('/sessions/:id/handoff', c.sessionHandoff)

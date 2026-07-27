@@ -13,6 +13,7 @@ import { groupSessionsByRoom } from '../utils/sessionGroups'
 import SessionCard from '../components/SessionCard.vue'
 import SpawnDialog from '../components/SpawnDialog.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
+import { useExitedSessionCleanup } from '../composables/useExitedSessionCleanup'
 
 const store = useSessionsStore()
 const roomsStore = useRoomsStore()
@@ -21,6 +22,7 @@ const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
+const { cleanableCount, cleaning, confirmCleanupExited } = useExitedSessionCleanup()
 
 const showSpawn = ref(false)
 const showArchived = ref(false)
@@ -126,7 +128,17 @@ function handoff(id: string, templateId: string) {
   <div v-else class="dashboard">
     <div class="toolbar">
       <h2 class="page-title">会话</h2>
-      <n-button type="primary" size="small" @click="showSpawn = true">＋ 新建会话</n-button>
+      <div class="toolbar-actions">
+        <n-button
+          type="error"
+          secondary
+          size="small"
+          :disabled="!cleanableCount"
+          :loading="cleaning"
+          @click="confirmCleanupExited"
+        >一键清理</n-button>
+        <n-button type="primary" size="small" @click="showSpawn = true">＋ 新建会话</n-button>
+      </div>
     </div>
 
     <n-empty v-if="store.ready && !store.sessions.length" description="还没有会话" class="empty">
@@ -263,6 +275,11 @@ function handoff(id: string, templateId: string) {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .page-title {
   margin: 0;

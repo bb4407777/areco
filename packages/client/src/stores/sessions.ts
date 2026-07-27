@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import type { ServerMsg, SessionSummary, Template } from '../../../shared/protocol'
+import type { ServerMsg, SessionCleanupResult, SessionSummary, Template } from '../../../shared/protocol'
+import { isExitedSessionCleanupCandidate } from '../../../shared/session-cleanup'
 import { api } from '../api'
 
 export const useSessionsStore = defineStore('sessions', {
@@ -23,6 +24,9 @@ export const useSessionsStore = defineStore('sessions', {
     },
     archivedSessions(): SessionSummary[] {
       return this.sorted.filter((s) => s.archived)
+    },
+    cleanableExitedSessions(): SessionSummary[] {
+      return this.sorted.filter(isExitedSessionCleanupCandidate)
     },
     enabledTemplates(state): Template[] {
       return state.templates.filter((t) => t.enabled)
@@ -86,6 +90,13 @@ export const useSessionsStore = defineStore('sessions', {
     },
     async remove(id: string) {
       return api.del<{ removed: string }>(`/api/sessions/${id}`)
+    },
+    async cleanupExited() {
+      const result = await api.post<SessionCleanupResult>('/api/sessions/cleanup-exited')
+      // WS 会逐条推 sessionRemoved；响应侧也立即收敛，避免慢连接上按钮仍短暂可点。
+      const removed = new Set(result.removed)
+      this.sessions = this.sessions.filter((session) => !removed.has(session.id))
+      return result
     },
 
     async refreshTemplates() {

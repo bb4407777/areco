@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from 'koa'
-import type { ScreenTailPayload, StandCodeConfig, StatsSummary, Template, TranscriptPage } from '../../../shared/protocol'
+import type { ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StatsSummary, Template, TranscriptPage } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
@@ -265,6 +265,12 @@ export class ApiControllers {
     guard(ctx, () => {
       this.manager.remove(ctx.params.id)
       ok(ctx, { removed: ctx.params.id })
+    })
+
+  cleanupExitedSessions = (ctx: Context) =>
+    guard(ctx, () => {
+      const result: SessionCleanupResult = { removed: this.manager.cleanupExited() }
+      ok(ctx, result)
     })
 
   // 对话模式「终端尾屏」：直读影子终端 buffer 尾行，供不切页查看 TUI 选项/确认提示

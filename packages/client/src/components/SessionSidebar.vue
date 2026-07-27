@@ -6,6 +6,7 @@ import { useSessionsStore } from '../stores/sessions'
 import { useRoomsStore } from '../stores/rooms'
 import { useUiStore } from '../stores/ui'
 import { useRenameDialog } from '../composables/useRenameDialog'
+import { useExitedSessionCleanup } from '../composables/useExitedSessionCleanup'
 import type { SessionSummary } from '../../../shared/protocol'
 import { chatCapable, sessionEntryPath, statusTagText, templateColor, templateLabel, trafficColor } from '../utils/format'
 import { groupSessionsByRoom } from '../utils/sessionGroups'
@@ -18,6 +19,7 @@ const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
+const { cleanableCount, cleaning, confirmCleanupExited } = useExitedSessionCleanup()
 
 const emit = defineEmits<{ new: [] }>()
 
@@ -140,7 +142,18 @@ function onMenu(key: string, s: SessionSummary) {
   <div class="sidebar-panel">
     <div class="sidebar-head">
       <span class="sidebar-title">会话</span>
-      <n-button size="tiny" type="primary" @click="emit('new')">＋ 新建</n-button>
+      <div class="sidebar-actions">
+        <n-button
+          size="tiny"
+          type="error"
+          secondary
+          :disabled="!cleanableCount"
+          :loading="cleaning"
+          title="删除全部未归档且已退出的会话"
+          @click="confirmCleanupExited"
+        >一键清理</n-button>
+        <n-button size="tiny" type="primary" @click="emit('new')">＋ 新建</n-button>
+      </div>
     </div>
     <div class="sidebar-list">
       <!-- 活动中：运行中的会话置顶（含项目分组内的，退出后自动回落原位） -->
@@ -257,6 +270,11 @@ function onMenu(key: string, s: SessionSummary) {
 .sidebar-title {
   font-weight: 700;
   font-size: 15px;
+}
+.sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .sidebar-list {
   flex: 1;

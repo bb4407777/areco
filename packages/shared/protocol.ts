@@ -128,6 +128,11 @@ export interface SessionSummary {
   roomId?: string | null
 }
 
+/** 批量清理未归档退出会话的服务端实际执行结果。 */
+export interface SessionCleanupResult {
+  removed: string[]
+}
+
 // ---- 客户端 → 服务端 ----
 
 export interface AttachMsg {

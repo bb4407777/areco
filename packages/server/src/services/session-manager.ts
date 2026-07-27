@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import type { SessionSummary } from '../../../shared/protocol'
 import type { TrafficState } from '../../../shared/traffic'
+import { isExitedSessionCleanupCandidate } from '../../../shared/session-cleanup'
 import type { AppConfig } from '../config'
 import path from 'node:path'
 import { Session } from './session'
@@ -381,6 +382,18 @@ export class SessionManager extends EventEmitter {
       return
     }
     this.cleanupRemoved(session)
+  }
+
+  /**
+   * 批量删除未归档且已退出的会话。
+   * 筛选与删除在服务端同一同步调用内完成，避免客户端列表过期后误删刚恢复的会话。
+   */
+  cleanupExited(): string[] {
+    const targets = [...this.sessions.values()].filter((session) =>
+      isExitedSessionCleanupCandidate(session.toSummary())
+    )
+    for (const session of targets) this.cleanupRemoved(session)
+    return targets.map((session) => session.id)
   }
 
   /** 真正的删除清理：dispose + 摘除会话 + 清各路缓存 + emit removed（已退出 / 停止后调用） */
