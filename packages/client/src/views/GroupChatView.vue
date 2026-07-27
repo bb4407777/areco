@@ -696,7 +696,7 @@ onMounted(async () => {
             <span class="room-count">{{ r.members.filter((m) => m.kind === 'session').length }} agent</span>
             <span v-if="rooms.unread(r.id)" class="badge">{{ rooms.unread(r.id) }}</span>
           </button>
-          <NEmpty v-if="!activeRooms.length && rooms.loaded" :description="`当前没有${kindLabel}，点右上角 ＋ 建一个`" class="rooms-empty" />
+          <NEmpty v-if="!activeRooms.length && rooms.loaded" :description="`当前没有${kindLabel}，点右上角 ＋ 新建`" class="rooms-empty" />
         </template>
         <button v-if="archivedRooms.length" class="archive-toggle" @click="showArchived = !showArchived">
           <span>已归档</span>
