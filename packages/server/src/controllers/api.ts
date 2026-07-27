@@ -5,13 +5,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from 'koa'
-import type { ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StatsSummary, Template, TranscriptPage } from '../../../shared/protocol'
+import type { ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StatsSummary, Template, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
 import { DATA_DIR, ROOT_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
-import { agentKindOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseQclaw, readAgentTranscript } from '../services/agent-transcript'
+import { agentKindOf, codexSessionIdOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseCodex, parseQclaw, parseWorkbuddy, readAgentTranscript } from '../services/agent-transcript'
 import {
   defaultHistoryRoots,
   historyCwd,
@@ -445,9 +445,62 @@ export class ApiControllers {
       ok(ctx, page)
     })
 
+  /** 在册 agent 原生历史会话全量解析（historyTranscript / historyContinue 共用）：避开 chatlog
+   *  统一层只存摘要级正文（首问+末答，codex 实测 messageCount=1、workbuddy=2）。剥 chatlog 源前缀
+   *  得原生 id，去 agent 自家落盘找全量文件解析。找不到返回 null（调用方回退或报错）。
+   *  - workbuddy：~/.codebuddy 与 ~/.workbuddy 的 projects 下各 slug 子目录里的 <uuid>.jsonl
+   *    （slug 遍历，规则 ≠ cwdToSlug 的 -Users-gao）
+   *  - codex：~/.codex/sessions 下递归找 rollout-*.jsonl，按 codexSessionIdOf 精确匹配原生 session id
+   *  reasonix 不在此列：chatlog id 是「时间戳+模型名」非文件标识、且无 cwd，无法定位原生文件
+   *  （根因在 chatlog 提取层，非此处）；cc-connect 是 .json 桥接副本、无现成解析器且 chatlog 已较全。*/
+  private readNativeHistoryMessages(source: string, id: string): TranscriptMessage[] | null {
+    const bareId = id.replace(/^(codex|workbuddy)-/, '')
+    if (!bareId || bareId === id || !SAFE_SEGMENT.test(bareId) || bareId.includes('..')) {
+      throw new Error('会话 id 不合法')
+    }
+    if (source === 'workbuddy') {
+      for (const d of ['.codebuddy', '.workbuddy']) {
+        const root = path.join(os.homedir(), d, 'projects')
+        let dirs: string[] = []
+        try {
+          dirs = fs.readdirSync(root)
+        } catch {
+          continue
+        }
+        for (const sub of dirs) {
+          const p = path.join(root, sub, `${bareId}.jsonl`)
+          if (fs.existsSync(p)) return parseWorkbuddy(fs.readFileSync(p, 'utf8'))
+        }
+      }
+      return null
+    }
+    // codex：递归 ~/.codex/sessions 找 rollout，按文件内 session id 精确匹配
+    const root = path.join(os.homedir(), '.codex', 'sessions')
+    try {
+      const files = fs
+        .readdirSync(root, { recursive: true, encoding: 'utf8' })
+        .filter((name) => name.endsWith('.jsonl'))
+        .map((name) => path.join(root, name))
+      for (const f of files) {
+        if (codexSessionIdOf(f) === bareId) return parseCodex(fs.readFileSync(f, 'utf8'))
+      }
+    } catch {
+      /* ignore */
+    }
+    return null
+  }
+
   historyTranscript = (ctx: Context) =>
     guard(ctx, () => {
       const { source, project, id } = ctx.params
+      // workbuddy/codex 优先原生全量（见 readNativeHistoryMessages），先于 isChatlogSource——
+      // 否则被 readChatlogTranscript 拦走只回 chatlog 摘要级正文（1-2 条）
+      if (source === 'workbuddy' || source === 'codex') {
+        const messages = this.readNativeHistoryMessages(source, id)
+        if (!messages) throw new Error('历史会话不存在')
+        ok(ctx, { messages, start: 0, end: messages.length, hasMore: false })
+        return
+      }
       // chatlog 统一层的源（codex 等）：从提取数据出正文，不走文件路径
       if (isChatlogSource(source)) {
         ok(ctx, readChatlogTranscript(source, project, id))
@@ -539,7 +592,10 @@ export class ApiControllers {
 
       let messages
       let cwd = ''
-      if (isChatlogSource(source)) {
+      if (source === 'workbuddy' || source === 'codex') {
+        messages = this.readNativeHistoryMessages(source, id) ?? []
+        cwd = chatlogCwd(source, project, id)
+      } else if (isChatlogSource(source)) {
         messages = readChatlogTranscript(source, project, id).messages
         // chatlog 聚合层也保留原会话 cwd；跨 agent 接续必须回原工作区，不能落到目标模板默认 cwd。
         cwd = chatlogCwd(source, project, id)
