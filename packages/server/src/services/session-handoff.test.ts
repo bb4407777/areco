@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Template } from '../../../shared/protocol'
 import type { Session } from './session'
-import { acceptsInitialPromptArg, readSessionHandoffMessages } from './session-handoff'
+import { acceptsInitialPromptArg, handoffAgentKind, readSessionHandoffMessages } from './session-handoff'
 import { cwdToSlug } from './transcript'
 
 function template(patch: Partial<Template>): Template {
@@ -22,7 +22,7 @@ function template(patch: Partial<Template>): Template {
   }
 }
 
-test('交接给 qoder/transcriptDir 模板时首条 prompt 走命令参数，不走 TUI 注入', () => {
+test('首条 prompt 投递按 harness/CLI 能力判断，不拿 transcriptDir 猜', () => {
   assert.equal(
     acceptsInitialPromptArg(
       template({
@@ -32,7 +32,33 @@ test('交接给 qoder/transcriptDir 模板时首条 prompt 走命令参数，不
     ),
     true,
   )
+  assert.equal(acceptsInitialPromptArg(template({ command: 'codebuddy', harness: 'workbuddy' })), true)
+  assert.equal(acceptsInitialPromptArg(template({ command: '/wrapper/wb', harness: 'workbuddy' })), true)
+  assert.equal(acceptsInitialPromptArg(template({ command: '/wrapper/codex', harness: 'codex' })), true)
+  assert.equal(acceptsInitialPromptArg(template({ command: '/wrapper/qoder', harness: 'qoder' })), true)
+  assert.equal(
+    acceptsInitialPromptArg(template({ command: 'unknown-cli', transcriptDir: '/tmp/unknown/projects' })),
+    false,
+  )
+  assert.equal(acceptsInitialPromptArg(template({ command: 'kimi', harness: 'kimi' })), false)
   assert.equal(acceptsInitialPromptArg(template({ command: 'reasonix' })), false)
+})
+
+test('harness-first 包装器仍按真实 agent 类型读取交接 transcript', () => {
+  const session = { command: '/Users/gao/Code/areco/bin/reasonix-stand' } as unknown as Session
+  assert.equal(handoffAgentKind(session), 'reasonix')
+  assert.equal(handoffAgentKind(session, template({ command: session.command, harness: 'reasonix' })), 'reasonix')
+  assert.equal(
+    handoffAgentKind({ command: '/wrapper/kimi' } as Session, template({ command: '/wrapper/kimi', harness: 'kimi' })),
+    'kimi',
+  )
+  assert.equal(
+    handoffAgentKind(
+      { command: '/wrapper/workbuddy' } as Session,
+      template({ command: '/wrapper/workbuddy', harness: 'workbuddy' }),
+    ),
+    'workbuddy',
+  )
 })
 
 test('从 qoder transcriptDir 会话交接能定位 claude-layout 文件并读取全文', () => {

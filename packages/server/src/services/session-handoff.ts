@@ -3,8 +3,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Template, TranscriptMessage } from '../../../shared/protocol'
-import { agentKindOf, locateClaudeLayoutTranscript, locateClaudeTranscript, readAgentAllMessages } from './agent-transcript'
+import {
+  agentKindOf,
+  locateClaudeLayoutTranscript,
+  locateClaudeTranscript,
+  readAgentAllMessages,
+  type AgentKind,
+} from './agent-transcript'
 import { readHistoryAllMessages } from './history'
+import { isHermesTemplate, readHermesHandoffMessages } from './hermes-handoff'
 import type { Session } from './session'
 import { effectiveClaudeHome } from './templates'
 import { transcriptPath } from './transcript'
@@ -14,15 +21,33 @@ export function acceptsInitialPromptArg(template: Template): boolean {
   const commandBase = path.basename(template.command)
   return (
     effectiveClaudeHome(template) !== null ||
-    Boolean(template.transcriptDir?.trim()) ||
+    template.harness === 'codex' ||
+    template.harness === 'qoder' ||
+    template.harness === 'workbuddy' ||
     commandBase === 'codex' ||
-    commandBase === 'qoderclicn'
+    commandBase === 'qoderclicn' ||
+    commandBase === 'codebuddy'
   )
+}
+
+/**
+ * Session 里保留的是模板原始 command；harness-first 模板实际执行命令可能完全不同。
+ * 例如 reasonix-stand 包装器最终 exec reasonix，不能只按 basename(session.command) 判源。
+ */
+export function handoffAgentKind(session: Session, template?: Template): AgentKind | null {
+  const direct = agentKindOf(session.command)
+  if (direct) return direct
+  if (path.basename(session.command).startsWith('reasonix-')) return 'reasonix'
+  if (template?.harness === 'codex') return 'codex'
+  if (template?.harness === 'workbuddy') return 'workbuddy'
+  if (template?.harness === 'reasonix') return 'reasonix'
+  if (template?.harness === 'kimi') return 'kimi'
+  return null
 }
 
 /** sessionHandoff 用全量读取：顺序与 transcript 端点一致，原生 agent 必须先于 transcriptDir。 */
 export function readSessionHandoffMessages(session: Session, template?: Template): TranscriptMessage[] {
-  const kind = agentKindOf(session.command)
+  const kind = handoffAgentKind(session, template)
   if (session.claudeSessionId) {
     const filePath = transcriptPath(session)
     return filePath && fs.existsSync(filePath) ? readHistoryAllMessages(filePath) : []
@@ -32,6 +57,7 @@ export function readSessionHandoffMessages(session: Session, template?: Template
     const filePath = locateClaudeLayoutTranscript(session, session.transcriptDir)
     return filePath && fs.existsSync(filePath) ? readHistoryAllMessages(filePath) : []
   }
+  if (template && isHermesTemplate(template)) return readHermesHandoffMessages(session, template)
   const home = template ? effectiveClaudeHome(template) : null
   const filePath = home ? locateClaudeTranscript(session, home) : null
   return filePath && fs.existsSync(filePath) ? readHistoryAllMessages(filePath) : []

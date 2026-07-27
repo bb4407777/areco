@@ -535,6 +535,8 @@ export class ApiControllers {
       let cwd = ''
       if (isChatlogSource(source)) {
         messages = readChatlogTranscript(source, project, id).messages
+        // chatlog 聚合层也保留原会话 cwd；跨 agent 接续必须回原工作区，不能落到目标模板默认 cwd。
+        cwd = chatlogCwd(source, project, id)
       } else if (source === 'kimi') {
         const filePath = resolveKimiWire(project, id)
         messages = readHistoryAllMessages(filePath, undefined, kimiParseLine)
@@ -552,7 +554,7 @@ export class ApiControllers {
 
   /**
    * 交接档案 + 拉起接手会话（historyContinue 与 sessionHandoff 共用）。
-   * claude 系/codex/qoder 支持启动参数带首条指令；其余 TUI（reasonix/codebuddy 等）
+   * claude 系/codex/qoder/codebuddy 支持启动参数带首条指令；其余 TUI（reasonix/kimi 等）
    * 等输出安静（首屏画完）再注入——固定延时对冷启动 10s+ 的 agent 必丢。
    */
   private spawnWithHandoff(
