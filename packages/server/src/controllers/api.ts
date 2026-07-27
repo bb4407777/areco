@@ -5,13 +5,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from 'koa'
-import type { ScreenTailPayload, StandCodeConfig, StatsSummary, Template, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
+import type { ScreenTailPayload, StandCodeConfig, StatsSummary, Template, TranscriptPage } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
 import { DATA_DIR, ROOT_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
-import { agentKindOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseQclaw, readAgentAllMessages, readAgentTranscript } from '../services/agent-transcript'
+import { agentKindOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseQclaw, readAgentTranscript } from '../services/agent-transcript'
 import {
   defaultHistoryRoots,
   historyCwd,
@@ -31,6 +31,7 @@ import { handoffPrompt, writeHandoffFile } from '../services/handoff'
 import { effectiveClaudeHome } from '../services/templates'
 import { standCodeCatalog } from '../services/standcode-resolver'
 import { FileService } from '../services/files'
+import { acceptsInitialPromptArg, readSessionHandoffMessages } from '../services/session-handoff'
 
 const execFileAsync = promisify(execFile)
 
@@ -551,7 +552,7 @@ export class ApiControllers {
 
   /**
    * 交接档案 + 拉起接手会话（historyContinue 与 sessionHandoff 共用）。
-   * claude 系/codex 支持启动参数带首条指令；其余 TUI（reasonix/codebuddy 等）
+   * claude 系/codex/qoder 支持启动参数带首条指令；其余 TUI（reasonix/codebuddy 等）
    * 等输出安静（首屏画完）再注入——固定延时对冷启动 10s+ 的 agent 必丢。
    */
   private spawnWithHandoff(
@@ -561,7 +562,7 @@ export class ApiControllers {
     opts: { cwd?: string; name?: string }
   ) {
     const prompt = handoffPrompt(file, source)
-    const viaArg = effectiveClaudeHome(template) !== null || path.basename(template.command) === 'codex'
+    const viaArg = acceptsInitialPromptArg(template)
     const summary = this.manager.spawn(template.id, {
       cwd: opts.cwd,
       name: opts.name,
@@ -599,21 +600,7 @@ export class ApiControllers {
         throw new Error('shell 模板无法接续对话')
       }
 
-      // 复用 transcript 端点的定位逻辑：claude 系直取 / agent 系自家落盘 / 包装器时间窗兜底
-      let messages: TranscriptMessage[] = []
-      const kind = agentKindOf(session.command)
-      if (session.claudeSessionId) {
-        const filePath = transcriptPath(session)
-        if (filePath && fs.existsSync(filePath)) messages = readHistoryAllMessages(filePath)
-      } else if (kind) {
-        // 交接要全量：分页接口 before 分支只回最后一页（PAGE_MESSAGES 条），会丢前文
-        messages = readAgentAllMessages(session, kind)
-      } else {
-        const tpl = this.templates.get(session.templateId)
-        const home = tpl ? effectiveClaudeHome(tpl) : null
-        const filePath = home ? locateClaudeTranscript(session, home) : null
-        if (filePath && fs.existsSync(filePath)) messages = readHistoryAllMessages(filePath)
-      }
+      const messages = readSessionHandoffMessages(session, this.templates.get(session.templateId))
       if (!messages.length) throw new Error('该会话没有可交接的内容（无对话记录）')
 
       if (session.isRunning) session.stop()
