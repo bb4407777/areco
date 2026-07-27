@@ -138,6 +138,12 @@ POLL_INTERVAL_SEC = _conf_float("STANDCODE_POLL_INTERVAL", "poll_interval_sec", 
 STATE_PROBE_SEC = _conf_float("STANDCODE_STATE_PROBE", "state_probe_sec", 5)
 STUCK_CONFIRM_HITS = int(_conf_float("STANDCODE_STUCK_HITS", "stuck_confirm_hits", 2))
 SETTLE_MAX_SEC = _conf_float("STANDCODE_SETTLE_MAX", "settle_max_sec", 1800)
+# MIN_TIMEOUT_SEC 等待类派发显式 --timeout 的下限闸（0=关闸）。「Stand 永不设超时，
+# 要限时必须用户明说」是 2026-07-26 高律师的决定，SKILL 写了但弱模型照传不误——
+# 2026-07-27 实证：Hermes 全天逐单手填 120/180/300s（25民1000 两单 180s，Worker
+# 死线前 8s 交活仍被判 timeout 丢结果）。文本约不住的纪律用闸约：低于下限一律抬到
+# 下限；高律师真要短限时 → STANDCODE_MIN_TIMEOUT=0 关闸再传。
+MIN_TIMEOUT_SEC = _conf_float("STANDCODE_MIN_TIMEOUT", "min_timeout_sec", 600)
 # 2026-07-26 实战两洞（B4 e2e 现场捕获）：
 # OUTPUT_STALL_PROBES：tool 尾假 working 判别——agent 用 areco-msg 回执后 turn 以工具调用
 #   收尾，transcript 灯永不落绿；outputChars 连续 N 个探针零增长 = 没在干活，定稿。
@@ -2303,7 +2309,51 @@ class Caller:
 
             time.sleep(poll_interval)
 
+        # 死线终检（2026-07-27 25民1000 实证：Worker 死线前 8s 已交活，灯未落绿被判
+        # timeout，完整结果连 stand_replies 一起被扔）。到点先补拉一次增量；手里有货
+        # 就按 settle_forced 定稿（reason=deadline），到手结果绝不扔——更迟的回复由
+        # reconcile 的 completed+settle_forced 分支继续兜。
+        try:
+            for msg in self.get_messages(session_id, after_id=last_id):
+                last_id = max(last_id, msg.get("id", 0))
+                if _is_my_stand(msg.get("from_agent", "")):
+                    stand_replies.append(msg)
+        except Exception:
+            pass
         elapsed = round(time.time() - start_time, 2)
+        if stand_replies:
+            result_text = "\n\n".join(
+                m.get("body", "") for m in stand_replies if m.get("body")
+            ).strip()
+            logger.warning(
+                "死线定稿: session=%s 超时 %ds 但已收 %d 条回复，按 settle_forced 收口",
+                session_id, timeout, len(stand_replies),
+            )
+            log_audit("poll_completed", {
+                "task_id": task_id,
+                "role": role,
+                "template": template,
+                "blocked": False,
+                "session_id": session_id,
+                "room_id": room_id,
+                "elapsed": elapsed,
+                "messages_count": last_id,
+                "settle_forced": True,
+                "settle_reason": "deadline",
+            })
+            return {
+                "session_id": session_id,
+                "room_id": room_id,
+                "status": "completed",
+                "result_text": result_text,
+                "stand_replies": stand_replies,
+                "elapsed": elapsed,
+                "completed_at": _now_iso(),
+                "messages_count": last_id,
+                "settle_forced": True,
+                "settle_reason": "deadline",
+                "error": None,
+            }
         logger.warning("轮询超时: session=%s timeout=%ds", session_id, timeout)
         log_audit("poll_timeout", {
             "task_id": task_id,
@@ -4453,6 +4503,13 @@ def _cmd_run(args) -> int:
     timeout = args.timeout if args.timeout is not None else (
         0 if (getattr(args, "wait", False) or getattr(args, "bg", False)) else 600
     )
+    if (getattr(args, "wait", False) or getattr(args, "bg", False)) \
+            and MIN_TIMEOUT_SEC > 0 and 0 < timeout < MIN_TIMEOUT_SEC:
+        logger.warning(
+            "显式 --timeout %ds 低于下限，钳到 %ds（Stand 永不设短超时；真要短限时先 STANDCODE_MIN_TIMEOUT=0）",
+            timeout, int(MIN_TIMEOUT_SEC),
+        )
+        timeout = int(MIN_TIMEOUT_SEC)
 
     # ── 模式决策（P0-1：模式是一等字段，两代参数在 resolve_mode 唯一收敛）──
     try:
@@ -5018,6 +5075,9 @@ def _cmd_ask(args) -> int:
         return 0
 
     timeout = args.timeout if args.timeout is not None else 0
+    if MIN_TIMEOUT_SEC > 0 and 0 < timeout < MIN_TIMEOUT_SEC:
+        logger.warning("ask 显式 --timeout %ds 低于下限，钳到 %ds", timeout, int(MIN_TIMEOUT_SEC))
+        timeout = int(MIN_TIMEOUT_SEC)
     spec = {
         "request": dispatched_request, "task_type": "general",
         "role": "worker", "template": channel.get("template_id"),
@@ -5299,9 +5359,11 @@ def _rec_notice(task_id: str, st: dict, room_id, status: str, error: str) -> Non
 def _cmd_reconcile(args) -> int:
     """对账补收（2026-07-26 方案C）：等待者死亡 / 卡死解开后的迟到结果，从房间捞回 inbox。
 
-    扫 ~/.standcode/tasks/ 两类账：
+    扫 ~/.standcode/tasks/ 三类账：
       · status=stuck：人到看板点掉选项后 Stand 继续跑完——凭 messages_count 水位线
         增量取新回复，补写 inbox（completed_late）。
+      · status=timeout 且未 late_scan_done：迟到货水位线补收（2026-07-27 加，补收≠重试）；
+        无货且会话收尾 → late_scan_done 销账。
       · status=running 且等待者进程已死：凭 dispatches 面包屑定位房间——有新回复补收；
         无回复且 Stand 卡选项 → 转 stuck 落通知（下轮按上一类处理）；无回复且 Stand
         已退出 → 标 lost 落通知；Stand 还在干 → 留待下轮。
@@ -5391,6 +5453,41 @@ def _cmd_reconcile(args) -> int:
                             st["reconciled_at"] = _now_iso()
                             _write_state(task_id, st)
                         actions.append(f"☑️ {task_id} settle_forced 销账（会话已收尾，无迟到回复）")
+                    else:
+                        counts["waiting"] += 1
+
+            elif status == "timeout" and not st.get("late_scan_done"):
+                # 超时是终态但不是句号（2026-07-27 25民1000 实证：两单 timeout 后
+                # Worker 分别在死线前 8s / 后 2.5min 交活，结果躺房里没人收，Hermes
+                # 又手工重做一遍）。凭水位线补收迟到货 → completed_late；确认无货且
+                # 会话已收尾 → late_scan_done 销账不复扫。timeout 不重派的口径不变
+                # ——补收 ≠ 重试。
+                counts["scanned"] += 1
+                team = st.get("session_id")
+                if not team:
+                    if not args.dry_run:
+                        st["late_scan_done"] = True
+                        _write_state(task_id, st)
+                    continue
+                try:
+                    msgs = caller.get_messages(team, after_id=int(st.get("messages_count") or 0))
+                except Exception as e:
+                    actions.append(f"⚠️ {task_id} 读房间失败: {e}")
+                    continue
+                replies = _stand_msgs(msgs, st.get("stand_name") or "")
+                if replies:
+                    _rec_finalize(task_id, st, replies, dry_run=args.dry_run)
+                    counts["harvested"] += 1
+                    actions.append(f"✅ {task_id} 超时后补收 {len(replies)} 条迟到回复")
+                else:
+                    sid = _last_stand_session(st)
+                    info = (caller._session_info(sid) or {}) if sid else {}
+                    if info.get("status") == "exited" or info.get("trafficState") in ("conclusion", "idle"):
+                        if not args.dry_run:
+                            st["late_scan_done"] = True
+                            st["reconciled_at"] = _now_iso()
+                            _write_state(task_id, st)
+                        actions.append(f"☑️ {task_id} 超时销账（会话已收尾，无迟到回复）")
                     else:
                         counts["waiting"] += 1
 
