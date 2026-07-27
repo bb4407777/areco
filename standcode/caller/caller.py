@@ -5329,6 +5329,22 @@ def _rec_finalize(task_id: str, st: dict, replies: list[dict], *, dry_run: bool)
     _write_state(task_id, st)
 
 
+def _rec_archive_room(caller, st: dict, dry_run: bool, actions: list[str]) -> None:
+    """补收后按「做完就删」收尾：归档任务房（→ sweeper 特许通道删除，级联停会话）。
+
+    2026-07-27 实证：timeout/stuck 补收只落 inbox 不归档，六个 worker 会话
+    completed_late 后仍 running 空转半天没人收尸。归档失败不阻塞对账主流程。
+    """
+    room_id = st.get("room_id")
+    if not room_id or dry_run:
+        return
+    try:
+        caller.archive_room(str(room_id))
+        actions.append(f"▣ 房间 {room_id} 已归档（补收收尾）")
+    except Exception as e:
+        actions.append(f"⚠️ 房间 {room_id} 归档失败: {e}")
+
+
 def _last_stand_session(st: dict) -> str:
     """从面包屑倒序找最近一次派发的 stand_session_id（没有则空串）。"""
     for d in reversed(st.get("dispatches") or []):
@@ -5408,6 +5424,7 @@ def _cmd_reconcile(args) -> int:
                     _rec_finalize(task_id, st, replies, dry_run=args.dry_run)
                     counts["harvested"] += 1
                     actions.append(f"✅ {task_id} 卡死解开，补收 {len(replies)} 条迟到回复")
+                    _rec_archive_room(caller, st, args.dry_run, actions)
                 else:
                     # 无新回复（全量修复 A2）：查会话态——卡死会话被人直接杀掉/归档
                     # （exited）则升级 lost 落通知，否则（还卡着/查不到）留待下轮
@@ -5479,6 +5496,7 @@ def _cmd_reconcile(args) -> int:
                     _rec_finalize(task_id, st, replies, dry_run=args.dry_run)
                     counts["harvested"] += 1
                     actions.append(f"✅ {task_id} 超时后补收 {len(replies)} 条迟到回复")
+                    _rec_archive_room(caller, st, args.dry_run, actions)
                 else:
                     sid = _last_stand_session(st)
                     info = (caller._session_info(sid) or {}) if sid else {}
