@@ -1480,8 +1480,8 @@ class Caller:
             return None
 
     def standby_sweep(self) -> dict:
-        """清扫暖池：过期 / 已被消费的待命位归档回收；>5 分钟的孤儿 .claiming-* 删除。"""
-        expired, orphans, consumed = 0, 0, 0
+        """清扫暖池：过期 / 会话已死 / 已被消费的待命位归档回收；>5 分钟的孤儿 .claiming-* 删除。"""
+        expired, orphans, consumed, dead = 0, 0, 0, 0
         try:
             sessions = {s.get("id"): s for s in self.list_sessions()}
         except Exception:
@@ -1492,6 +1492,22 @@ class Caller:
             except Exception:
                 f.unlink(missing_ok=True)
                 continue
+            # 会话已死的席位主动清：池满判定只数文件，一个指向死会话的席位会把该模板
+            # 唯一的位子占到过期（120min），poolwarm 期间一直补不进来 = 静默退回冷启动
+            # （07-27 实测 workbuddy-deepseek 席位指向已消失的会话，占位 90min）。
+            # claim 侧本就有 session_dead 闸，但那要等到有人认领才触发。
+            # sessions 为空 = list_sessions 失败，此时一律不判，避免 API 抖动清空整池。
+            if sessions:
+                sess = sessions.get(info.get("stand_session_id"))
+                if not sess or sess.get("status") != "running":
+                    try:
+                        os.rename(f, f.with_name(f.name + f".claiming-{os.getpid()}"))
+                    except OSError:
+                        continue
+                    f.with_name(f.name + f".claiming-{os.getpid()}").unlink(missing_ok=True)
+                    self._standby_discard(info, "session_dead")
+                    dead += 1
+                    continue
             # 被用过的席位主动清，别等下次认领才发现（claim 那道闸是兜底）
             if sessions and not self._seat_pristine(
                 info, sessions.get(info.get("stand_session_id"))
@@ -1520,7 +1536,8 @@ class Caller:
                         orphans += 1
                 except OSError:
                     pass
-        return {"expired": expired, "orphan_claims": orphans, "consumed": consumed}
+        return {"expired": expired, "orphan_claims": orphans,
+                "consumed": consumed, "dead": dead}
 
     def standby_status(self) -> list[dict]:
         """暖池现状（池文件 × 会话活性），供 `caller.py pool` 展示。"""

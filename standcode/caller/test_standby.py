@@ -8,6 +8,7 @@
     - refill：建房+spawn+池文件；池满幂等跳过
     - claim：命中即消费池文件并返回 reuse 字典；过期/会话死亡当场清理；空池回 None
     - dispatch 复用通道：暖池命中 → 不再 add_stand、结果带 standby=True、用掉即补
+    - sweep：死会话/已消失会话席位当场回收，活席位保留，会话列表取不到时不判
     - plan 预热：两段式全程只 spawn 2 个 Stand（Thinker+预热 Worker），执行段 stand_reused
     - 报表去污：_audit_is_stub 桩痕迹判定
 """
@@ -161,10 +162,41 @@ def test_audit_stub_filter() -> None:
     check(not C._audit_is_stub({"template": "workbuddy-deepseek-pro", "room_id": ""}), "无房号事件不误杀")
 
 
+def test_sweep_dead_session() -> None:
+    print("\n[standby] sweep 死会话/活席位")
+    C.STANDBY_ENABLED = True
+    c = _fresh("sw")
+    # 席位会话已 exited：sweep 当场回收（不等 claim、不等 120min 过期）
+    r1 = c.standby_refill("worker-tpl")
+    c._session_states[r1["stand_session_id"]] = "exited"
+    out = c.standby_sweep()
+    check(out["dead"] == 1 and len(c._standby_files("worker-tpl")) == 0
+          and r1["room_id"] in c._archived,
+          "死会话席位：sweep 回收（dead=1、池文件摘走、房间归档）")
+    # 席位会话从列表里消失（进程被清理）：同样回收
+    r2 = c.standby_refill("worker-tpl")
+    c._session_states.pop(r2["stand_session_id"])
+    c._session_states["someone-else"] = "running"  # 列表非空才判，模拟 API 正常
+    out = c.standby_sweep()
+    check(out["dead"] == 1 and r2["room_id"] in c._archived,
+          "席位指向已消失会话：sweep 回收")
+    # 活席位：sweep 不动
+    r3 = c.standby_refill("worker-tpl")
+    out = c.standby_sweep()
+    check(out["dead"] == 0 and len(c._standby_files("worker-tpl")) == 1,
+          "活席位：sweep 不误杀")
+    # list_sessions 失败（空列表）= 一律不判，防 API 抖动清空整池
+    c._session_states.clear()
+    out = c.standby_sweep()
+    check(out["dead"] == 0 and len(c._standby_files("worker-tpl")) == 1,
+          "会话列表取不到：sweep 不判死活，席位保留")
+
+
 if __name__ == "__main__":
     test_refill_and_claim()
     test_dispatch_uses_standby()
     test_plan_prewarm()
+    test_sweep_dead_session()
     test_audit_stub_filter()
     print()
     if _fails:
