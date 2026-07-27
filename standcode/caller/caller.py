@@ -1351,6 +1351,25 @@ class Caller:
         except OSError:
             return []
 
+    @staticmethod
+    def _seat_pristine(info: dict, sess: dict | None) -> bool:
+        """席位是否还没被用过（会话名未被改成任务名）。
+
+        龄/活性/房归档三道检查都验不出「席位已被消费」：07-27 实测一个被测试用掉的
+        待命会话（名字已变成任务名）在池里躺了 80 分钟仍显示可派，派进去等于让
+        worker 接着别人的对话干新活。待命名形如「⚙…」或「<Stand 名> #N」，偏离即脏。
+        """
+        try:
+            sess_name = str((sess or {}).get("name") or "")
+            stand_name = str(info.get("stand_name") or "")
+            return (
+                not sess_name
+                or sess_name.startswith("⚙")
+                or bool(stand_name and sess_name.startswith(stand_name))
+            )
+        except Exception:
+            return True  # 判不出就别误杀，交给龄/活性闸
+
     def standby_claim(self, template_id: str) -> dict | None:
         """认领一个同模板待命 Stand，返回 dispatch 可直用的 reuse_stand 字典或 None。
 
@@ -1384,6 +1403,9 @@ class Caller:
                     sess = None
                 if not sess or sess.get("status") != "running":
                     self._standby_discard(info, "session_dead")
+                    continue
+                if not self._seat_pristine(info, sess):
+                    self._standby_discard(info, "seat_consumed")
                     continue
                 try:
                     room = self.get_room(info["room_id"])
@@ -1458,13 +1480,29 @@ class Caller:
             return None
 
     def standby_sweep(self) -> dict:
-        """清扫暖池：过期待命位归档回收；>5 分钟的孤儿 .claiming-*（认领方进程死在半路）删除。"""
-        expired, orphans = 0, 0
+        """清扫暖池：过期 / 已被消费的待命位归档回收；>5 分钟的孤儿 .claiming-* 删除。"""
+        expired, orphans, consumed = 0, 0, 0
+        try:
+            sessions = {s.get("id"): s for s in self.list_sessions()}
+        except Exception:
+            sessions = {}
         for f in self._standby_files():
             try:
                 info = json.loads(f.read_text())
             except Exception:
                 f.unlink(missing_ok=True)
+                continue
+            # 被用过的席位主动清，别等下次认领才发现（claim 那道闸是兜底）
+            if sessions and not self._seat_pristine(
+                info, sessions.get(info.get("stand_session_id"))
+            ):
+                try:
+                    os.rename(f, f.with_name(f.name + f".claiming-{os.getpid()}"))
+                except OSError:
+                    continue
+                f.with_name(f.name + f".claiming-{os.getpid()}").unlink(missing_ok=True)
+                self._standby_discard(info, "seat_consumed")
+                consumed += 1
                 continue
             if time.time() - float(info.get("created_ts") or 0) > STANDBY_MAX_AGE_SEC:
                 try:
@@ -1482,7 +1520,7 @@ class Caller:
                         orphans += 1
                 except OSError:
                     pass
-        return {"expired": expired, "orphan_claims": orphans}
+        return {"expired": expired, "orphan_claims": orphans, "consumed": consumed}
 
     def standby_status(self) -> list[dict]:
         """暖池现状（池文件 × 会话活性），供 `caller.py pool` 展示。"""
@@ -4083,7 +4121,8 @@ def release_processing_lock(task_id: str) -> None:
 
 
 def send_callback_trigger(
-    task_id: str, summary_hint: str = "", dry_run: bool = False
+    task_id: str, summary_hint: str = "", dry_run: bool = False,
+    message: str | None = None,
 ) -> dict:
     """发送极简触发消息到微信，告知 Hermes 去 inbox 取结果
 
@@ -4091,7 +4130,7 @@ def send_callback_trigger(
     返回里带 dry_run / stdout / returncode，便于上层落 state、status 可见是否真发——
     避免「dry-run 未真发」误判掩盖真实的 cc-send 失败。
     """
-    msg = f"任务 {summary_hint}（{task_id}）完成，Hermes 正在汇总…"
+    msg = message or f"任务 {summary_hint}（{task_id}）完成，Hermes 正在汇总…"
 
     # 目标会话为空时**绝不能发**：cc-send 裸 -s "" 会回落到「当前活跃会话指针」，
     # 于是一条任务完成通知被投进碰巧活跃的那个对话——发错人。relay_to_wechat 早有这道
@@ -5575,6 +5614,16 @@ def _cmd_reconcile(args) -> int:
                     counts["waiting"] += 1
                     actions.append(f"⏳ {task_id} Stand 仍在跑（{traffic or '状态未知'}），下轮再看")
 
+        # 拉模式决议（07-25）的唯一豁免（07-27 高律师问「补收怎么没叫醒」后加）：
+        # 空转轮零推送不变；补收>0 才发一条唤醒触发，Hermes 醒来 digest 自然带出
+        # 明细。没有这条，completed_late 结果要等下一次偶然唤醒才被看见。
+        if counts["harvested"] and not args.dry_run:
+            trig = send_callback_trigger(
+                "reconcile",
+                message=f"reconcile 补收 {counts['harvested']} 件迟到结果进 inbox，请汇总转述",
+            )
+            actions.append("📣 已发唤醒触发" if trig.get("ok")
+                           else f"⚠️ 唤醒触发未发出: {(trig.get('error') or trig.get('stdout') or '')[:80]}")
         log_audit("reconcile", {**counts, "dry_run": bool(args.dry_run), "blocked": False})
         for line in actions:
             print(line)
