@@ -3,7 +3,7 @@
 // agent 用仓内 areco-msg.mjs 回执；消息 SoT 在服务端 projects.db，本页经 WS（rooms/roomMessage）实时更新，不轮询。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NEmpty, NInput, NModal, NPopconfirm, NPopover, NSelect, NSpin, useMessage } from 'naive-ui'
+import { NButton, NEmpty, NInput, NModal, NPopconfirm, NSelect, NSpin, useMessage } from 'naive-ui'
 import type { DeliveryStatus, DispatchMode, ProjectCatalogEntry, ProjectCatalogGroup, RoomInfo, RoomKind, RoomMember, SessionSummary } from '../../../shared/protocol'
 import type { TrafficState } from '../../../shared/traffic'
 import { useRoomsStore } from '../stores/rooms'
@@ -777,14 +777,6 @@ onMounted(async () => {
               @update:value="onAddMember"
             />
           </div>
-          <NPopover v-if="!viewingArchived" trigger="click" placement="bottom-end" style="max-width: 420px">
-            <template #trigger><button class="icon-btn" title="邀请外部终端的 agent">⇗</button></template>
-            <div class="invite">
-              <p>本机任何终端都可向本{{ kindLabel }}发消息（team：<code>{{ room.team }}</code>）：</p>
-              <code class="invite-cmd">node {{ rooms.msgCli || 'scripts/areco-msg.mjs' }} {{ room.team }} '&lt;名字&gt;' '&lt;收件人或 all&gt;' '&lt;消息&gt;'</code>
-              <p>消息会实时出现在这里；房里 @成员 的消息会投递到对应会话终端（外部终端的名字仅作显示，收不到投递）。</p>
-            </div>
-          </NPopover>
           <NButton v-if="viewingArchived" size="tiny" secondary @click="unarchiveRoom">恢复{{ kindLabel }}</NButton>
           <NButton
             v-else
@@ -794,7 +786,7 @@ onMounted(async () => {
             :title="rooms.archiveSupported ? `归档${kindLabel}` : '重启 8790 后可归档'"
             @click="archiveRoom"
           >归档{{ kindLabel }}</NButton>
-          <NPopconfirm v-if="viewingArchived" @positive-click="removeRoom">
+          <NPopconfirm @positive-click="removeRoom">
             <template #trigger>
               <NButton size="tiny" secondary type="error">删除{{ kindLabel }}</NButton>
             </template>
@@ -1319,21 +1311,6 @@ onMounted(async () => {
   width: 150px;
 }
 /* 下拉面板随内容加宽（consistent-menu-width=false），模板全名不再被裁 */
-.invite {
-  font-size: 12px;
-  line-height: 1.6;
-}
-.invite p {
-  margin: 4px 0;
-}
-.invite-cmd {
-  display: block;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--chip-bg);
-  word-break: break-all;
-  user-select: all;
-}
 .icon-btn {
   border: none;
   background: none;
