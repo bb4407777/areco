@@ -20,6 +20,9 @@ import {
   locateClaudeTranscript,
   readAgentTrafficState,
   registerOccupancyProvider,
+  registerUniqueFallbackProvider,
+  workbuddyNativeSessionIdFromOutput,
+  workbuddyProjectSlugs,
 } from './agent-transcript'
 import { duplicateBindingVictims } from './session-dedup'
 import { isTopicContinuation, NameTracker, nameCandidateOf } from './session-namer'
@@ -61,6 +64,21 @@ export class SessionManager extends EventEmitter {
       (sessionId) => (sid) =>
         [...this.sessions.values()].some((s) => s.id !== sessionId && s.agentSessionId === sid && s.isRunning)
     )
+    // 唯一候选只是吞字竞态兜底，不是归属证据。同 cwd 若还有另一张未绑定的同类活卡，
+    // 谁先轮询谁就可能抢文件（DeepSeek 抢 GPT-5.6 实机故障），因此全局关闭该兜底。
+    registerUniqueFallbackProvider((sessionId, kind) => {
+      const current = this.sessions.get(sessionId)
+      if (!current) return false
+      const currentSlugs = new Set(workbuddyProjectSlugs(current.cwd))
+      return ![...this.sessions.values()].some(
+        (s) =>
+          s.id !== sessionId &&
+          s.isRunning &&
+          !s.agentSessionId &&
+          agentKindOf(s.command) === kind &&
+          workbuddyProjectSlugs(s.cwd).some((slug) => currentSlugs.has(slug)),
+      )
+    })
   }
 
   // ---- 启动/关闭 ----
@@ -482,12 +500,46 @@ export class SessionManager extends EventEmitter {
   }
 
   private wire(session: Session) {
+    let workbuddyBindingTail = ''
     session.on('update', () => {
       this.persist()
       this.emit('update', session.toSummary())
     })
     session.on('output', (data: string, offset: number, epoch: number) => {
       this.maybeConfirmTrustPage(session, data, epoch)
+      if (agentKindOf(session.command) === 'workbuddy' && !session.agentSessionId) {
+        // 输出可能被 PTY 分块切断，保留短尾拼接；桥接适配器打印的 UUID 是确定性归属，
+        // 优先级高于后续文件扫描和任何时间窗口推断。
+        workbuddyBindingTail = (workbuddyBindingTail + data).slice(-512)
+        const nativeId = workbuddyNativeSessionIdFromOutput(workbuddyBindingTail)
+        if (nativeId) {
+          const owner = [...this.sessions.values()].find(
+            (s) => s.id !== session.id && s.agentSessionId === nativeId && s.isRunning,
+          )
+          if (owner) {
+            // 原生 ID 来自当前 PTY，是强于历史猜绑的真相。若 owner 只是无提示哈希的误绑空卡，
+            // 自动让位；有哈希的 owner 可能是同一原生会话被真实恢复，保守拒绝双绑。
+            if (!owner.agentBindingHash) {
+              log.warn(
+                `WorkBuddy 原生会话 ${nativeId.slice(0, 8)} 被无凭据会话 ${owner.id.slice(0, 8)} 误占，按 PTY 真值纠正归属`,
+              )
+              owner.clearAgentBinding()
+              dropAgentTranscriptCache(owner.id)
+              session.bindAgentSession(nativeId)
+              dropAgentTranscriptCache(session.id)
+            } else {
+              log.warn(
+                `WorkBuddy 原生会话 ${nativeId.slice(0, 8)} 已被有凭据活会话 ${owner.id.slice(0, 8)} 占用，拒绝输出直绑 ${session.id.slice(0, 8)}`,
+              )
+            }
+          } else {
+            session.bindAgentSession(nativeId)
+            dropAgentTranscriptCache(session.id)
+            log.info(`按 PTY 原生 ID 绑定 workbuddy 会话 ${session.id.slice(0, 8)} ↔ ${nativeId}`)
+          }
+          workbuddyBindingTail = ''
+        }
+      }
       this.emit('output', session.id, data, offset, epoch)
     })
     session.on('exit', () => {

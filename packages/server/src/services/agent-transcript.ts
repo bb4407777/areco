@@ -61,8 +61,19 @@ const locateCache = new Map<string, Located>()
  */
 type OccupiedCheck = (nativeId: string) => boolean
 let occupancyProvider: ((sessionId: string) => OccupiedCheck | undefined) | null = null
+let uniqueFallbackProvider: ((sessionId: string, kind: AgentKind) => boolean) | null = null
 export function registerOccupancyProvider(provider: (sessionId: string) => OccupiedCheck | undefined): void {
   occupancyProvider = provider
+}
+
+/**
+ * 无内容证据的唯一候选兜底只适合单卡启动竞态；同 cwd 有多个未绑定同类会话时必须关闭，
+ * 否则先轮询到的卡会抢走后启动会话的文件。由 SessionManager 提供全局会话视角。
+ */
+export function registerUniqueFallbackProvider(
+  provider: (sessionId: string, kind: AgentKind) => boolean,
+): void {
+  uniqueFallbackProvider = provider
 }
 
 function statSafe(p: string): fs.Stats | null {
@@ -82,6 +93,20 @@ function listFiles(dir: string, suffix: string): string[] {
   } catch {
     return []
   }
+}
+
+/**
+ * WorkBuddy 桌面端会按 cwd 的 realpath 写项目目录；macOS 上 /tmp 会变成 /private/tmp。
+ * Areco 会话仍保留调用方原始 cwd，因此定位时两种 slug 都要覆盖。
+ */
+export function workbuddyProjectSlugs(cwd: string): string[] {
+  const paths = [cwd]
+  try {
+    paths.push(fs.realpathSync(cwd))
+  } catch {
+    /* cwd 已不存在时只用原值，恢复仍可走 agentSessionId + 历史目录兜底 */
+  }
+  return [...new Set(paths.map((value) => cwdToSlug(value).replace(/^-+/, '')))]
 }
 
 /**
@@ -244,6 +269,16 @@ function uniqueAgentFiles(files: string[], kind: AgentKind): string[] {
   })
 }
 
+/** 桥接 PTY 会在真正创建/恢复 WorkBuddy 会话后打印确定性原生 UUID。 */
+export function workbuddyNativeSessionIdFromOutput(text: string): string {
+  const matches = [
+    ...text.matchAll(
+      /\[WorkBuddy\]\s*已(?:创建|恢复)会话\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/giu,
+    ),
+  ]
+  return matches.at(-1)?.[1]?.toLowerCase() ?? ''
+}
+
 export function workbuddyTitle(raw: string): string {
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
@@ -331,6 +366,12 @@ export interface BindingTarget {
   bindAgentSession(id: string): void
 }
 
+export interface BindingOptions {
+  occupied?: (nativeId: string) => boolean
+  /** 仅用于单会话启动竞态兼容；跨会话共享 cwd 时由管理器关闭。 */
+  allowUniqueFallback?: boolean
+}
+
 /** 单池证据匹配：输入哈希唯一命中；无哈希时接受原生标题或首条用户消息与卡片名一致 */
 function evidenceMatch(session: BindingTarget, kind: AgentKind, candidates: string[]): string | null {
   // 同证据强度多候选（反复恢复失败留下的同名复读文件）取最近写入的——用户要续的是最后一次同名对话；
@@ -360,9 +401,9 @@ function evidenceMatch(session: BindingTarget, kind: AgentKind, candidates: stri
 }
 
 /**
- * 池匹配（绑定副作用在此）：顺序 ① 本 epoch 窗口证据 ② 本 epoch 窗口唯一非空文件兜底
- * ③ 全生命周期证据（同名复读文件并列时取最近写入）——恢复语义是「续上最后一次运行」，
- * 所以窗口内唯一非空文件优先于旧运行留下的标题证据；窗口漂移/占位文件被清理时落到 ③。
+ * 池匹配（绑定副作用在此）：顺序 ① 本 epoch 窗口证据 ② 有首条输入凭据且管理器确认
+ * 不存在同 cwd 竞争卡时，允许本 epoch 唯一非空文件兜底 ③ 全生命周期证据（同名复读文件
+ * 并列时取最近写入）。空卡或同 cwd 多卡绝不走 ②，避免跨模板抢占别人的 transcript。
  *
  * 占用过滤（2026-07-22 幽灵卡根治）：已被另一活会话占用的底层文件一律不进池。
  * 同 cwd 秒级连开两个同类 agent 时，后启动者的 wire 文件常尚未落盘，窗口内唯一候选
@@ -375,8 +416,12 @@ export function bindFromPools(
   kind: AgentKind,
   epochPool: string[],
   lifetimePool: string[],
-  occupied?: (nativeId: string) => boolean,
+  options: BindingOptions | ((nativeId: string) => boolean) = {},
 ): string | null {
+  // 兼容既有测试/调用方的 occupied 函数形态；新代码用 options 传全局兜底许可。
+  const occupied = typeof options === 'function' ? options : options.occupied
+  const allowUniqueFallback =
+    typeof options === 'function' ? true : (options.allowUniqueFallback ?? true)
   if (occupied) {
     const free = (pool: string[]) =>
       pool.filter((file) => {
@@ -388,7 +433,9 @@ export function bindFromPools(
   }
   let matched = evidenceMatch(session, kind, epochPool)
 
-  if (!matched && epochPool.length === 1) {
+  // 空卡没有首条输入凭据，任何唯一候选都可能属于同 cwd 的另一模板；绝不猜绑。
+  // 有首条输入但被 TUI 吞字时，单卡场景仍可保留历史兜底；同 cwd 多卡由管理器关闭。
+  if (!matched && session.agentBindingHash && allowUniqueFallback && epochPool.length === 1) {
     const only = epochPool[0]
     if ((statSafe(only)?.size ?? 0) > 0) {
       matched = only
@@ -438,7 +485,10 @@ function bindCandidate(
   const exitedAt = session.isRunning ? null : session.exitedAt
   const epochPool = sessionFileCandidates(files, session.startedAt ?? session.createdAt, exitedAt)
   const lifetimePool = candidatesWithEpochFallback(files, session, exitedAt)
-  return bindFromPools(session, kind, epochPool, lifetimePool, occupied)
+  return bindFromPools(session, kind, epochPool, lifetimePool, {
+    occupied,
+    allowUniqueFallback: uniqueFallbackProvider?.(session.id, kind) ?? true,
+  })
 }
 
 /**
@@ -518,13 +568,13 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
   let files: string[] = []
   if (kind === 'workbuddy') {
     // claude 同款 slug 规则去掉前导 '-'（/Users/alice → Users-alice）。
-    // 真身目录是 ~/.codebuddy/projects（codebuddy CLI 落盘处）；~/.workbuddy/projects
-    // 里是历史软链快照（新会话文件不会出现），仅作兜底。
-    const slug = cwdToSlug(session.cwd).replace(/^-+/, '')
-    files = [
+    // codebuddy CLI 通常写 ~/.codebuddy/projects；WorkBuddy 桌面客户端直接写 ~/.workbuddy/projects。
+    // cwd 同时覆盖原值与 realpath（macOS /tmp → /private/tmp），避免桌面桥接会话无法绑定。
+    const slugs = workbuddyProjectSlugs(session.cwd)
+    files = slugs.flatMap((slug) => [
       ...listFiles(path.join(os.homedir(), '.codebuddy', 'projects', slug), '.jsonl'),
       ...listFiles(path.join(os.homedir(), '.workbuddy', 'projects', slug), '.jsonl'),
-    ]
+    ])
   } else if (kind === 'codex') {
     const root = path.join(os.homedir(), '.codex', 'sessions')
     if (session.agentSessionId) {
@@ -604,6 +654,13 @@ function msgOf(role: 'user' | 'assistant', parts: TranscriptPart[], timestamp: s
   return { role, parts, timestamp }
 }
 
+/** WorkBuddy 桌面会话把系统上下文和真人指令封在同一 input_text，座舱只显示/绑定真实指令。 */
+export function workbuddyUserQuery(text: string): string {
+  const matches = [...text.matchAll(/<user_query>([\s\S]*?)<\/user_query>/gu)]
+  const query = matches.at(-1)?.[1]?.trim()
+  return query || text
+}
+
 function isoOf(ms: unknown): string | null {
   return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null
 }
@@ -628,6 +685,7 @@ export function parseWorkbuddy(raw: string): TranscriptMessage[] {
           const t = block?.type
           if (t === 'input_text' || t === 'output_text' || t === 'text') text += String(block.text ?? '')
         }
+        if (role === 'user') text = workbuddyUserQuery(text)
         if (text.trim()) out.push(msgOf(role, [textPart(text)], ts))
         break
       }

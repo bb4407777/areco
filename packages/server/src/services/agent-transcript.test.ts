@@ -7,8 +7,12 @@ import {
   codexMeta,
   handoffTitleFromPrompt,
   legacyAgentTitleMatches,
+  parseWorkbuddy,
   trafficStateFromCodex,
+  workbuddyNativeSessionIdFromOutput,
+  workbuddyProjectSlugs,
   workbuddyTitle,
+  workbuddyUserQuery,
 } from './agent-transcript'
 
 test('codexMeta reads a session_meta line larger than 4KB', () => {
@@ -40,6 +44,39 @@ test('handoff title is recoverable from the prompt without the handoff file', ()
     handoffTitleFromPrompt(prompt),
     'areco手机端的会话点击进去会跳转错误,看下是什么原因?'
   )
+})
+
+test('WorkBuddy desktop envelope exposes only the final user_query', () => {
+  const wrapped = '<system-reminder>hidden context</system-reminder><user_query>第一条</user_query><user_query>真正指令\n第二行</user_query>'
+  assert.equal(workbuddyUserQuery(wrapped), '真正指令\n第二行')
+  assert.equal(workbuddyUserQuery('普通指令'), '普通指令')
+  const messages = parseWorkbuddy(JSON.stringify({
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text: wrapped }],
+  }))
+  assert.equal(messages[0]?.parts[0]?.kind, 'text')
+  assert.equal(messages[0]?.parts[0]?.kind === 'text' ? messages[0].parts[0].text : '', '真正指令\n第二行')
+})
+
+test('WorkBuddy bridge output exposes the exact created/resumed native session id across chunks', () => {
+  const created = '[WorkBuddy] 已创建会话 b35a697e-abbc-419c-8d49-cb45e46bfac0\r\n'
+  assert.equal(workbuddyNativeSessionIdFromOutput(created), 'b35a697e-abbc-419c-8d49-cb45e46bfac0')
+  const joined = '[WorkBuddy] 已恢复会' + '话 3A7F54FF-A892-480F-851C-E3D76066DF66'
+  assert.equal(workbuddyNativeSessionIdFromOutput(joined), '3a7f54ff-a892-480f-851c-e3d76066df66')
+  assert.equal(workbuddyNativeSessionIdFromOutput('[WorkBuddy] 模型 custom-local:gpt-5.6-sol'), '')
+})
+
+test('WorkBuddy project slugs cover macOS /tmp realpath aliases', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-slug-'))
+  try {
+    const slugs = workbuddyProjectSlugs(dir)
+    assert.ok(slugs.includes(dir.replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '')))
+    const real = fs.realpathSync(dir).replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '')
+    assert.ok(slugs.includes(real))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('legacy WorkBuddy session binds by its native AI title', () => {
@@ -151,7 +188,58 @@ test('workbuddy 绑定：同名复读文件只认最新 epoch 的那个', () => 
   }
 })
 
-test('workbuddy 绑定：首条被吞字导致证据全灭时，按 epoch 窗口唯一非空文件兜底', () => {
+test('workbuddy 绑定：空 DeepSeek 卡不得按唯一候选抢走 GPT-5.6 文件', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
+  try {
+    const gpt56 = path.join(dir, 'b35a697e-abbc-419c-8d49-cb45e46bfac0.jsonl')
+    writeWb(gpt56, ['帮我把 areco 的删除二次确认去掉'])
+    const deepseek = wbSession('WorkBuddy DeepSeek #1')
+    // 真实故障：DeepSeek 先启动但没有输入/哈希；60 秒 slack 内池里只出现 GPT-5.6 文件。
+    assert.equal(bindFromPools(deepseek, 'workbuddy', [gpt56], [gpt56]), null)
+    assert.equal(deepseek.bound, null)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('workbuddy 绑定：同 cwd 有竞争卡时，即使本卡有哈希也不做无证据唯一候选兜底', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
+  try {
+    const foreign = path.join(dir, 'b35a697e-abbc-419c-8d49-cb45e46bfac0.jsonl')
+    writeWb(foreign, ['GPT-5.6 的真实指令'])
+    const deepseek = wbSession('DeepSeek 的真实指令')
+    deepseek.agentBindingHash = crypto.createHash('sha256').update('DeepSeek 的真实指令').digest('hex')
+    assert.equal(
+      bindFromPools(deepseek, 'workbuddy', [foreign], [foreign], { allowUniqueFallback: false }),
+      null,
+    )
+    assert.equal(deepseek.bound, null)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('workbuddy 绑定：GPT-5.6 有明确首条输入哈希时直接认领自己的文件', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
+  try {
+    const own = path.join(dir, 'b35a697e-abbc-419c-8d49-cb45e46bfac0.jsonl')
+    writeWb(own, ['帮我把 areco 的删除二次确认去掉'])
+    const gpt56 = wbSession('WorkBuddy GPT-5.6 Remote #1')
+    gpt56.agentBindingHash = crypto
+      .createHash('sha256')
+      .update('帮我把 areco 的删除二次确认去掉')
+      .digest('hex')
+    assert.equal(
+      bindFromPools(gpt56, 'workbuddy', [own], [own], { allowUniqueFallback: false }),
+      own,
+    )
+    assert.equal(gpt56.bound, 'b35a697e-abbc-419c-8d49-cb45e46bfac0')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('workbuddy 绑定：首条被吞字导致证据全灭时，单卡场景按 epoch 窗口唯一非空文件兜底', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
   try {
     const old1 = path.join(dir, 'aaaaaaaa-1111-4111-8111-111111111111.jsonl')
@@ -162,6 +250,7 @@ test('workbuddy 绑定：首条被吞字导致证据全灭时，按 epoch 窗口
     // 启动竞态吞字：「查freemodel余额」落盘只剩「查」，哈希/标题/名称证据全部失效
     writeWb(latest, ['查'])
     const session = wbSession('查freemodel余额')
+    session.agentBindingHash = crypto.createHash('sha256').update('查freemodel余额').digest('hex')
     assert.equal(bindFromPools(session, 'workbuddy', [latest], [old1, old2, latest]), latest)
     assert.equal(session.bound, 'cccccccc-3333-4333-8333-333333333333')
   } finally {
@@ -222,7 +311,8 @@ test('占用闸：过滤掉占用文件后，自己的文件落盘即可按唯�
     const own = path.join(dir, '22222222-2222-4222-8222-222222222222.jsonl')
     writeWb(foreign, ['[项目·areco研发] 维护者: 你好'])
     writeWb(own, ['areco项目里面+agent应该如果已经添加了的agent就不要再出现选项给添加了'])
-    const session = wbSession('Kimi K3') // 卡片名与两条消息都对不上，纯靠占用过滤后的唯一兜底
+    const session = wbSession('Kimi K3') // 卡片名与两条消息都对不上，靠有首条凭据+占用过滤后的唯一兜底
+    session.agentBindingHash = crypto.createHash('sha256').update('原始输入被 TUI 吞字').digest('hex')
     const occupied = (id: string) => id === '11111111-1111-4111-8111-111111111111'
     assert.equal(bindFromPools(session, 'workbuddy', [foreign, own], [foreign, own], occupied), own)
     assert.equal(session.bound, '22222222-2222-4222-8222-222222222222')
