@@ -103,6 +103,39 @@ test('harness+model 基本解析：--model 用 models.json 的 model_id', () => 
   assert.deepEqual(r.args, ['--dangerously-skip-permissions', '--model', 'deepseek-v4-pro'])
 })
 
+test('buildSpawnSpec：官方 WorkBuddy harness 新建/恢复均注入确定性原生 ID', () => {
+  const template = tpl({ harness: 'workbuddy', model: 'workbuddy-deepseek-pro', cwd: '/tmp' })
+  const fresh = buildSpawnSpec(template, {
+    cwd: '/tmp',
+    agentSessionId: '11111111-1111-4111-8111-111111111111',
+  })
+  assert.match(fresh.args[1] ?? '', /--session-id/)
+  assert.match(fresh.args[1] ?? '', /11111111-1111-4111-8111-111111111111/)
+
+  const resumed = buildSpawnSpec(template, {
+    cwd: '/tmp',
+    agentSessionId: '22222222-2222-4222-8222-222222222222',
+    resumeAgent: true,
+  })
+  assert.match(resumed.args[1] ?? '', /--resume/)
+  assert.match(resumed.args[1] ?? '', /22222222-2222-4222-8222-222222222222/)
+  assert.doesNotMatch(resumed.args[1] ?? '', /--session-id/)
+})
+
+test('buildSpawnSpec：未声明 workbuddy harness 的 bridge 不注入官方 --session-id', () => {
+  const template = tpl({
+    id: 'wb-bridge',
+    command: '/tmp/codebuddy',
+    args: ['--bridge', 'http://127.0.0.1:8780'],
+    cwd: '/tmp',
+  })
+  const spec = buildSpawnSpec(template, {
+    cwd: '/tmp',
+    agentSessionId: '11111111-1111-4111-8111-111111111111',
+  })
+  assert.doesNotMatch(spec.args[1] ?? '', /--session-id/)
+})
+
 test('推理档位按 harness 翻译：Codex 用 -c，Claude/WorkBuddy 用 --effort', () => {
   const codex = resolveStandCode(tpl({ harness: 'codex', model: 'gpt-5.6-sol', reasoningEffort: 'xhigh' }))
   assert.ok(codex)

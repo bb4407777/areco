@@ -33,7 +33,12 @@ const BIRTH_SLACK_MS = 60_000
 
 export type AgentKind = 'codex' | 'workbuddy' | 'reasonix' | 'qclaw' | 'kimi'
 
-export function agentKindOf(command: string): AgentKind | null {
+export function agentKindOf(command: string, harness?: string | null): AgentKind | null {
+  if (harness === 'codex') return 'codex'
+  if (harness === 'workbuddy') return 'workbuddy'
+  if (harness === 'reasonix') return 'reasonix'
+  if (harness === 'kimi') return 'kimi'
+  if (harness === 'hermes') return 'qclaw'
   const base = path.basename(command)
   if (base === 'codex') return 'codex'
   if (base === 'codebuddy') return 'workbuddy'
@@ -111,8 +116,8 @@ export function workbuddyProjectSlugs(cwd: string): string[] {
 
 /**
  * 只收集生命周期窗口内候选。绑定优先级：原生 session id → 首条输入哈希 →
- * 旧会话“卡片名 = 首条用户消息标题”唯一一致（均先本 epoch 窗口再全生命周期）→
- * 本 epoch 窗口内唯一非空文件兜底（启动竞态吞字会让内容证据全灭，见 bindFromPools）。
+ * 旧会话“卡片名 = 首条用户消息标题”唯一一致（均先本 epoch 窗口再全生命周期）。
+ * WorkBuddy 到此为止：无唯一内容证据不绑定；其他 agent 的兼容兜底见 bindFromPools。
  */
 function sessionFileCandidates(
   files: string[],
@@ -139,7 +144,7 @@ function sessionFileCandidates(
  */
 function candidatesWithEpochFallback(
   files: string[],
-  session: Session,
+  session: Pick<Session, 'startedAt' | 'createdAt'>,
   exitedAt: number | null
 ): string[] {
   return [
@@ -331,7 +336,7 @@ export function legacyAgentTitleMatches(sessionName: string, agentTitle: string)
   return sessionKey.length >= 4 && sessionKey === titleMatchKey(agentTitle)
 }
 
-function exactAgentFile(session: Session, kind: AgentKind, files: string[]): string | null {
+function exactAgentFile(session: { agentSessionId: string | null }, kind: AgentKind, files: string[]): string | null {
   if (!session.agentSessionId) return null
   // codex/kimi 的文件名都不是原生 id（rollout 时间戳 / 固定 wire.jsonl），按文件内/路径里的原生 id 比对
   if (kind === 'codex' || kind === 'kimi') {
@@ -374,38 +379,39 @@ export interface BindingOptions {
 
 /** 单池证据匹配：输入哈希唯一命中；无哈希时接受原生标题或首条用户消息与卡片名一致 */
 function evidenceMatch(session: BindingTarget, kind: AgentKind, candidates: string[]): string | null {
-  // 同证据强度多候选（反复恢复失败留下的同名复读文件）取最近写入的——用户要续的是最后一次同名对话；
-  // 时间只用于在证据并列时打破平局，无证据纯凭时间的候选仍一律不绑
-  const latestOf = (files: string[]): string =>
-    files.reduce((a, b) => ((statSafe(a)?.mtimeMs ?? 0) >= (statSafe(b)?.mtimeMs ?? 0) ? a : b))
+  // 内容证据必须唯一。相同首句/标题跨历史重复时，mtime 不能证明归属。
   const byPromptHash = session.agentBindingHash
     ? candidates.filter((file) => {
         const text = firstUserText(file, kind)
         return text !== '' && bindingHash(text) === session.agentBindingHash
       })
     : []
-  if (byPromptHash.length >= 1) return latestOf(byPromptHash)
+  // 相同首句（如“在吗？”）可能跨多份历史文件重复；这不是唯一归属证据。
+  // 确定性 ID 缺失时宁可暂不绑定，也不能按 mtime 猜其中一份。
+  if (byPromptHash.length === 1) return byPromptHash[0]
+  if (byPromptHash.length > 1) return null
 
   // 旧数据没有输入哈希：仅接受原生标题或首条用户消息明确一致的候选。
   if (session.agentBindingHash) return null
   const name = normalized(session.name).replace(/…$/, '')
   const byAgentTitle = candidates.filter((file) => legacyAgentTitleMatches(name, agentFileTitle(file, kind)))
-  if (byAgentTitle.length >= 1) return latestOf(byAgentTitle)
+  if (byAgentTitle.length === 1) return byAgentTitle[0]
+  if (byAgentTitle.length > 1) return null
 
   const byLegacyName = candidates.filter((file) => {
     const text = normalized(firstUserText(file, kind))
     const handoffTitle = handoffTitleFromPrompt(text)
     return name.length >= 4 && (text === name || text.startsWith(name) || handoffTitle === name)
   })
-  return byLegacyName.length >= 1 ? latestOf(byLegacyName) : null
+  return byLegacyName.length === 1 ? byLegacyName[0] : null
 }
 
 /**
- * 池匹配（绑定副作用在此）：顺序 ① 本 epoch 窗口证据 ② 有首条输入凭据且管理器确认
- * 不存在同 cwd 竞争卡时，允许本 epoch 唯一非空文件兜底 ③ 全生命周期证据（同名复读文件
- * 并列时取最近写入）。空卡或同 cwd 多卡绝不走 ②，避免跨模板抢占别人的 transcript。
+ * 池匹配（绑定副作用在此）：顺序 ① 本 epoch 窗口唯一内容证据 ② 仅非 WorkBuddy agent
+ * 可在管理器许可时使用本 epoch 唯一非空文件兼容兜底 ③ 全生命周期唯一内容证据。
+ * WorkBuddy 完全禁止时间/mtime 猜绑：歧义或无证据直接返回 null。
  *
- * 占用过滤（2026-07-22 幽灵卡根治）：已被另一活会话占用的底层文件一律不进池。
+ * 占用过滤（2026-07-22 幽灵卡根治）：已被另一张在册卡拥有的底层文件一律不进池。
  * 同 cwd 秒级连开两个同类 agent 时，后启动者的 wire 文件常尚未落盘，窗口内唯一候选
  * 是前者的文件——不过滤就会被「唯一候选兜底」抢走，卡片接着读别人的 transcript
  * 并被 session-namer 改名成幽灵卡（kimi 双会话 37s 连开实锤）。过滤后后启动者
@@ -433,9 +439,9 @@ export function bindFromPools(
   }
   let matched = evidenceMatch(session, kind, epochPool)
 
-  // 空卡没有首条输入凭据，任何唯一候选都可能属于同 cwd 的另一模板；绝不猜绑。
-  // 有首条输入但被 TUI 吞字时，单卡场景仍可保留历史兜底；同 cwd 多卡由管理器关闭。
-  if (!matched && session.agentBindingHash && allowUniqueFallback && epochPool.length === 1) {
+  // WorkBuddy 新会话现由 --session-id / PTY UUID 确定性绑定；历史卡也只接受唯一内容证据，
+  // 完全取消时间窗唯一候选兜底。其他 agent 暂保留有首条凭据的单卡竞态兼容。
+  if (!matched && kind !== 'workbuddy' && session.agentBindingHash && allowUniqueFallback && epochPool.length === 1) {
     const only = epochPool[0]
     if ((statSafe(only)?.size ?? 0) > 0) {
       matched = only
@@ -453,7 +459,7 @@ export function bindFromPools(
     // 不绑也不读——返回 null 让下轮重扫，绝不把别人的 transcript 挂到本卡上
     // （旧行为"返回文件供读取"正是幽灵卡/幽灵命名的来源，2026-07-22 移除）。
     log.warn(
-      `占用冲突：${kind} 会话 ${session.id.slice(0, 8)} 想绑底层会话 ${nativeId.slice(0, 8)}，但已被另一活会话占用——跳过本轮，待重扫`,
+      `占用冲突：${kind} 会话 ${session.id.slice(0, 8)} 想绑底层会话 ${nativeId.slice(0, 8)}，但已被另一张在册卡拥有——跳过本轮，待重扫`,
     )
     return null
   }
@@ -462,25 +468,36 @@ export function bindFromPools(
   return matched
 }
 
-function bindCandidate(
-  session: Session,
+export interface BindCandidateTarget extends BindingTarget {
+  agentSessionId: string | null
+  createdAt: number
+  startedAt: number | null
+  exitedAt: number | null
+  isRunning: boolean
+}
+
+export function bindCandidate(
+  session: BindCandidateTarget,
   kind: AgentKind,
   files: string[],
   occupied?: (nativeId: string) => boolean,
 ): string | null {
   const exact = exactAgentFile(session, kind, files)
   if (exact) {
-    // 精确恢复同样守占用闸：目标底层会话已被另一活会话占用时返回 null（待重扫/人工处理），
-    // 否则两张活卡会同读一份 transcript，重演幽灵卡。
+    // 精确恢复同样守占用闸：目标底层会话已被另一会话占用时返回 null（待原卡处理），
+    // 否则两张卡会同读一份 transcript，重演幽灵卡。
     const exactId = nativeSessionId(exact, kind)
     if (exactId && occupied?.(exactId)) {
       log.warn(
-        `占用冲突：${kind} 会话 ${session.id.slice(0, 8)} 精确恢复的底层会话 ${exactId.slice(0, 8)} 已被另一活会话占用——跳过本轮`,
+        `占用冲突：${kind} 会话 ${session.id.slice(0, 8)} 精确恢复的底层会话 ${exactId.slice(0, 8)} 已被另一会话占用——跳过本轮`,
       )
       return null
     }
     return exact
   }
+  // 一旦已有原生 ID（尤其 WorkBuddy 启动前 --session-id 预分配），文件尚未落盘时只能等待；
+  // 绝不能回退到内容/时间猜测并覆盖这份确定性身份。
+  if (session.agentSessionId) return null
 
   const exitedAt = session.isRunning ? null : session.exitedAt
   const epochPool = sessionFileCandidates(files, session.startedAt ?? session.createdAt, exitedAt)
@@ -554,11 +571,14 @@ function kimiWireFiles(cwd: string): string[] {
 function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string) => boolean): string | null {
   // 显式 occupied 优先；未传时回退到 SessionManager 注册的全局占用闸（读取路径同样需要）
   const gate = occupied ?? occupancyProvider?.(session.id)
-  // 空文件命中不锁死：占位文件之后可能才出现真正写内容的那个，重扫升级
+  // 空文件命中不锁死：占位文件之后可能才出现真正写内容的那个，重扫升级。
+  // 非空缓存也必须重过占用闸：所有权可在缓存建立后因 restore/dedup 发生变化。
   const hit = locateCache.get(session.id)
   if (hit) {
     const st = statSafe(hit.path)
-    if (st && st.size > 0) return hit.path
+    const cachedId = nativeSessionId(hit.path, kind)
+    if (st && st.size > 0 && (!cachedId || !gate?.(cachedId))) return hit.path
+    locateCache.delete(session.id)
   }
   const startedAt = session.startedAt ?? session.createdAt
   const exitedAt = session.isRunning ? null : session.exitedAt

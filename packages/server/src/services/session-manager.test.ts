@@ -1,6 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { duplicateBindingVictims } from './session-dedup'
+import { duplicateBindingVictims, nativeSessionOccupied } from './session-dedup'
+
+test('native transcript 所有权覆盖退出卡：状态不参与，占用只看在册绑定', () => {
+  const sessions = [
+    { id: 'exited-owner', agentSessionId: 'native-x', status: 'exited' },
+    { id: 'current', agentSessionId: null, status: 'running' },
+  ]
+  assert.equal(nativeSessionOccupied(sessions, 'current', 'native-x'), true)
+  assert.equal(nativeSessionOccupied(sessions, 'exited-owner', 'native-x'), false)
+  assert.equal(nativeSessionOccupied(sessions, 'current', 'native-y'), false)
+})
 
 test('双绑体检:同 nativeId 两会话,留 startedAt 最早,晚者为 victim', () => {
   const victims = duplicateBindingVictims([

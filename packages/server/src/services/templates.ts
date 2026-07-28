@@ -110,13 +110,27 @@ export function resolveCommand(command: string): string | null {
 
 export function buildSpawnSpec(
   template: Template,
-  opts: { cwd?: string; claudeSessionId?: string | null; resume?: boolean; extraArgs?: string[] }
+  opts: {
+    cwd?: string
+    claudeSessionId?: string | null
+    /** WorkBuddy harness 原生会话 ID：新会话用 --session-id，恢复用 --resume。 */
+    agentSessionId?: string | null
+    resume?: boolean
+    resumeAgent?: boolean
+    extraArgs?: string[]
+  }
 ): SpawnSpec {
   // StandCode 分层配置解析：harness/model/preset 优先
   const resolved = resolveStandCode(template)
   const command = resolved?.command ?? template.command
   const baseArgs = resolved?.args ?? template.args
-  const args = [...baseArgs, ...(opts.extraArgs ?? [])]
+  const identityArgs: string[] = []
+  // WorkBuddy CLI 原生支持确定性 UUID。只按显式 harness 注入：GPT-5.6 bridge 虽也叫 codebuddy，
+  // 但使用自己的 --resume 协议且会从 PTY 输出回报 UUID，不能误塞官方 CLI 的 --session-id。
+  if (template.harness === 'workbuddy' && opts.agentSessionId) {
+    identityArgs.push(opts.resumeAgent ? '--resume' : '--session-id', opts.agentSessionId)
+  }
+  const args = [...baseArgs, ...identityArgs, ...(opts.extraArgs ?? [])]
   // claude 系（含 c5 这类透传 "$@" 的包装器）注入会话 id；非 claude 系两个 flag 都不认，不注入
   if (effectiveClaudeHome(template) !== null && opts.claudeSessionId) {
     if (opts.resume) args.push('--resume', opts.claudeSessionId)

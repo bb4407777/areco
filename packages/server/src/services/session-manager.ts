@@ -24,7 +24,7 @@ import {
   workbuddyNativeSessionIdFromOutput,
   workbuddyProjectSlugs,
 } from './agent-transcript'
-import { duplicateBindingVictims } from './session-dedup'
+import { duplicateBindingVictims, nativeSessionOccupied } from './session-dedup'
 import { isTopicContinuation, NameTracker, nameCandidateOf } from './session-namer'
 import { createLogger } from '../logger'
 import { transcriptPath } from './transcript'
@@ -58,11 +58,10 @@ export class SessionManager extends EventEmitter {
     private persistence: Persistence
   ) {
     super()
-    // 注册全局占用闸：locate 全路径（traffic + transcript 读取）统一按"底层会话
-    // 是否已被另一活会话占用"过滤候选，防止读取路径误绑别人的文件演化幽灵卡
+    // 注册全局占用闸：locate 全路径（traffic + transcript 读取）统一过滤已有所有者。
+    // native transcript 是全局一对一资产，不因卡片退出就释放；历史恢复必须回原卡。
     registerOccupancyProvider(
-      (sessionId) => (sid) =>
-        [...this.sessions.values()].some((s) => s.id !== sessionId && s.agentSessionId === sid && s.isRunning)
+      (sessionId) => (sid) => nativeSessionOccupied([...this.sessions.values()], sessionId, sid)
     )
     // 唯一候选只是吞字竞态兜底，不是归属证据。同 cwd 若还有另一张未绑定的同类活卡，
     // 谁先轮询谁就可能抢文件（DeepSeek 抢 GPT-5.6 实机故障），因此全局关闭该兜底。
@@ -75,10 +74,14 @@ export class SessionManager extends EventEmitter {
           s.id !== sessionId &&
           s.isRunning &&
           !s.agentSessionId &&
-          agentKindOf(s.command) === kind &&
+          this.agentKind(s) === kind &&
           workbuddyProjectSlugs(s.cwd).some((slug) => currentSlugs.has(slug)),
       )
     })
+  }
+
+  agentKind(session: Session) {
+    return agentKindOf(session.command, this.templates.get(session.templateId)?.harness)
   }
 
   // ---- 启动/关闭 ----
@@ -186,6 +189,8 @@ export class SessionManager extends EventEmitter {
       name?: string
       resumeClaudeSessionId?: string
       extraArgs?: string[]
+      /** 原生 WorkBuddy 历史恢复 ID；官方 harness 走 --resume，桥接模板由调用方继续用 extraArgs。 */
+      resumeAgentSessionId?: string
       agentBindingPrompt?: string
       /** 项目内 spawn：绑定 room 归属（删项目级联删专属会话用） */
       roomId?: string
@@ -209,6 +214,11 @@ export class SessionManager extends EventEmitter {
       const occupied = [...this.sessions.values()].find((s) => s.claudeSessionId === resumeId && s.isRunning)
       if (occupied) throw new Error(`该历史会话已在运行: ${occupied.name}`)
     }
+    const resumeAgentId = opts.resumeAgentSessionId?.trim() || null
+    if (resumeAgentId) {
+      const owner = [...this.sessions.values()].find((s) => s.agentSessionId === resumeAgentId)
+      if (owner) throw new Error(`该历史会话已属于看板会话「${owner.name}」，请在原卡片恢复，不能重复绑定`)
+    }
 
     const sameTemplate = [...this.sessions.values()].filter((s) => s.templateId === templateId).length
     const customName = opts.name?.trim()
@@ -228,6 +238,12 @@ export class SessionManager extends EventEmitter {
       transcriptDir: effectiveTranscriptDir(template),
       roomId: opts.roomId ?? null,
     })
+    // 官方 WorkBuddy harness 支持 --session-id：启动前钉死原生 UUID，彻底取消新会话的
+    // “同 cwd + 时间窗 + 首句”事后认亲。桥接 GPT-5.6 未声明 harness，仍由 PTY 输出直绑。
+    const nativeWorkbuddyId = template.harness === 'workbuddy'
+      ? resumeAgentId || crypto.randomUUID()
+      : null
+    if (nativeWorkbuddyId) session.bindAgentSession(nativeWorkbuddyId)
     this.wire(session)
     this.sessions.set(session.id, session)
     if (opts.agentBindingPrompt) session.setAgentBindingPrompt(opts.agentBindingPrompt)
@@ -235,7 +251,9 @@ export class SessionManager extends EventEmitter {
       buildSpawnSpec(template, {
         cwd,
         claudeSessionId: session.claudeSessionId,
+        agentSessionId: nativeWorkbuddyId,
         resume: Boolean(resumeId),
+        resumeAgent: Boolean(resumeAgentId),
         extraArgs: opts.extraArgs,
       })
     )
@@ -282,7 +300,7 @@ export class SessionManager extends EventEmitter {
     let didResume = false
     let resumedTraffic: { state: Exclude<TrafficState, 'exited'>; fingerprint: string } | null = null
     if (resume) {
-      const kind = agentKindOf(session.command)
+      const kind = this.agentKind(session)
       if (session.claudeSessionId) {
         resumeClaude = true
         didResume = true
@@ -299,7 +317,9 @@ export class SessionManager extends EventEmitter {
         const file = locateAgentFile(session, kind)
         const sid = session.agentSessionId || (file ? path.basename(file, '.jsonl') : '')
         if (sid) {
-          extraArgs = ['--resume', sid]
+          // buildSpawnSpec 对官方 workbuddy harness 注入 --resume；GPT-5.6 bridge 未声明
+          // harness，仍经 extraArgs 使用其兼容协议。不要两边同时塞导致重复 flag。
+          if (template.harness !== 'workbuddy') extraArgs = ['--resume', sid]
           didResume = true
         }
       } else if (kind === 'kimi') {
@@ -335,6 +355,9 @@ export class SessionManager extends EventEmitter {
       }
     } else {
       session.clearAgentBinding()
+      // 官方 WorkBuddy 非恢复重启必须换一个预分配 UUID；否则清完绑定后 CLI 又自行随机，
+      // Areco 退回事后猜 transcript，等于重新打开错绑入口。
+      if (template.harness === 'workbuddy') session.bindAgentSession(crypto.randomUUID())
       // 非 resume 重启即换新对话文件：定位/解析缓存同步清掉，否则缓存命中旧路径，对话视图冻结在旧文件
       dropAgentTranscriptCache(session.id)
     }
@@ -343,7 +366,9 @@ export class SessionManager extends EventEmitter {
       buildSpawnSpec(template, {
         cwd: session.cwd,
         claudeSessionId: session.claudeSessionId,
+        agentSessionId: template.harness === 'workbuddy' ? session.agentSessionId : null,
         resume: resumeClaude,
+        resumeAgent: resume && didResume && template.harness === 'workbuddy',
         extraArgs,
       })
     )
@@ -507,31 +532,21 @@ export class SessionManager extends EventEmitter {
     })
     session.on('output', (data: string, offset: number, epoch: number) => {
       this.maybeConfirmTrustPage(session, data, epoch)
-      if (agentKindOf(session.command) === 'workbuddy' && !session.agentSessionId) {
+      if (this.agentKind(session) === 'workbuddy' && !session.agentSessionId) {
         // 输出可能被 PTY 分块切断，保留短尾拼接；桥接适配器打印的 UUID 是确定性归属，
         // 优先级高于后续文件扫描和任何时间窗口推断。
         workbuddyBindingTail = (workbuddyBindingTail + data).slice(-512)
         const nativeId = workbuddyNativeSessionIdFromOutput(workbuddyBindingTail)
         if (nativeId) {
           const owner = [...this.sessions.values()].find(
-            (s) => s.id !== session.id && s.agentSessionId === nativeId && s.isRunning,
+            (s) => s.id !== session.id && s.agentSessionId === nativeId,
           )
           if (owner) {
-            // 原生 ID 来自当前 PTY，是强于历史猜绑的真相。若 owner 只是无提示哈希的误绑空卡，
-            // 自动让位；有哈希的 owner 可能是同一原生会话被真实恢复，保守拒绝双绑。
-            if (!owner.agentBindingHash) {
-              log.warn(
-                `WorkBuddy 原生会话 ${nativeId.slice(0, 8)} 被无凭据会话 ${owner.id.slice(0, 8)} 误占，按 PTY 真值纠正归属`,
-              )
-              owner.clearAgentBinding()
-              dropAgentTranscriptCache(owner.id)
-              session.bindAgentSession(nativeId)
-              dropAgentTranscriptCache(session.id)
-            } else {
-              log.warn(
-                `WorkBuddy 原生会话 ${nativeId.slice(0, 8)} 已被有凭据活会话 ${owner.id.slice(0, 8)} 占用，拒绝输出直绑 ${session.id.slice(0, 8)}`,
-              )
-            }
+            // 原生 UUID 已属于另一张在册卡时一律拒绝第二次认领。不能再凭 owner 有没有首句哈希
+            // 自动换主：官方 WorkBuddy 启动前预分配的精确卡在首条输入前同样没有哈希。
+            log.warn(
+              `WorkBuddy 原生会话 ${nativeId.slice(0, 8)} 已属于会话 ${owner.id.slice(0, 8)}，拒绝输出直绑 ${session.id.slice(0, 8)}`,
+            )
           } else {
             session.bindAgentSession(nativeId)
             dropAgentTranscriptCache(session.id)
@@ -695,12 +710,11 @@ export class SessionManager extends EventEmitter {
       const file = transcriptPath(session)
       return file ? { path: file, kind: null } : null
     }
-    const kind = agentKindOf(session.command)
+    const kind = this.agentKind(session)
     if (kind) {
-      // 占用闸：目标底层会话若已被另一活会话占用，bindFromPools 不绑也不读
-      // （占用文件不进候选池；旧版"返回文件供读取"会让本卡读别人的 transcript 演化成幽灵卡）
-      const occupied = (sid: string) =>
-        [...this.sessions.values()].some((s) => s !== session && s.agentSessionId === sid && s.isRunning)
+      // 占用闸：目标底层会话若已有另一张在册卡拥有，bindFromPools 不绑也不读。
+      // 退出卡仍保有所有权，避免 A 退出后 B 抢占、A 恢复时形成双绑。
+      const occupied = (sid: string) => nativeSessionOccupied([...this.sessions.values()], session.id, sid)
       const file = locateAgentFile(session, kind, occupied)
       return file ? { path: file, kind } : null
     }

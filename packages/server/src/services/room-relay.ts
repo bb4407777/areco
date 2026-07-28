@@ -18,7 +18,7 @@ import { createLogger } from '../logger'
 import * as projectDb from './project-db'
 import { ALL_MENTION, CHARTER_FILE, parseMentions, RoomStore } from './rooms'
 import { shellQuote } from './templates'
-import { agentKindOf, readAgentTranscript } from './agent-transcript'
+import { readAgentTranscript } from './agent-transcript'
 import { transcriptPath } from './transcript'
 import { readHistoryAllMessages } from './history'
 
@@ -721,7 +721,7 @@ export class RoomRelay {
         const fp = transcriptPath(session)
         return fp ? readHistoryAllMessages(fp).length : 0
       }
-      const kind = agentKindOf(session.command)
+      const kind = this.manager.agentKind(session)
       return kind ? readAgentTranscript(session, kind, { cursor: 0 }).cursor : 0
     } catch {
       return 0
@@ -735,7 +735,7 @@ export class RoomRelay {
         const fp = transcriptPath(session)
         return fp ? readHistoryAllMessages(fp).slice(beforeCount) : []
       }
-      const kind = agentKindOf(session.command)
+      const kind = this.manager.agentKind(session)
       return kind ? readAgentTranscript(session, kind, { cursor: beforeCount }).messages : []
     } catch {
       return []

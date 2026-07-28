@@ -354,7 +354,7 @@ export class ApiControllers {
       // 同名目录（codebuddy → ~/.codebuddy/projects 是 codebuddy 自家格式，按 claude 布局
       // 解析必得 0 条，2026-07-27 workbuddy 对话模式空白报障）；其余 claude 布局衍生 CLI
       //（qoder 等）走 transcriptDir，缺 claudeSessionId 的 claude 包装器按时间窗兜底
-      const kind = agentKindOf(session.command)
+      const kind = agentKindOf(session.command, this.templates.get(session.templateId)?.harness)
       if (kind && !session.claudeSessionId) {
         ok(ctx, readAgentTranscript(session, kind, { cursor, before }))
         return
@@ -411,9 +411,11 @@ export class ApiControllers {
     return this.templates.list().find((t) => t.enabled && path.basename(t.command) === 'reasonix')
   }
 
-  /** 按命令 basename 找启用模板（kimi / codex / codebuddy 的历史恢复都用这个） */
+  /** 找可恢复在册 agent 的启用模板：harness-first 模板可能没有 command，必须优先按 harness 识别。 */
   private templateByCommand(cmd: string): Template | undefined {
-    return this.templates.list().find((t) => t.enabled && path.basename(t.command) === cmd)
+    const harness = cmd === 'codebuddy' ? 'workbuddy' : cmd
+    const enabled = this.templates.list().filter((t) => t.enabled)
+    return enabled.find((t) => t.harness === harness) ?? enabled.find((t) => path.basename(t.command) === cmd)
   }
 
   historyList = (ctx: Context) =>
@@ -564,8 +566,21 @@ export class ApiControllers {
         const fallback = this.templateByCommand(source === 'codex' ? 'codex' : 'codebuddy')
         const template = body.templateId ? this.templates.get(body.templateId) : fallback
         if (!template) throw new Error(`没有可用的 ${source} 模板`)
-        const extraArgs = source === 'codex' ? ['resume', rawId] : ['--resume', rawId]
-        ok(ctx, this.manager.spawn(template.id, { cwd: cwd || undefined, name: body.name, extraArgs }))
+        const existing = this.manager.list().find((s) => s.agentSessionId === rawId)
+        if (existing) {
+          throw new Error(`该历史会话已属于看板会话「${existing.name}」，请在原卡片恢复，不能重复绑定`)
+        }
+        const extraArgs = source === 'codex'
+          ? ['resume', rawId]
+          : template.harness === 'workbuddy'
+            ? undefined
+            : ['--resume', rawId]
+        ok(ctx, this.manager.spawn(template.id, {
+          cwd: cwd || undefined,
+          name: body.name,
+          extraArgs,
+          resumeAgentSessionId: source === 'workbuddy' && template.harness === 'workbuddy' ? rawId : undefined,
+        }))
         return
       }
       if (isChatlogSource(source)) throw new Error('该历史源不支持恢复（cc-connect 是渠道桥接副本，无独立会话可恢复）')

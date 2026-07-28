@@ -7,6 +7,7 @@ import {
   codexMeta,
   handoffTitleFromPrompt,
   legacyAgentTitleMatches,
+  agentKindOf,
   parseWorkbuddy,
   trafficStateFromCodex,
   workbuddyNativeSessionIdFromOutput,
@@ -44,6 +45,12 @@ test('handoff title is recoverable from the prompt without the handoff file', ()
     handoffTitleFromPrompt(prompt),
     'areco手机端的会话点击进去会跳转错误,看下是什么原因?'
   )
+})
+
+test('agent kind 优先按 harness 识别包装器/空 command', () => {
+  assert.equal(agentKindOf('', 'workbuddy'), 'workbuddy')
+  assert.equal(agentKindOf('/wrapper/custom', 'codex'), 'codex')
+  assert.equal(agentKindOf('/apps/codebuddy'), 'workbuddy')
 })
 
 test('WorkBuddy desktop envelope exposes only the final user_query', () => {
@@ -148,7 +155,7 @@ test('Codex traffic is yellow only while request_user_input is pending', () => {
 // ---- workbuddy 恢复对话绑定（restart resume 的凭据来源）----
 
 import crypto from 'node:crypto'
-import { bindFromPools, type BindingTarget } from './agent-transcript'
+import { bindCandidate, bindFromPools, type BindCandidateTarget, type BindingTarget } from './agent-transcript'
 
 /** 最小会话面字面量：绑定结果落在 bound 上供断言 */
 function wbSession(name: string): BindingTarget & { bound: string | null } {
@@ -171,18 +178,38 @@ function writeWb(file: string, userTexts: string[]) {
   fs.writeFileSync(file, `${lines.join('\n')}\n`)
 }
 
-test('workbuddy 绑定：同名复读文件只认最新 epoch 的那个', () => {
+test('workbuddy 绑定：epoch 内内容证据唯一时可认领，生命周期旧复读不干扰', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
   try {
     const older = path.join(dir, '11111111-1111-4111-8111-111111111111.jsonl')
     const latest = path.join(dir, '33333333-3333-4333-8333-333333333333.jsonl')
-    // 恢复失败反复全新启动：用户每次都重发同一句开场，落盘出一批同标题文件
     writeWb(older, ['查freemodel余额'])
     writeWb(latest, ['查freemodel余额'])
     const session = wbSession('查freemodel余额')
-    // 旧行为：epoch∪lifetime 池里 2 个同名候选 → 歧义不绑 → restart 拿不到 --resume 凭据
     assert.equal(bindFromPools(session, 'workbuddy', [latest], [latest, older]), latest)
     assert.equal(session.bound, '33333333-3333-4333-8333-333333333333')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('workbuddy 绑定：已有确定性原生 ID 但文件未落盘时只等待，不退回证据猜绑', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
+  try {
+    const foreign = path.join(dir, 'aaaaaaaa-1111-4111-8111-111111111111.jsonl')
+    writeWb(foreign, ['与本卡首句完全相同'])
+    const session: BindCandidateTarget & { bound: string | null } = {
+      ...wbSession('与本卡首句完全相同'),
+      agentSessionId: 'bbbbbbbb-2222-4222-8222-222222222222',
+      agentBindingHash: crypto.createHash('sha256').update('与本卡首句完全相同').digest('hex'),
+      createdAt: Date.now(),
+      startedAt: Date.now(),
+      exitedAt: null,
+      isRunning: true,
+    }
+    assert.equal(bindCandidate(session, 'workbuddy', [foreign]), null)
+    assert.equal(session.bound, null)
+    assert.equal(session.agentSessionId, 'bbbbbbbb-2222-4222-8222-222222222222')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -239,7 +266,7 @@ test('workbuddy 绑定：GPT-5.6 有明确首条输入哈希时直接认领自�
   }
 })
 
-test('workbuddy 绑定：首条被吞字导致证据全灭时，单卡场景按 epoch 窗口唯一非空文件兜底', () => {
+test('workbuddy 绑定：首条被吞字时也不再按时间窗唯一候选猜绑', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
   try {
     const old1 = path.join(dir, 'aaaaaaaa-1111-4111-8111-111111111111.jsonl')
@@ -251,8 +278,8 @@ test('workbuddy 绑定：首条被吞字导致证据全灭时，单卡场景按 
     writeWb(latest, ['查'])
     const session = wbSession('查freemodel余额')
     session.agentBindingHash = crypto.createHash('sha256').update('查freemodel余额').digest('hex')
-    assert.equal(bindFromPools(session, 'workbuddy', [latest], [old1, old2, latest]), latest)
-    assert.equal(session.bound, 'cccccccc-3333-4333-8333-333333333333')
+    assert.equal(bindFromPools(session, 'workbuddy', [latest], [old1, old2, latest]), null)
+    assert.equal(session.bound, null)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -304,7 +331,7 @@ test('占用闸：epoch 唯一候选已被另一活会话占用时不兜底、�
   }
 })
 
-test('占用闸：过滤掉占用文件后，自己的文件落盘即可按唯一候选正确绑定', () => {
+test('workbuddy 绑定：占用过滤后剩唯一文件但无内容证据仍不猜绑', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
   try {
     const foreign = path.join(dir, '11111111-1111-4111-8111-111111111111.jsonl')
@@ -314,8 +341,8 @@ test('占用闸：过滤掉占用文件后，自己的文件落盘即可按唯�
     const session = wbSession('Kimi K3') // 卡片名与两条消息都对不上，靠有首条凭据+占用过滤后的唯一兜底
     session.agentBindingHash = crypto.createHash('sha256').update('原始输入被 TUI 吞字').digest('hex')
     const occupied = (id: string) => id === '11111111-1111-4111-8111-111111111111'
-    assert.equal(bindFromPools(session, 'workbuddy', [foreign, own], [foreign, own], occupied), own)
-    assert.equal(session.bound, '22222222-2222-4222-8222-222222222222')
+    assert.equal(bindFromPools(session, 'workbuddy', [foreign, own], [foreign, own], occupied), null)
+    assert.equal(session.bound, null)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -378,7 +405,7 @@ test('qclaw assistant error stopReason concludes instead of stuck working', () =
   assert.equal(trafficStateFromMessages(parseQclaw(raw)), 'conclusion')
 })
 
-test('workbuddy 绑定：同名证据多候选时取最近写入的那个（时间只破平局）', () => {
+test('workbuddy 绑定：同名证据多候选属于歧义，不按 mtime 猜绑', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-bind-'))
   try {
     const older = path.join(dir, '99999999-1111-4111-8111-111111111111.jsonl')
@@ -389,10 +416,9 @@ test('workbuddy 绑定：同名证据多候选时取最近写入的那个（时�
     fs.utimesSync(older, new Date('2026-07-19T08:00:00Z'), new Date('2026-07-19T08:00:00Z'))
     fs.utimesSync(newer, new Date('2026-07-19T09:00:00Z'), new Date('2026-07-19T09:00:00Z'))
     const session = wbSession('查freemodel余额')
-    // 复现重启会让 epoch 窗口漂移、吞字占位文件被清理后 epoch 池为空：
-    // 同名证据在 lifetime 池并列两个 → 取最近写入的那个（真实案例：903e89cd）
-    assert.equal(bindFromPools(session, 'workbuddy', [], [older, newer]), newer)
-    assert.equal(session.bound, '88888888-2222-4222-8222-222222222222')
+    // 复现通用首句跨历史重复：mtime 只能说明谁更新得晚，不能证明属于哪张卡。
+    assert.equal(bindFromPools(session, 'workbuddy', [], [older, newer]), null)
+    assert.equal(session.bound, null)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
