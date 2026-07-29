@@ -30,6 +30,11 @@
       "id": "zcode",
       "name": "ZCode",
       "role": "worker"
+    },
+    {
+      "id": "hermes-secretary",
+      "name": "Hermes秘书分身（secretary-01 · k3）",
+      "role": "worker"
     }
   ]
 }
