@@ -5752,6 +5752,341 @@ def _cmd_reconcile(args) -> int:
             (TASKS_DIR / ".reconcile.lock").unlink(missing_ok=True)
 
 
+# ── 收割巡检 harvest（方案D，2026-07-29）──────────────────────────────────
+# cron 佣工（与 reconcile 同构），专收「无 caller 跟踪」的结果——把一切非 main 视野的
+# 产出「拍平」进 main 通道收件箱，复用既有 inbox --digest → cc-send 送达高律师微信。
+#   · Job1 通道交叉中继：扫 inbox 里 channel != main 的条目（如 secretary-01），重写成
+#     main 的 harvest 条目、原条目改 .done（幂等）。secretary-01 无 weixin，这是它结果
+#     送达的唯一路径——补缺不是重复。
+#   · Job2 房间收割：读 tasks 面包屑排除 caller 活跟踪的房，对其余房读 messages 水位线后
+#     的 assistant 消息，settle 门控（trafficLight 到 conclusion/idle/exited 或末条静默
+#     ≥阈值）才捆成一条报告，写 harvest-{room}-{ts}.json，推进 {room}.hw 水位线。
+# 断线恢复与 reconcile 同：HW 水位线幂等，进程死了/机器重启下轮从水位线追平，不重不漏。
+# 首次见某房先锚定水位线到当前最新消息（bootstrap），只收此后新消息——不倒历史旧账。
+HARVEST_DIR = Path(HOME_DIR) / ".standcode" / "harvest"
+HARVEST_CONFIG = Path(HOME_DIR) / ".standcode" / "harvest.json"
+# settle 静默门阈值：末条 assistant 消息静默多久算「这一轮说完了」（与 reconcile 60s 同口径）
+HARVEST_SILENCE_SEC = _conf_float("STANDCODE_HARVEST_SILENCE_SEC", "harvest_silence_sec", 60)
+
+
+def _harvest_lock() -> bool:
+    """harvest 单实例锁：O_EXCL 创建；>5 分钟视为陈锁可夺（与 _reconcile_lock 同款）。"""
+    lock = TASKS_DIR / ".harvest.lock"
+    try:
+        TASKS_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - lock.stat().st_mtime > 300:
+                lock.unlink(missing_ok=True)
+                return _harvest_lock()
+        except OSError:
+            pass
+        return False
+
+
+def _load_harvest_config() -> dict:
+    """读 ~/.standcode/harvest.json；缺字段回退默认，坏文件回退全默认（不阻塞巡检）。"""
+    default = {
+        "include_rooms": [],               # 显式纳入收割的房（如 secretary-01 的 36a9180a）
+        "denylist": [],                    # 噪音房（如常驻问答通道），永不收割
+        "quiet_hours": ["23:00", "07:00"],  # 免打扰时段（本地时区 [起, 止)），不写 inbox
+        "per_room_min_interval": 10,       # 同房最低报告间隔分钟（限频防轰炸）
+        "wake_trigger": False,             # 收割>0 是否发唤醒触发（默认关=纯拉模式，对齐设计 3.1）
+    }
+    if not HARVEST_CONFIG.exists():
+        return default
+    try:
+        d = json.loads(HARVEST_CONFIG.read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            return default
+    except Exception as e:
+        logger.warning("harvest.json 读取失败，用默认配置: %s", e)
+        return default
+    for k, v in default.items():
+        d.setdefault(k, v)
+    return d
+
+
+def _in_quiet_hours(qh) -> bool:
+    """是否处于免打扰时段。qh=[起, 止] 本地 HH:MM；跨午夜（如 23:00-07:00）按环绕算。"""
+    if not qh or not isinstance(qh, (list, tuple)) or len(qh) < 2:
+        return False
+
+    def _hm(s):
+        try:
+            h, m = str(s).split(":")[:2]
+            return int(h) * 60 + int(m)
+        except Exception:
+            return None
+
+    s, e = _hm(qh[0]), _hm(qh[1])
+    if s is None or e is None or s == e:
+        return False
+    now = datetime.now()
+    cur = now.hour * 60 + now.minute
+    return (cur >= s or cur < e) if s > e else (s <= cur < e)
+
+
+def _harvest_hw_path(room_id: str) -> Path:
+    return HARVEST_DIR / f"{room_id}.hw"
+
+
+def _read_harvest_hw(room_id: str) -> dict:
+    p = _harvest_hw_path(room_id)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_harvest_hw(room_id: str, hw: dict) -> None:
+    p = _harvest_hw_path(room_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(hw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _harvest_assistant_msgs(msgs: list[dict]) -> list[dict]:
+    """筛 assistant 消息：from_agent 非 caller/human/system 且非人类转述（human_relay=0）。
+
+    口径对齐 _stand_msgs 的 NON_STAND_SENDERS 排除，但不限定单一 stand 名——收割要收
+    房内所有 agent 产出（含 stand 之间协作）；人类转述（Hermes 代发的人类原话，
+    human_relay=1）不算 agent 结果。
+    """
+    out = []
+    for m in msgs:
+        s = m.get("from_agent", "")
+        if not s or s in NON_STAND_SENDERS:
+            continue
+        if m.get("human_relay"):
+            continue
+        out.append(m)
+    return out
+
+
+def _room_settled(room: dict, sessions_by_id: dict,
+                  last_asst_ts: float | None) -> tuple[bool, str]:
+    """settle 门控（防轰炸核心，保守）：仅当房内无会话仍在 working/needs-user
+    （即 trafficLight 收尾），或末条 assistant 消息静默 ≥阈值，才判可收割。
+
+    会话态查不到不冒进（seen=0 不判 traffic_settled）——回落静默门，避免在 Stand
+    还在干活时把半截对话当结果捆走。"""
+    members = [m for m in room.get("members", [])
+               if m.get("kind") == "session" and m.get("sessionId")]
+    if members:
+        seen, active = 0, False
+        for m in members:
+            info = sessions_by_id.get(m["sessionId"]) or {}
+            if not info:
+                continue
+            seen += 1
+            if info.get("trafficState") in ("working", "needs-user"):
+                active = True
+                break
+        if seen and not active:
+            return True, "traffic_settled"
+    if last_asst_ts is not None and (time.time() - last_asst_ts) >= HARVEST_SILENCE_SEC:
+        return True, "silent"
+    return False, ""
+
+
+def _cmd_harvest(args) -> int:
+    """收割巡检 harvest（方案D v1，cron 佣工每 10 分钟）。
+
+    把无 caller 跟踪的结果「拍平」进 main 通道收件箱：Job1 通道交叉中继 +
+    Job2 房间收割，串行。零 LLM、结果只落 inbox，靠既有 inbox --digest → cc-send
+    送达（拉模式，gateway 宕了也不丢）。幂等：水位线 + .done，只补不删。
+    """
+    cfg = _load_harvest_config()
+    if _in_quiet_hours(cfg.get("quiet_hours")):
+        print("（免打扰时段，跳过本轮 harvest）")
+        log_audit("harvest", {"dry_run": bool(args.dry_run), "blocked": True,
+                              "reason": "quiet_hours"})
+        return 0
+    if not args.dry_run and not _harvest_lock():
+        print("另一 harvest 实例在跑，跳过")
+        return 0
+    try:
+        caller = Caller()
+        counts = {"job1_relayed": 0, "job2_harvested": 0, "rooms_scanned": 0,
+                  "waiting": 0, "skipped": 0}
+        actions: list[str] = []
+        mine = "main"
+        include_rooms = set(cfg.get("include_rooms") or [])
+        denylist = set(cfg.get("denylist") or [])
+        interval_sec = float(cfg.get("per_room_min_interval") or 0) * 60
+
+        # ── Job1 通道交叉中继：扫 inbox 非本通道条目 → 重写成 main harvest ──
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        for p in sorted(INBOX_DIR.iterdir()):
+            if p.suffix != ".json":
+                continue
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            ch = d.get("channel") or "main"
+            if ch == mine:
+                continue  # 已是 main，留给 digest
+            orig_task = d.get("task_id") or p.stem
+            new_task = f"harvest-{ch}-{orig_task}"
+            if _inbox_path(new_task).exists():
+                # 已中继过（幂等）：只把原条目改 .done 防重扫，不重写、不改原 .json 内容
+                if not args.dry_run:
+                    p.rename(p.with_name(p.name + DONE_SUFFIX))
+                counts["job1_relayed"] += 1
+                actions.append(f"🔁 {orig_task}（via {ch}）已中继过，原条目标 .done")
+                continue
+            summary = (d.get("request_summary") or d.get("request") or "").strip()
+            if not args.dry_run:
+                write_inbox(new_task, {
+                    "task_id": new_task,
+                    "channel": mine,
+                    "source": "harvest",
+                    "via": ch,                       # 来源标注
+                    "status": d.get("status") or "completed",
+                    "result_text": d.get("result_text") or "",
+                    "request_summary": f"[{ch} 转达] {summary}"[:200],
+                    "stand": d.get("stand") or "",
+                    "role": d.get("role") or "",
+                    "room_id": d.get("room_id"),
+                    "files": d.get("files") or [],
+                    "error": d.get("error"),
+                })
+                p.rename(p.with_name(p.name + DONE_SUFFIX))
+            counts["job1_relayed"] += 1
+            actions.append(f"🔁 {orig_task}（via {ch}）中继进 main inbox → {new_task}")
+
+        # ── Job2 房间收割：排除 caller 活跟踪的房，其余 settle 后捆报 ──
+        # 排除集 = status=='running' 任务的 dispatches[].room_id（只排活跟踪；死等待者
+        # 由 reconcile 接手，harvest 兜底，互补不冲突）。
+        tracked: set[str] = set()
+        for tp in TASKS_DIR.glob("*.json"):
+            try:
+                st = json.loads(tp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if st.get("status") != "running":
+                continue
+            for d in st.get("dispatches") or []:
+                if d.get("room_id"):
+                    tracked.add(str(d["room_id"]))
+        try:
+            sessions_by_id = {s.get("id"): s for s in caller.list_sessions()}
+        except Exception:
+            sessions_by_id = {}
+        rooms = caller.list_rooms()  # 默认不含已归档（归档房不可投递，无新结果）
+        now = time.time()
+        for room in rooms:
+            rid = str(room.get("id") or "")
+            if not rid or rid in tracked or rid in denylist:
+                continue
+            team = room.get("team")
+            if not team:
+                continue
+            sess_members = [m for m in room.get("members", [])
+                            if m.get("kind") == "session" and m.get("sessionId")]
+            if not sess_members and rid not in include_rooms:
+                continue  # 无 agent 会话又未显式纳入，无结果可收
+            hw = _read_harvest_hw(rid)
+            after_id = int(hw.get("message_id") or 0)
+            try:
+                msgs = caller.get_messages(team, after_id=after_id)
+            except Exception as e:
+                actions.append(f"⚠️ 房间 {rid} 读消息失败: {e}")
+                continue
+            counts["rooms_scanned"] += 1
+
+            if after_id == 0:
+                # 首次见该房（无水位线）：锚定到当前最新消息，只收此后新消息——
+                # 不把历史旧账当结果倒灌进 inbox（首部署不轰炸）。
+                max_id = max((int(m.get("id") or 0) for m in msgs), default=0)
+                if max_id and not args.dry_run:
+                    _write_harvest_hw(rid, {
+                        "message_id": max_id,
+                        "created_at": (msgs[-1].get("created_at") if msgs else "") or "",
+                        "last_harvest_ts": now, "bootstrap": True,
+                    })
+                actions.append(f"📍 房间 {rid}（{(room.get('name') or '')[:24]}）"
+                               f"首次锚定水位线 {max_id}（不倒历史旧账）")
+                continue
+
+            asst = _harvest_assistant_msgs(msgs)
+            if not asst:
+                continue
+            # 限频：同房报告间隔内跳过（水位线未推进，消息留待下轮不丢）
+            last_harv = hw.get("last_harvest_ts")
+            if (last_harv and interval_sec > 0
+                    and (now - float(last_harv)) < interval_sec):
+                counts["skipped"] += 1
+                continue
+            last = asst[-1]
+            settled, reason = _room_settled(room, sessions_by_id,
+                                            _parse_iso_ts(last.get("created_at")))
+            if not settled:
+                counts["waiting"] += 1
+                actions.append(f"⏳ 房间 {rid}（{(room.get('name') or '')[:24]}）未 settle，下轮再看")
+                continue
+            # 收割：把这一轮 assistant 消息捆成一条报告写 main inbox
+            new_task = f"harvest-{rid}-{int(now)}"
+            stands = sorted({m.get("from_agent", "") for m in asst if m.get("from_agent")})
+            bodies = [m.get("body", "").strip() for m in asst if m.get("body", "").strip()]
+            text = "\n\n---\n\n".join(bodies)
+            if len(text) > 3000:
+                text = text[:3000] + f"\n\n…（共 {len(bodies)} 条，已截断）"
+            if not args.dry_run:
+                write_inbox(new_task, {
+                    "task_id": new_task,
+                    "channel": mine,
+                    "source": "harvest",
+                    "via": f"room:{rid}",
+                    "status": "completed",
+                    "result_text": text,
+                    "request_summary": f"[房间收割] {(room.get('name') or rid)[:40]}：{len(asst)} 条新回复",
+                    "stand": "、".join(stands),
+                    "room_id": rid,
+                    "room_name": room.get("name") or "",
+                    "files": [],
+                    "harvested_msg_ids": [m.get("id") for m in asst],
+                    "error": None,
+                })
+                _write_harvest_hw(rid, {
+                    "message_id": max(int(m.get("id") or 0) for m in asst),
+                    "created_at": last.get("created_at") or "",
+                    "last_harvest_ts": now,
+                    "via_task": new_task,
+                })
+            counts["job2_harvested"] += 1
+            actions.append(f"✅ 房间 {rid}（{(room.get('name') or '')[:24]}）"
+                           f"收割 {len(asst)} 条回复 → {new_task}（{reason}）")
+
+        harvested_total = counts["job1_relayed"] + counts["job2_harvested"]
+        # 唤醒触发默认关（纯拉模式，对齐设计 3.1）；wake_trigger=true 时与 reconcile 同款——
+        # 补收>0 发一条触发，Hermes 醒来 digest 自然带出明细（否则要等下一次偶然唤醒）。
+        if cfg.get("wake_trigger") and harvested_total and not args.dry_run:
+            trig = send_callback_trigger(
+                "harvest",
+                message=(f"harvest 收割 {harvested_total} 件结果进 inbox"
+                         f"（relay {counts['job1_relayed']}/room {counts['job2_harvested']}），请汇总转述"),
+            )
+            actions.append("📣 已发唤醒触发" if trig.get("ok")
+                           else f"⚠️ 唤醒触发未发出: {(trig.get('error') or trig.get('stdout') or '')[:80]}")
+        log_audit("harvest", {**counts, "dry_run": bool(args.dry_run), "blocked": False})
+        for line in actions:
+            print(line)
+        print(json.dumps({"cmd": "harvest", **counts, "dry_run": bool(args.dry_run)},
+                         ensure_ascii=False))
+        return 0
+    finally:
+        if not args.dry_run:
+            (TASKS_DIR / ".harvest.lock").unlink(missing_ok=True)
+
+
 def _cmd_report(args) -> int:
     """复盘报表（2026-07-26，08-05 试运行复盘口径）：聚合审计日志出派发质量统计。
 
@@ -6589,6 +6924,14 @@ def _build_parser():
     prr.add_argument("--dry-run", action="store_true", help="只报告不写")
     prr.add_argument("--max-age-days", type=float, default=7.0, help="只扫最近 N 天的 state（默认 7）")
     prr.set_defaults(func=_cmd_reconcile)
+
+    ph = sub.add_parser(
+        "harvest",
+        help="收割巡检（cron 佣工，每10分钟）：无 caller 跟踪的结果拍平进 main inbox——"
+             "Job1 通道交叉中继（secretary-01 等非 main 通道）+ Job2 房间收割（settle 门控捆报）",
+    )
+    ph.add_argument("--dry-run", action="store_true", help="只报告不写 inbox / 不推进水位线")
+    ph.set_defaults(func=_cmd_harvest)
 
     prp = sub.add_parser(
         "report",
