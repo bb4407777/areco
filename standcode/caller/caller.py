@@ -215,6 +215,32 @@ STANDBY_DIR = Path(
 # 2026-07-29 高律师令：随暖池一同关闭（同属预热/驻留提速），代码保留不删。
 PREWARM_WORKER = False  # 原：_conf_bool("STANDCODE_PREWARM_WORKER", "prewarm_worker", True)
 
+# ── 旧会话优先复用（2026-07-29 高律师令，Kimi 施工）────────────────────
+# 旧口径每单无脑 spawn 新会话：上下文缓存全浪费、进程越攒越多。本层在派单前先查
+# areco 同模板下有没有空闲旧会话，命中即把任务注入旧会话（缓存是暖的），不再 spawn。
+# 复用判据三条同时满足：
+#   a. 会话空闲      —— status=running 且 trafficState 为 conclusion/idle
+#                      （working=在干活、needs-user=屏上挂着待选框，都算忙不碰）
+#   b. 上下文未近满  —— claude transcript 尾条 usage 拿得到就判
+#                      （≥SESSION_REUSE_CONTEXT_LIMIT 不复用）；拿不到（非 claude
+#                      harness 无 transcript）就靠 areco 侧空闲信号放行，不硬编数字
+#   c. 任务不带「干净上下文」标记 —— --fresh / fresh=True / 正文含 FRESH_CONTEXT_MARKERS
+# 例外（强制新会话）：擂台/基准测试（ARENA_KEYWORDS，公平性各模型同起点）、
+# 法律案件类（LEGAL_CASE_KEYWORDS，复用=上下文延续，跨案件/跨项目有串味风险，
+# 对齐 Hermes 案件隔离纪律）。任何异常/查不到都 fail-open 回落新会话——
+# 复用只是省冷启动税，绝不该挡派发。决策一律写 route_reason（结果+审计）可见。
+SESSION_REUSE_ENABLED = True  # 开关常量化（同 STANDBY_ENABLED 口径；改这里一键关停）
+SESSION_REUSE_CONTEXT_LIMIT = int(_conf_float(
+    "STANDCODE_SESSION_REUSE_CTX_LIMIT", "session_reuse_context_limit", 160_000))
+FRESH_CONTEXT_MARKERS = ("干净上下文", "[fresh]", "[clean-context]")
+ARENA_KEYWORDS = ("擂台", "基准测试", "benchmark", "对战")
+LEGAL_CASE_KEYWORDS = (
+    # 与 FAST_BLOCK_KEYWORDS 法律组同词（案件/文书/法条…）——那边管路由车道，
+    # 这边管会话隔离；词表分开常量化，免得一边改词另一边跟着飘。
+    "案件", "文书", "法条", "核查", "立案", "保全", "证据", "判决",
+    "起诉", "答辩", "上诉", "调解",
+)
+
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
 # STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
@@ -2173,6 +2199,7 @@ class Caller:
         request_summary: str | None = None,
         mode: str = "",
         reuse_stand: dict | None = None,
+        fresh: bool = False,
     ) -> dict:
         """向 Stand 派发任务
 
@@ -2197,10 +2224,15 @@ class Caller:
                         applied=False）。默认 False——隔离要花磁盘和 git 操作，按需开。
             workspace_repo: isolated=True 时基于哪个 git 仓库建 worktree；None=只建空目录。
             reuse_stand: 复用已 spawn 好的房内 Stand（2026-07-26 提速批件）——跳过建房/
-                        add_stand/BOOT_WAIT，直接向既有成员发任务。两类来源：
+                        add_stand/BOOT_WAIT，直接向既有成员发任务。三类来源：
                         plan 预热（kind='prewarm'，room_created=False，房归 Thinker 链收口）、
-                        暖池认领（kind='standby'，room_created=True，收口照常归档）。
-                        None 且非隔离、未指定房间时，dispatch 自动尝试暖池认领。
+                        暖池认领（kind='standby'，room_created=True，收口照常归档）、
+                        旧会话复用（kind='session_reuse'，room_created=False，旧房不碰）。
+                        None 且非隔离、未指定房间时，dispatch 自动依次尝试暖池认领、
+                        旧会话复用（2026-07-29 高律师令，判据见 SESSION_REUSE_ENABLED 注释）。
+            fresh:      「干净上下文」标记（2026-07-29）：True 时跳过旧会话复用、强制
+                        spawn 新会话——擂台/基准测试公平性（各模型同起点）与任何明确
+                        要求干净上下文的任务用。CLI 对应 --fresh。
 
         返回:
             {
@@ -2216,8 +2248,10 @@ class Caller:
                 "role": str,         # 'thinker' | 'worker'
                 "workspace": str | None,     # 隔离工作目录（isolated=True 才有）
                 "workspace_cwd": bool,       # Stand cwd 已真正切到 workspace（2026-07-26 冒烟 ✓）
-                "stand_reused": bool,        # 走了复用通道（暖池认领或 plan 预热）
+                "stand_reused": bool,        # 走了复用通道（暖池/预热/旧会话复用）
                 "standby": bool,             # 复用来源是暖池
+                "route_reason": str,         # 派发路径决策（'复用旧会话(命中缓存…)' /
+                                             # '新会话(无空闲/需干净上下文…)'）
             }
         """
         # 0. Gatekeeper 硬闸：命中 BLOCKED 红线（不可逆灾难性操作）→ 拒绝执行 + 记审计。
@@ -2284,13 +2318,28 @@ class Caller:
         # 1.6 复用通道（2026-07-26 提速批件）：显式 reuse_stand（plan 预热）优先；
         #     否则暖池自动认领（无指定房、非隔离）。命中即跳过建房/add_stand/BOOT_WAIT，
         #     spawn+注入下限的 12s 冷启动税移出关键路径。
+        # 1.7 旧会话复用（2026-07-29 高律师令）：暖池没命中再查同模板空闲旧会话——
+        #     判据/例外见 _session_reuse_decision；route_reason 无论命中与否都写明
+        #     派发路径，进结果与审计（'复用旧会话(命中缓存)' / '新会话(…)'）。
         explicit_reuse = reuse_stand is not None
         standby_hit = False
+        session_reuse_hit = False
+        route_reason = ""
         if reuse_stand is None and STANDBY_ENABLED and not room_id and not isolated:
             claim = self.standby_claim(tid)
             if claim:
                 reuse_stand = claim
                 standby_hit = True
+                route_reason = "复用旧会话(暖池认领)"
+        if reuse_stand is None and not room_id and not isolated:
+            reuse_stand, route_reason = self._session_reuse_decision(
+                tid, request, fresh=fresh)
+            session_reuse_hit = reuse_stand is not None
+        elif not route_reason and not explicit_reuse:
+            route_reason = ("新会话(指定房间派发,不参与复用)" if room_id
+                            else "新会话(隔离派发,不参与复用)")
+        elif explicit_reuse:
+            route_reason = "复用旧会话(显式 reuse_stand)"
 
         if reuse_stand:
             rid = reuse_stand["room_id"]
@@ -2329,6 +2378,7 @@ class Caller:
                 workspace_info=None, room_id_param=room_id,
                 isolated=isolated, explicit_reuse=explicit_reuse,
                 stand_reused=True, standby_hit=standby_hit,
+                route_reason=route_reason,
             )
 
         # 1.8 模板存在性前置校验：放在 create_room 之前。
@@ -2420,13 +2470,14 @@ class Caller:
             workspace_info=workspace_info, room_id_param=room_id,
             isolated=isolated, explicit_reuse=False,
             stand_reused=False, standby_hit=False,
+            route_reason=route_reason,
         )
 
     def _finish_dispatch(
         self, *, task_id, team, rid, room, room_created, stand_name,
         stand_session_id, msg_id, effective_task_type, tid, effective_role,
         mode, workspace_info, room_id_param, isolated, explicit_reuse,
-        stand_reused, standby_hit,
+        stand_reused, standby_hit, route_reason,
     ) -> dict:
         """dispatch 收尾（冷启动/复用两条路共用）：result 组装、台账、审计、面包屑、补胎。"""
         template_mark_success(tid)  # 健康闸：派发走通一次即清除该模板黑名单记录
@@ -2445,6 +2496,7 @@ class Caller:
             "mode": mode,
             "stand_reused": stand_reused,
             "standby": standby_hit,
+            "route_reason": route_reason,
             "workspace": (workspace_info or {}).get("path"),
             "workspace_cwd": bool((workspace_info or {}).get("applied", False)),
         }
@@ -2468,11 +2520,15 @@ class Caller:
             "room_reused": not room_created,
             "stand_reused": stand_reused,
             "standby": standby_hit,
+            "route_reason": route_reason,
         })
         logger.info(
-            "派发任务: session=%s room=%s stand=%s mode=%s role=%s task_type=%s tid=%s reuse=%s",
+            "派发任务: session=%s room=%s stand=%s mode=%s role=%s task_type=%s tid=%s reuse=%s route=%s",
             team, rid, stand_name, mode or "-", effective_role, effective_task_type, tid,
-            ("standby" if standby_hit else "prewarm") if stand_reused else "-",
+            (("standby" if standby_hit
+              else "session" if "命中缓存" in (route_reason or "")
+              else "prewarm") if stand_reused else "-"),
+            route_reason or "-",
         )
         hook = getattr(self, "_on_dispatch", None)
         if hook:
@@ -2499,6 +2555,7 @@ class Caller:
         request_summary: str | None = None,
         mode: str = "think",
         reuse_stand: dict | None = None,
+        fresh: bool = False,
     ) -> dict:
         """派给 Thinker（registry.default_thinker）：规划、分析、判断、路由
 
@@ -2521,6 +2578,7 @@ class Caller:
             request_summary=request_summary,
             mode=mode,
             reuse_stand=reuse_stand,
+            fresh=fresh,
         )
 
     def dispatch_worker(
@@ -2534,6 +2592,7 @@ class Caller:
         reuse_stand: dict | None = None,
         isolated: bool = False,
         workspace_repo: str | None = None,
+        fresh: bool = False,
     ) -> dict:
         """派给 Worker（registry.default_worker；⑤ 反转后默认车道=hy3 轻车）。
 
@@ -2551,6 +2610,7 @@ class Caller:
             reuse_stand=reuse_stand,
             isolated=isolated,
             workspace_repo=workspace_repo,
+            fresh=fresh,
         )
 
     def poll_result(
@@ -3169,6 +3229,125 @@ class Caller:
             return "fork", f"通道会话正忙（trafficState={traffic}），另开并行任务"
         return "direct", f"通道空闲（status={status or '?'} traffic={traffic or '?'}）"
 
+    # ── 旧会话复用（2026-07-29 高律师令；判据总纲见 SESSION_REUSE_ENABLED 注释）──
+
+    def _session_context_tokens(self, sess: dict) -> int | None:
+        """会话当前上下文占用估算基数；拿不到返回 None。
+
+        只信客户端自己落盘的数字（同 collect_stand_cost 纪律）：claude transcript
+        尾条 message.usage 的 input+cache_read+cache_creation 之和 ≈ 当前上下文量。
+        非 claude harness / transcript 读不到 → None，调用方靠 areco 侧空闲信号
+        放行，**绝不硬编数字**。
+        """
+        try:
+            csid = sess.get("claudeSessionId") or ""
+            tdir = sess.get("transcriptDir") or ""
+            if not csid or not tdir:
+                return None
+            tp = Path(tdir) / f"{csid}.jsonl"
+            if not tp.exists():
+                return None
+            last = None
+            with tp.open(encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    try:
+                        u = (json.loads(line).get("message") or {}).get("usage") or {}
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                    if u:
+                        last = u
+            if not last:
+                return None
+            return (int(last.get("input_tokens") or 0)
+                    + int(last.get("cache_read_input_tokens") or 0)
+                    + int(last.get("cache_creation_input_tokens") or 0))
+        except Exception:
+            return None
+
+    def find_reusable_session(self, template_id: str) -> tuple[dict | None, str]:
+        """在同模板名下找一个可复用的空闲旧会话（判据 a 空闲 / b 上下文未近满；
+        判据 c 干净上下文标记与强制新会话例外在 _session_reuse_decision 判）。
+
+        返回 (reuse_stand 字典 | None, route_reason)。全程 fail-open：任何一步
+        异常/查不到都返回 (None, 新会话原因)，复用只是省冷启动税，不挡派发。
+        reuse_stand 的 room_created 恒 False——旧房不是本单建的，收口/回滚都不碰。
+        """
+        try:
+            sessions = self.list_sessions()
+        except Exception as e:
+            return None, f"新会话(会话列表不可得: {e})"
+        # 判据 a：空闲 = 进程活着 + 红绿灯为「定稿/空闲」；working（在干活）与
+        # needs-user（屏上挂待选框，注入会压在未答提示上）都算忙。红绿灯查无值
+        # 的按忙处理——「空闲」必须是确认事实，不是猜。
+        cands = [
+            s for s in sessions
+            if s.get("templateId") == template_id
+            and s.get("status") == "running"
+            and not s.get("archived")
+            and s.get("roomId")
+            and (s.get("trafficState") or "") in ("conclusion", "idle")
+        ]
+        if not cands:
+            return None, "新会话(无空闲旧会话)"
+        # 最近活跃的排前面——上下文缓存最暖
+        cands.sort(key=lambda s: s.get("trafficUpdatedAt") or 0, reverse=True)
+        try:
+            rooms = {r.get("id"): r for r in self.list_rooms()}  # 已滤归档房
+        except Exception as e:
+            return None, f"新会话(房间列表不可得: {e})"
+        near_full = 0
+        for s in cands:
+            # 判据 b：上下文用量拿得到就判近满；拿不到（None）靠 areco 侧空闲信号放行
+            ctx = self._session_context_tokens(s)
+            if ctx is not None and ctx >= SESSION_REUSE_CONTEXT_LIMIT:
+                near_full += 1
+                continue
+            room = rooms.get(s.get("roomId"))
+            if not room:
+                continue  # 房已归档/查无——relay 不投递，派进去=丢任务
+            mem = next((m for m in room.get("members", [])
+                        if m.get("kind") == "session"
+                        and m.get("sessionId") == s.get("id")), None)
+            if not mem or not mem.get("name"):
+                continue
+            ctx_note = (f"上下文≈{ctx}t" if ctx is not None
+                        else "上下文用量不可得,凭 areco 空闲信号")
+            return {
+                "kind": "session_reuse",
+                "room_id": room["id"],
+                "team": room.get("team"),
+                "room_name": room.get("name", ""),
+                "stand_name": mem["name"],
+                "stand_session_id": s.get("id"),
+                "template_id": template_id,
+                "room_created": False,
+            }, f"复用旧会话(命中缓存: {mem['name']}, {ctx_note})"
+        if near_full:
+            return None, (f"新会话({near_full} 个空闲旧会话上下文近满"
+                          f" ≥{SESSION_REUSE_CONTEXT_LIMIT}t)")
+        return None, "新会话(空闲旧会话所在房间不可用)"
+
+    def _session_reuse_decision(self, template_id: str, request: str,
+                                fresh: bool = False) -> tuple[dict | None, str]:
+        """会话复用总判（判据 c + 强制新会话例外 + 开关在本层，a/b 下沉 find）。
+
+        返回 (reuse_stand | None, route_reason)——无论复用与否 route_reason 都写明
+        决策路径（'复用旧会话(命中缓存…)' / '新会话(无空闲/需干净上下文…)'）。
+        """
+        if not SESSION_REUSE_ENABLED:
+            return None, "新会话(复用开关 SESSION_REUSE_ENABLED=False)"
+        text = request or ""
+        text_lower = text.lower()
+        if fresh or any((m in text) or (m.isascii() and m.lower() in text_lower)
+                        for m in FRESH_CONTEXT_MARKERS):
+            return None, "新会话(任务带干净上下文标记 --fresh)"
+        if any((k in text) or (k.isascii() and k.lower() in text_lower)
+               for k in ARENA_KEYWORDS):
+            return None, "新会话(擂台/基准测试强制干净上下文——各模型同起点保公平)"
+        if any(k in text for k in LEGAL_CASE_KEYWORDS):
+            return None, "新会话(法律案件类默认隔离——防跨案件上下文串味)"
+        return self.find_reusable_session(template_id)
+
     def dispatch_to_channel(self, request: str, channel: dict,
                             request_summary: str | None = None) -> dict:
         """向常驻通道成员直投任务（不建房、不 spawn），返回与 dispatch() 同形结果。
@@ -3618,6 +3797,7 @@ class Caller:
         isolated: bool = False,
         workspace_repo: str | None = None,
         acceptance: dict | None = None,
+        fresh: bool = False,
     ) -> dict:
         """一键派发 → 主动轮询 → 代发微信
 
@@ -3629,6 +3809,7 @@ class Caller:
             plan_only:        role='thinker' 时把 request 包进 PLAN_TEMPLATE（只出结构化计划）；
                               其他角色下无意义（PLAN_TEMPLATE 是给 Thinker 的），会被忽略
             mode:             工作模式一等字段，落审计（见 MODES / log_audit）
+            fresh:            干净上下文标记——跳过旧会话复用强制新会话（见 dispatch）
             room_id/template_id/file_path/poll_timeout/dry_run: 见 dispatch/poll_result/relay_to_wechat
 
         返回: dispatch() + poll_result() + {relay_summary, wechat, relayed}
@@ -3647,6 +3828,7 @@ class Caller:
             mode=mode,
             isolated=isolated,
             workspace_repo=workspace_repo,
+            fresh=fresh,
         )
         poll = self.poll_result(
             room_id=dispatch_result["room_id"],
@@ -3728,6 +3910,7 @@ class Caller:
         poll_timeout: int = 600,
         dry_run: bool = False,
         reuse_plan: bool = False,
+        fresh: bool = False,
     ) -> dict:
         """任务含规划需求时：Caller 先派 Thinker 做计划，再把计划交给 Worker 执行
 
@@ -3770,6 +3953,7 @@ class Caller:
                     file_path=file_path, poll_timeout=poll_timeout, dry_run=dry_run,
                     plan_dispatch=None, degraded=False, degrade_reason="",
                     reused_plan={k: hit[k] for k in ("task_id", "score", "path", "request")},
+                    fresh=fresh,
                 )
             logger.info("无足够相似的历史计划（阈值 %.2f），正常派 Thinker", PLAN_REUSE_MIN_SCORE)
 
@@ -3778,6 +3962,7 @@ class Caller:
             request,
             task_type=task_type,
             plan_only=True,
+            fresh=fresh,
         )
 
         # 1.5 预热 Worker（2026-07-26 提速批件）：趁 Thinker 跑计划（通常 1.5-3 分钟），
@@ -3917,7 +4102,7 @@ class Caller:
             file_path=file_path, poll_timeout=poll_timeout, dry_run=dry_run,
             plan_dispatch=plan_dispatch, plan_poll=plan_poll,
             degraded=degraded, degrade_reason=degrade_reason,
-            prewarmed=prewarmed,
+            prewarmed=prewarmed, fresh=fresh,
         )
 
     def _execute_with_plan(
@@ -3937,6 +4122,7 @@ class Caller:
         degrade_reason: str,
         reused_plan: dict | None = None,
         prewarmed: dict | None = None,
+        fresh: bool = False,
     ) -> dict:
         """两段式的执行半段：拿着计划派 Worker → 轮询 → 代发 → 收口。
 
@@ -3978,6 +4164,7 @@ class Caller:
             room_id=plan_dispatch["room_id"] if plan_dispatch else None,
             mode="plan",
             reuse_stand=prewarmed if plan_dispatch else None,
+            fresh=fresh,
         )
         exec_poll = self.poll_result(
             room_id=exec_dispatch["room_id"],
@@ -5234,6 +5421,7 @@ def _bg_worker(task_id: str) -> int:
             room_id=spec.get("room_id"),
             template=spec.get("template"),
             reuse_plan=bool(spec.get("reuse_plan")),
+            fresh=bool(spec.get("fresh")),
         )
         # dry_run=True：后台不直接发完整结果（inbox 设计：Hermes 读 inbox 后代发）
         # poll_timeout=0：无限等待，直到 Stand 完成
@@ -5338,6 +5526,7 @@ def _run_by_mode(
         file_path=args.file,
         poll_timeout=timeout,
         dry_run=dry_run,
+        fresh=bool(getattr(args, "fresh", False)),
     )
 
     if mode == "plan":
@@ -5417,6 +5606,7 @@ def _run_by_mode(
             request_summary=args.summary,
             file_path=args.file,
             acceptance=acceptance,
+            fresh=bool(getattr(args, "fresh", False)),
         )
         return {**res, "mode": mode}
 
@@ -5565,6 +5755,7 @@ def _cmd_run(args) -> int:
             "plan_only": decision["plan_only"],
             "subs": decision["subs"],
             "reuse_plan": getattr(args, "reuse_plan", False),
+            "fresh": bool(getattr(args, "fresh", False)),
             "no_relay": args.no_relay,
             "dry_run": args.dry_run,
             "acceptance": acceptance,
@@ -5922,6 +6113,7 @@ def _cmd_go(args) -> int:
         summary=summary, file=args.file, timeout=args.timeout,
         no_relay=False, dry_run=False, reuse_plan=bool(args.reuse_plan),
         force=bool(getattr(args, "force", False)),
+        fresh=bool(getattr(args, "fresh", False)),
     )
     return _cmd_run(ns)
 
@@ -7713,6 +7905,11 @@ def _build_parser():
         "--force", action="store_true",
         help="跳过重复派发闸（同一 request 有在途 running 任务也强派；默认拦截，退出码 2）",
     )
+    pr.add_argument(
+        "--fresh", action="store_true",
+        help="干净上下文标记（2026-07-29 会话复用层）：跳过旧会话复用、强制 spawn 新会话。"
+             "擂台/基准测试必须带（公平性，各模型同起点）；正文含「干净上下文」/[fresh] 同效",
+    )
     pr.set_defaults(func=_cmd_run)
 
     pg = sub.add_parser(
@@ -7746,6 +7943,9 @@ def _build_parser():
                     help="只分诊+组包不派发（测试/预览用；audit 照记 dry_run=true）")
     pg.add_argument("--force", action="store_true",
                     help="跳过重复派发闸（同一 request 有在途 running 任务也强派；默认拦截，退出码 2）")
+    pg.add_argument("--fresh", action="store_true",
+                    help="干净上下文标记：跳过旧会话复用、强制新会话"
+                         "（擂台/基准测试必带；正文含「干净上下文」/[fresh] 同效）")
     pg.set_defaults(func=_cmd_go)
 
     pk = sub.add_parser(
