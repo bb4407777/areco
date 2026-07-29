@@ -575,28 +575,32 @@ Caller 发消息 → SQLite INSERT → 房间 relay 检测到新消息
 
 ## 测试
 
+> ⚠️ `test_dispatch.py` / `test_stand_dispatch.py` 是 e2e 冒烟：打生产 areco、
+> 建真房间、烧真 token。**必须显式加 `--live` 才真实派发**；不加只做离线自检
+> （2026-07-29 起）。「跑全套测试」的电池直接全跑即可，这两个会自动走离线自检。
+
 ```bash
 cd $STANDCODE_ROOT
 
 # 主动轮询 + 微信代发（dry-run，只验证轮询链路，不发微信）
-python3 caller/test_dispatch.py --relay --task-type general --poll-timeout 120 --cleanup
+python3 caller/test_dispatch.py --live --relay --task-type general --poll-timeout 120 --cleanup
 
 # 按角色分派：Worker（默认 Reasonix）
-python3 caller/test_dispatch.py --relay --role worker --poll-timeout 120 --cleanup
+python3 caller/test_dispatch.py --live --relay --role worker --poll-timeout 120 --cleanup
 
 # 按角色分派：Thinker（默认 GLM-5.2）
-python3 caller/test_dispatch.py --relay --role thinker --poll-timeout 120 --cleanup
+python3 caller/test_dispatch.py --live --relay --role thinker --poll-timeout 120 --cleanup
 
 # 真正发送微信（确认无误后再用）
-python3 caller/test_dispatch.py --relay --role worker --send-wechat \
+python3 caller/test_dispatch.py --live --relay --role worker --send-wechat \
     --summary "测试结论" --file-path /tmp/out.docx
 
 # Caller 两段式：Thinker 出计划 → Worker 执行
-python3 caller/test_dispatch.py --plan --poll-timeout 300 --cleanup
+python3 caller/test_dispatch.py --live --plan --poll-timeout 300 --cleanup
 
 # 旧路径：只派发不等完成 / 等待完成
-python3 caller/test_dispatch.py --task-type search
-python3 caller/test_dispatch.py --task-type general --wait --timeout 60
+python3 caller/test_dispatch.py --live --task-type search
+python3 caller/test_dispatch.py --live --task-type general --wait --timeout 60
 ```
 
 ---

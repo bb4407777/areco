@@ -6,9 +6,14 @@ StandCode Caller 测试脚本
 验证流程是否通畅（不必等待 Stand 真正完成）。
 
 用法:
-    python3 caller/test_dispatch.py [--task-type TYPE] [--request TEXT] [--wait]
+    python3 caller/test_dispatch.py --live [--task-type TYPE] [--request TEXT] [--wait]
 
 选项:
+    --live       真实派发开关（必加）：本脚本是 e2e 冒烟，会往生产 areco(8790)
+                 建真房间、起真 Stand、烧真 token。不加 --live 只做离线自检
+                 （不联网不派发），防止「跑全套测试」时误发任务。
+                 2026-07-29 教训：施工 Worker 跑 test 电池，本脚本默认请求
+                 「你好，请用一句话说明今天你能帮我做什么」一天打进生产 11+ 次。
     --task-type  任务类型（search/coding/writing/analysis/general，默认 general）
     --request    自定义请求文本（默认使用示例请求）
     --wait       等待 Stand 回复（默认只验证派发不等待完成）
@@ -39,6 +44,11 @@ logger = logging.getLogger("test_dispatch")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="StandCode Caller 测试脚本")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="真实派发到生产 areco（不加则只做离线自检，不联网不建房）",
+    )
     parser.add_argument("--task-type", default="general", help="任务类型")
     parser.add_argument("--request", default=None, help="请求文本")
     parser.add_argument("--wait", action="store_true", help="等待 Stand 回复")
@@ -233,11 +243,35 @@ def run_plan_and_execute(caller: Caller, args, task_type: str, request: str) -> 
     return 0 if ok else 2
 
 
+def offline_check(task_type: str, request: str) -> int:
+    """离线自检（默认路径）：不联网、不建房、不派发。
+
+    验证脚本自身可用（Caller 可导入可实例化、样例请求表完整），
+    让「跑全套测试」的电池拿到明确的 PASS，而不是真往生产发一条招呼。
+    """
+    checks = []
+    checks.append(("Caller 可导入", Caller is not None))
+    checks.append(("SAMPLE_REQUESTS 含 5 类", len(SAMPLE_REQUESTS) == 5))
+    checks.append(("样例请求非空", bool(request)))
+    ok = all(ok for _, ok in checks)
+    print(f"\n{'='*60}")
+    print(" StandCode Caller 测试 —— 离线自检（未加 --live，不真实派发）")
+    for name, passed in checks:
+        print(f"   {'✓' if passed else '✗'} {name}")
+    print(f"   （样例请求: {request[:40]}{'…' if len(request) > 40 else ''}）")
+    print(f"{'='*60}")
+    print(f"\n{'✅ 离线自检全部通过（未真实派发；要 e2e 冒烟请加 --live）' if ok else '❌ 离线自检失败'}")
+    return 0 if ok else 1
+
+
 def main():
     args = parse_args()
 
     task_type = args.task_type
     request = args.request or SAMPLE_REQUESTS.get(task_type, SAMPLE_REQUESTS["general"])
+
+    if not args.live:
+        return offline_check(task_type, request)
 
     caller = Caller()
 

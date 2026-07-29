@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""StandCode end-to-end dispatch 测试：用 areco API 派发任务给 stand。"""
+"""StandCode end-to-end dispatch 测试：用 areco API 派发任务给 stand。
+
+⚠️ 本脚本打的是生产 areco(8790)：建真房间、起真 Stand、烧真 token。
+必须显式加 --live 才真实派发；不加只做离线自检（不联网）。
+2026-07-29 教训：施工 Worker 跑 test 电池，本脚本默认请求
+「请用一句话解释什么是回文数。」被打进生产（「Stand Dispatch <epoch>」房）。
+"""
 import argparse
-import requests
 import time
 
 ARECO_BASE = "http://127.0.0.1:8790"
 
 
 def dispatch(body: str, template_id: str, timeout: int = 120):
+    import requests
+
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
 
@@ -56,8 +63,21 @@ def dispatch(body: str, template_id: str, timeout: int = 120):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="真实派发到生产 areco（不加则只做离线自检，不联网不建房）",
+    )
     parser.add_argument("--body", default="请用一句话解释什么是回文数。")
     parser.add_argument("--template", default="workbuddy-deepseek-pro")
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
+    if not args.live:
+        print("=" * 60)
+        print(" StandCode e2e dispatch 测试 —— 离线自检（未加 --live，不真实派发）")
+        print("   ✓ 参数解析正常")
+        print(f"   （样例请求: {args.body[:40]}）")
+        print("=" * 60)
+        print("\n✅ 离线自检通过（未真实派发；要 e2e 冒烟请加 --live）")
+        raise SystemExit(0)
     dispatch(args.body, args.template, args.timeout)
