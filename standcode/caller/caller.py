@@ -195,13 +195,15 @@ UNHEALTHY_PATH = Path(
 UNHEALTHY_FAIL_LIMIT = int(_conf_float("STANDCODE_UNHEALTHY_FAILS", "unhealthy_fail_limit", 2))
 UNHEALTHY_TTL_SEC = _conf_float("STANDCODE_UNHEALTHY_TTL", "unhealthy_ttl_sec", 1800)
 
-# ── 暖池 standby pool + plan 预热（2026-07-26 提速批件）──────────────────
+# ── 暖池 standby pool + plan 预热（2026-07-26 提速批件；2026-07-29 高律师令关闭）────
 # 一单冷派发的固定税 ≈ 12-15s：spawn 后 areco 侧 8s 注入下限（MIN_BOOT）+ relay 2s
 # tick + onceQuiet 1.2s + BOOT_WAIT。暖池把这笔税移出关键路径：预先建房+spawn 好
 # 「待命 Stand」（TUI 空闲不调模型 = 零 token；房名「⚙待命·<模板>」留在看板），
 # dispatch 认领即注入，用掉 inline 补胎。isolated 派发不走暖池——cwd 在 spawn 时定。
 # 池文件：~/.standcode/standby/<模板>--<房id>.json；认领 = os.rename 原子抢占。
-STANDBY_ENABLED = _conf_bool("STANDCODE_STANDBY", "standby_pool", True)
+# 2026-07-29 高律师令：关闭预热/驻留提速（看板上每个模板多开一个待命进程），
+# 开关常量化=False、机制代码保留不删；派发回到现派现 spawn（慢 12-15s 可接受）。
+STANDBY_ENABLED = False  # 原：_conf_bool("STANDCODE_STANDBY", "standby_pool", True)
 STANDBY_MAX_AGE_SEC = _conf_float("STANDCODE_STANDBY_MAX_AGE", "standby_max_age_sec", 7200)
 STANDBY_POOL_SIZE = int(_conf_float("STANDCODE_STANDBY_POOL_SIZE", "standby_pool_size", 1))
 STANDBY_DIR = Path(
@@ -210,7 +212,8 @@ STANDBY_DIR = Path(
 # plan 两段式预热：派 Thinker 的同时同房 add_stand Worker（不发任务，投递按 to_agent
 # 定向不会误收）——Thinker 段跑着的时候 Worker 把 spawn+注入下限静默付清，
 # 计划一出直接注入，第二段冷启动移出关键路径。
-PREWARM_WORKER = _conf_bool("STANDCODE_PREWARM_WORKER", "prewarm_worker", True)
+# 2026-07-29 高律师令：随暖池一同关闭（同属预热/驻留提速），代码保留不删。
+PREWARM_WORKER = False  # 原：_conf_bool("STANDCODE_PREWARM_WORKER", "prewarm_worker", True)
 
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
@@ -795,11 +798,21 @@ ACCEPT_SELF_REPORT = "完工回复末尾单列一行「产物路径：/绝对路
 #   commit:/仓库路径             → 回复里报的 commit hash 真实存在于该仓库
 _CRIT_DSL_RE = re.compile(r"^(file_contains|result_contains|file|commit)\s*[:：]\s*(.+)$")
 _CRIT_OUTPUT_RE = re.compile(r"^产物路径\s*[:：]\s*(.+?)\s*$")
-# 落盘动词后的绝对路径 → 自动抽成 file 判据（「写到 /tmp/x.txt」这类最常见口头判据）
-_CRIT_PATH_VERB_RE = re.compile(
-    r"(?:写到|写进|写入|存到|存进|保存到|保存至|输出到|落到|落盘到|追加到|生成到|导出到)"
-    r"\s*[：:]?\s*[（(]?\s*((?:/|~/)[^\s，。；;,、）)\]』」」*]+)"
-)
+# 产物路径行的多路径分隔符：顿号/分号/逗号（全半角）。五个路径顿号连成一串时逐个
+# 拆成独立判据、独立校验——禁止把整行当成一个路径（2026-07-29 高律师令）。
+_PATH_SPLIT_RE = re.compile(r"[、；;，,]")
+
+
+def _output_paths(value: str) -> list[str]:
+    """「产物路径：」的值 → 独立路径列表。只认 / 或 ~ 开头的绝对路径；「无/None/-」不算。"""
+    out: list[str] = []
+    for piece in _PATH_SPLIT_RE.split(value or ""):
+        p = piece.strip().strip("`'\"")
+        if p and p not in ("无", "None", "-") and (p.startswith("/") or p.startswith("~")):
+            out.append(p)
+    return out
+
+
 # commit hash 候选：≥7 位十六进制且至少含一个字母（滤掉 20260729 这类纯数字日期）
 _COMMIT_HASH_RE = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
 
@@ -807,8 +820,13 @@ _COMMIT_HASH_RE = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
 def _criteria_from_text(text: str, origin: str = "explicit") -> list[dict]:
     """扫一段文本，抽出全部可机检判据。
 
-    三路来源：① DSL 行（file:/file_contains:/result_contains:/commit:）
-    ② 「产物路径：/xxx」行 ③ 落盘动词后的绝对路径（origin 标 auto）。
+    只认两路显式声明（2026-07-29 高律师令·验收闸去机械化）：
+    ① DSL 行（file:/file_contains:/result_contains:/commit:）
+    ② 「产物路径：/xxx」行（顿号/分号分隔的多个路径逐个拆成独立判据）。
+    正文其他内容一律不提取为判据——原「落盘动词后绝对路径 → file 判据」自动提取
+    把任务书正文的中文枚举（顿号并列的工具名/一串路径）误判成机检目标，造成
+    假打回+假升级（2026-07-29 两次实测笑话），已删。提取不到就标无可机检判据
+    转人工（agent_reported），不许瞎猜。
     返回 [{"kind","arg","raw","origin"}]，按出现序去重。
     """
     crits: list[dict] = []
@@ -836,28 +854,23 @@ def _criteria_from_text(text: str, origin: str = "explicit") -> list[dict]:
             continue
         m = _CRIT_OUTPUT_RE.match(s)
         if m:
-            p = m.group(1).strip().strip("`'\"")
-            if p not in ("无", "None", "-") and (p.startswith("/") or p.startswith("~")):
+            for p in _output_paths(m.group(1)):
                 add("file", p, s, "explicit")
-    for m in _CRIT_PATH_VERB_RE.finditer(text or ""):
-        add("file", m.group(1), m.group(0), origin if origin != "explicit" else "auto")
     return crits
 
 
 def extract_acceptance(request: str) -> dict:
     """只解析不改写：从作业单文本里提取验收信息（plan 模式与收尾复核用）。
 
-    返回 {"criteria": [...], "source": "explicit"|"auto"|"default"}——
-    explicit=用户自己写了判据/验收段；auto=仅从落盘动词自动抽到路径；
-    default=什么都没抽到（验收只能靠 Worker 完工自报产物路径反向机检）。
+    返回 {"criteria": [...], "source": "explicit"|"default"}——
+    explicit=用户自己写了判据/验收段/产物路径；default=什么都没抽到
+    （验收只能靠 Worker 完工自报产物路径反向机检，仍抽不到 → 无可机检判据转人工）。
     """
     req = request or ""
     crits = _criteria_from_text(req)
     has_section = bool(re.search(r"验收判据|验收标准|完成判据|验收栏", req)) or ACCEPT_HEADER in req
-    if has_section or any(c["origin"] == "explicit" for c in crits):
+    if has_section or crits:
         source = "explicit"
-    elif crits:
-        source = "auto"
     else:
         source = "default"
     return {"criteria": crits, "source": source}
@@ -961,11 +974,15 @@ def verify_acceptance(
     """
     acc = acceptance or {}
     crits = [dict(c) for c in (acc.get("criteria") or []) if isinstance(c, dict)]
-    # Worker 完工自报的「产物路径：/xxx」也算它给出的机检承诺——报了就要对得上
-    for c in _criteria_from_text(result_text or "", origin="self_report"):
-        if c["kind"] == "file":
-            c["origin"] = "self_report"
-            crits.append(c)
+    # Worker 完工自报的「产物路径：/xxx」也算它给出的机检承诺——报了就要对得上。
+    # 2026-07-29 高律师令：自报只认「产物路径：」行，逐路径独立校验；回复正文
+    # 其他内容（含 DSL 字样、落盘动词）一律不提取为判据，提取不到转人工不瞎猜。
+    for raw in (result_text or "").splitlines():
+        s = raw.strip().lstrip("-·*•").strip()
+        m = _CRIT_OUTPUT_RE.match(s)
+        if m:
+            for p in _output_paths(m.group(1)):
+                crits.append({"kind": "file", "arg": p, "raw": s, "origin": "self_report"})
     checks: list[dict] = []
     seen: set[str] = set()
     for c in crits:
@@ -7576,7 +7593,7 @@ def _cmd_pool(args) -> int:
         out["sweep"] = caller.standby_sweep()
     if args.warm:
         if not STANDBY_ENABLED:
-            print("暖池已关（STANDCODE_STANDBY=off），不播种")
+            print("暖池已关（STANDBY_ENABLED=False，2026-07-29 高律师令），不播种")
             return 0
         targets = [args.template] if args.template else list(dict.fromkeys(
             [caller.default_worker_id, caller.default_thinker_id]))

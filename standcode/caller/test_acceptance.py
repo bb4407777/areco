@@ -48,12 +48,11 @@ def test_ensure_block() -> None:
     check(C.ACCEPT_HEADER in req2, "默认模板：追加了验收栏")
     check("产物路径" in req2 and "红线提醒" in req2, "默认模板：三栏齐（判据/产物路径/红线）")
     check(acc["source"] == "default" and not acc["criteria"], "默认模板：source=default 无预置判据")
-    # 2) 落盘动词 → 自动抽 file 判据
+    # 2) 正文落盘动词 → 不提取（2026-07-29 高律师令：文件判据只认「产物路径：」两路）
     req2, acc = C.ensure_acceptance_block("把 caller.py 行数统计写到 /tmp/x.txt")
-    check(any(c["kind"] == "file" and c["arg"] == "/tmp/x.txt" for c in acc["criteria"]),
-          "落盘动词：自动抽出 file:/tmp/x.txt")
-    check(acc["source"] == "auto", "落盘动词：source=auto")
-    check("file:/tmp/x.txt" in req2, "落盘动词：判据写进了作业单")
+    check(not acc["criteria"] and acc["source"] == "default",
+          "正文落盘动词：不再自动抽判据，source=default")
+    check("file:/tmp/x.txt" not in req2, "正文落盘动词：不把正文路径写进判据栏")
     # 3) 幂等：已带验收栏不重复追加
     req3, acc3 = C.ensure_acceptance_block(req2)
     check(req3 == req2 and req3.count(C.ACCEPT_HEADER) == 1, "幂等：二次调用不叠加")
@@ -83,6 +82,20 @@ def test_parse() -> None:
           "产物路径与判据同路径去重")
     acc2 = C.extract_acceptance("产物路径：无")
     check(not acc2["criteria"] and acc2["source"] == "default", "「产物路径：无」不算判据")
+    # 2026-07-29 高律师令（验收闸去机械化）：正文枚举不提取；产物路径行多路径逐个独立
+    acc3 = C.extract_acceptance(
+        "用 court-docx文书/opencli/OCR（macOS Vision）等工具处理，参考 /tmp/a.txt、/tmp/b.txt。"
+    )
+    check(not acc3["criteria"] and acc3["source"] == "default",
+          "正文顿号枚举（工具名/路径串）：一律不提取为判据")
+    acc4 = C.extract_acceptance("产物路径：/tmp/a.txt、/tmp/b.txt、/tmp/c.txt")
+    args4 = [c["arg"] for c in acc4["criteria"] if c["kind"] == "file"]
+    check(args4 == ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"],
+          "产物路径行顿号串：拆成 3 条独立 file 判据，不并整行")
+    acc5 = C.extract_acceptance("产物路径：/tmp/a.txt;/tmp/b.txt，/tmp/c.txt（终稿）")
+    args5 = [c["arg"] for c in acc5["criteria"] if c["kind"] == "file"]
+    check(args5 == ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"],
+          "产物路径行混用分隔符+全角注释：仍逐路径独立")
 
 
 # ── verify_acceptance：机检 ────────────────────────────────────────
@@ -131,6 +144,17 @@ def test_verify() -> None:
     v = C.verify_acceptance({"criteria": [], "source": "default"},
                             result_text="纯分析结论如下…\n产物路径：无")
     check(v["level"] == "agent_reported" and "无" in v["note"], "自报「无」→ agent_reported")
+    # 2026-07-29 高律师令：自报多路径逐条独立机检；正文提到的路径不提取
+    v = C.verify_acceptance({"criteria": [], "source": "default"},
+                            result_text=f"干完了\n产物路径：{good}、/tmp/definitely-missing-xyz.txt")
+    file_checks = [c for c in v["checks"] if c["check"].startswith("file:")]
+    check(v["level"] == "check_failed" and len(file_checks) == 2
+          and file_checks[0]["passed"] and not file_checks[1]["passed"],
+          "自报两路径一真一假：逐条独立，假的那条打回（不并整行、不一票全否）")
+    v = C.verify_acceptance({"criteria": [], "source": "default"},
+                            result_text="结果已写到 /tmp/definitely-missing-xyz.txt，请查收")
+    check(v["level"] == "agent_reported" and not v["checks"],
+          "正文落盘动词提到的路径：不提取，无可机检判据转人工")
 
 
 def test_verify_commit() -> None:
