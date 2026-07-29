@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+
+import { runCli } from "../src/cli/workbuddy-pty.mjs";
+
+runCli().catch((error) => {
+  process.stderr.write(`[WorkBuddy] ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

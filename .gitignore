@@ -2,8 +2,8 @@ node_modules/
 dist/
 data/
 config.json
-# 本机 agent 启动器（绝对路径/私有配置），不入仓
-bin/
+# 本机 agent 启动器（绝对路径/私有配置），不入仓；仅忽略仓根 bin/，子目录 bin/（如 workbuddy-gpt56/bin/ 源码）正常入仓
+/bin/
 *.log
 .DS_Store
 
