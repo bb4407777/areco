@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """作业单验收栏 + 结果把关闸的离线测试（2026-07-29 批件①）。
 
+2026-07-29 高律师令验收闸整体关停（判据提取误伤三次）：ACCEPTANCE_GATE_ENABLED
+默认 False，验收栏照写但不机检/不打回/不升级。闸逻辑保留未删，把关闸相关测试
+（test_gate / test_gate_switch 开闸半）改临时开闸验证口径——同三闸先例。
+
 全程不碰 areco、不烧额度：Caller 用 object.__new__ 绕过 __init__，
 send_message / poll_result 全 mock；INBOX_DIR 重指到临时目录防污染生产收信箱。
 跑法：python3 caller/test_acceptance.py   （零依赖，不需要 pytest）
@@ -201,58 +205,98 @@ def _fake_caller():
 
 
 def test_gate() -> None:
-    print("\n[gate_result] 把关闸三分支")
-    tgt = pathlib.Path(_TEST_ISO) / "gate.txt"
-    if tgt.exists():
+    # 2026-07-29 高律师令验收闸整体关停：开关默认 False，把关闸三分支的闸逻辑
+    # 保留未删——测试改临时开闸验证口径（同三闸先例），跑完恢复原值。
+    print("\n[gate_result] 把关闸三分支（临时开闸验证）")
+    orig = C.ACCEPTANCE_GATE_ENABLED
+    C.ACCEPTANCE_GATE_ENABLED = True
+    try:
+        tgt = pathlib.Path(_TEST_ISO) / "gate.txt"
+        if tgt.exists():
+            tgt.unlink()
+        acc = {"criteria": [{"kind": "file", "arg": str(tgt), "raw": "", "origin": "explicit"}],
+               "source": "explicit"}
+        disp = {"task_id": "t1", "session_id": "room-test", "room_id": "r1",
+                "stand_name": "Stand-W", "stand_session_id": "s1", "role": "worker",
+                "template_id": "claude-glm52", "message_id": 1}
+
+        # 分支 1：机检直接过（文件在场）→ 不打回
+        tgt.write_text("data")
+        caller = _fake_caller()
+        caller.send_message = lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该打回"))
+        g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "done"}, acc)
+        check(g["verification"]["level"] == "verified" and not g["bounced"], "判据过 → 不打回")
+
+        # 分支 2：首轮谎报 → 打回（三段式送达同房）→ 补齐 → 复检 verified
         tgt.unlink()
-    acc = {"criteria": [{"kind": "file", "arg": str(tgt), "raw": "", "origin": "explicit"}],
-           "source": "explicit"}
-    disp = {"task_id": "t1", "session_id": "room-test", "room_id": "r1",
-            "stand_name": "Stand-W", "stand_session_id": "s1", "role": "worker",
-            "template_id": "claude", "message_id": 1}
+        caller = _fake_caller()
 
-    # 分支 1：机检直接过（文件在场）→ 不打回
-    tgt.write_text("data")
-    caller = _fake_caller()
-    caller.send_message = lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该打回"))
-    g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "done"}, acc)
-    check(g["verification"]["level"] == "verified" and not g["bounced"], "判据过 → 不打回")
+        def fake_send(team, to, body, **k):
+            caller.sent.append((team, to, body))
+            tgt.write_text("补齐了")  # Worker 收到打回后补作业
+            return 42
 
-    # 分支 2：首轮谎报 → 打回（三段式送达同房）→ 补齐 → 复检 verified
-    tgt.unlink()
-    caller = _fake_caller()
+        caller.send_message = fake_send
+        caller.poll_result = lambda **k: {"status": "completed", "result_text": "已补齐\n产物路径：" + str(tgt)}
+        g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "我完成了（其实没有）"}, acc)
+        check(g["bounced"] and not g["escalated"], "谎报被抓 → 打回一次后过")
+        check(g["verification"]["level"] == "verified" and g["verification"]["attempts"] == 2,
+              "复检 verified，attempts=2")
+        team, to, body = caller.sent[0]
+        check(team == "room-test" and to == "Stand-W", "打回送达同房同 Stand")
+        check("一、差距" in body and "二、锚点" in body and "三、修改范围" in body,
+              "打回话术是三段式")
+        check("补齐（第 2 轮）" in g["poll"]["result_text"], "两轮结果合并入回执")
 
-    def fake_send(team, to, body, **k):
-        caller.sent.append((team, to, body))
-        tgt.write_text("补齐了")  # Worker 收到打回后补作业
-        return 42
+        # 分支 3：打回后仍不过 → 升级人工
+        tgt.unlink()
+        caller = _fake_caller()
+        caller.send_message = lambda *a, **k: 43
+        caller.poll_result = lambda **k: {"status": "completed", "result_text": "还是嘴上说完成"}
+        g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "完成"}, acc)
+        check(g["escalated"] and g["verification"]["level"] == "check_failed", "二次不过 → 升级人工")
+        check("升级" in g["verification"].get("note", ""), "note 写明升级")
 
-    caller.send_message = fake_send
-    caller.poll_result = lambda **k: {"status": "completed", "result_text": "已补齐\n产物路径：" + str(tgt)}
-    g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "我完成了（其实没有）"}, acc)
-    check(g["bounced"] and not g["escalated"], "谎报被抓 → 打回一次后过")
-    check(g["verification"]["level"] == "verified" and g["verification"]["attempts"] == 2,
-          "复检 verified，attempts=2")
-    team, to, body = caller.sent[0]
-    check(team == "room-test" and to == "Stand-W", "打回送达同房同 Stand")
-    check("一、差距" in body and "二、锚点" in body and "三、修改范围" in body,
-          "打回话术是三段式")
-    check("补齐（第 2 轮）" in g["poll"]["result_text"], "两轮结果合并入回执")
+        # 分支 3b：打回消息发送失败 → 如实升级，不假装过
+        caller = _fake_caller()
+        caller.send_message = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db locked"))
+        g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "完成"}, acc)
+        check(g["escalated"] and not g["bounced"], "打回发送失败 → 升级（fail-closed）")
+    finally:
+        C.ACCEPTANCE_GATE_ENABLED = orig
 
-    # 分支 3：打回后仍不过 → 升级人工
-    tgt.unlink()
-    caller = _fake_caller()
-    caller.send_message = lambda *a, **k: 43
-    caller.poll_result = lambda **k: {"status": "completed", "result_text": "还是嘴上说完成"}
-    g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "完成"}, acc)
-    check(g["escalated"] and g["verification"]["level"] == "check_failed", "二次不过 → 升级人工")
-    check("升级" in g["verification"].get("note", ""), "note 写明升级")
 
-    # 分支 3b：打回消息发送失败 → 如实升级，不假装过
-    caller = _fake_caller()
-    caller.send_message = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db locked"))
-    g = C.Caller.gate_result(caller, disp, {"status": "completed", "result_text": "完成"}, acc)
-    check(g["escalated"] and not g["bounced"], "打回发送失败 → 升级（fail-closed）")
+# ── ACCEPTANCE_GATE_ENABLED 总开关（2026-07-29 高律师令验收闸关停）────────
+def test_gate_switch() -> None:
+    print("\n[ACCEPTANCE_GATE_ENABLED] 验收闸总开关")
+    check(not C.ACCEPTANCE_GATE_ENABLED, "开关常量默认 False（2026-07-29 高律师令关停）")
+    acc = {"criteria": [{"kind": "file", "arg": "/tmp/definitely-missing-xyz.txt",
+                         "raw": "", "origin": "explicit"}], "source": "explicit"}
+    spec = {"mode": "worker", "request": "写个文件", "acceptance": acc}
+
+    def fin_of(task_id: str):
+        caller = _fake_caller()
+        caller.collect_stand_cost = lambda sid: None
+        return C._finalize_waiter(
+            caller, task_id, {"task_id": task_id, "spec": spec},
+            {"status": "completed", "result_text": "完成", "room_id": "r1"},
+            spec=spec, files=[], request_summary=None,
+        )
+
+    # 关闸（生产口径）：判据不机检，结果直报并如实标注
+    v = fin_of("sw-off")["verification"]
+    check(v["level"] == "agent_reported" and not v["checks"]
+          and "验收闸已关停" in (v.get("note") or ""),
+          "关闸：不机检不打回，agent_reported 直报并标注")
+
+    # 临时开闸验证（同三闸先例）：机检恢复，假路径照抓
+    orig = C.ACCEPTANCE_GATE_ENABLED
+    C.ACCEPTANCE_GATE_ENABLED = True
+    try:
+        v2 = fin_of("sw-on")["verification"]
+        check(v2["level"] == "check_failed", "临时开闸：判据机检恢复，假路径 check_failed")
+    finally:
+        C.ACCEPTANCE_GATE_ENABLED = orig
 
 
 # ── _finalize_waiter：旧式派单标注「无判据未验」────────────────────────
@@ -288,6 +332,7 @@ def main() -> int:
     test_verify_commit()
     test_rejection()
     test_gate()
+    test_gate_switch()
     test_finalize_legacy_note()
     print()
     if _fails:

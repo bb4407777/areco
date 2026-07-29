@@ -810,6 +810,15 @@ def verify_completion(files: list | None = None, output_path: str | None = None)
 # 验收栏说清「怎么算过」，打回来时强制「差距/锚点/范围」三段式。派单侧
 # ensure_acceptance_block 自动补齐三栏（判据/产物路径/红线），回执侧 verify_acceptance
 # 把能机检的全验，Caller.gate_result 负责「不过→打回一次→复检→仍不过升级人工」。
+#
+# ── 验收闸总开关（2026-07-29 高律师令：验收闸整体关停）──────────────────
+# 判据提取当日三次误伤（正文枚举误判路径 / 顿号连路径 / 自报带「」节名），
+# 高律师令整个关掉。开关常量化不删死：False 时——
+#   · 验收栏三栏仍照常追加（信息价值还在），只是不再机检、不打回、不升级，结果直报；
+#   · dispatch_and_relay 的 gate_result 把关闸整段跳过；
+#   · _finalize_waiter 的验收判据机检跳过，回执如实标注「闸停未机检」。
+# 判据提取/机检/打回/升级逻辑全部保留，重开改 True 即可（同三闸先例）。
+ACCEPTANCE_GATE_ENABLED = False
 ACCEPT_HEADER = "【作业单·验收栏】"
 ACCEPT_REDLINE = (
     "红线提醒：法条/案号/判例必须真实可溯源，禁编造；密钥/token/密码不得写进回复或产物；"
@@ -914,10 +923,14 @@ def ensure_acceptance_block(request: str) -> tuple[str, dict]:
         acceptance["block_appended"] = False
         return req, acceptance
 
-    lines = ["", f"——{ACCEPT_HEADER}（Caller 自动追加，完工按此交付，机检不过会被打回）——"]
+    lines = ["", f"——{ACCEPT_HEADER}（Caller 自动追加，完工按此交付"
+                 + ("，机检不过会被打回" if ACCEPTANCE_GATE_ENABLED
+                    else "；验收闸已关停，不机检不打回，结果直报")
+                 + "）——"]
     crits = acceptance["criteria"]
     if acceptance["source"] != "explicit":
-        lines.append("验收判据（能机检的会逐条真跑）：")
+        lines.append("验收判据" + ("（能机检的会逐条真跑）：" if ACCEPTANCE_GATE_ENABLED
+                                  else "（闸停期间仅作交付约定，不机检）："))
         if crits:
             for i, c in enumerate(crits, 1):
                 lines.append(f"{i}. {c['kind']}:{c['arg']}（文件存在且非空）")
@@ -927,7 +940,8 @@ def ensure_acceptance_block(request: str) -> tuple[str, dict]:
     prestated = {c["arg"] for c in crits}
     lines.append(
         "产物路径：" + ("；".join(sorted(prestated)) if prestated
-                     else "完工自报（格式见上；报了路径就会被机检）")
+                     else ("完工自报（格式见上；报了路径就会被机检）" if ACCEPTANCE_GATE_ENABLED
+                           else "完工自报（格式见上）"))
     )
     if "红线" not in req:
         lines.append(ACCEPT_REDLINE)
@@ -3844,8 +3858,10 @@ class Caller:
 
         # ── 结果把关闸（2026-07-29 批件①）：completed 且带验收栏 → 先机检再收口。
         # 位置必须在 finish_room 之前：归档级联杀 Stand，打回要趁房间还活着。
+        # 2026-07-29 高律师令验收闸整体关停（判据提取误伤三次）：ACCEPTANCE_GATE_ENABLED
+        # =False 时整段跳过——不机检不打回不升级，结果直报；闸逻辑保留，重开改 True。
         gate = None
-        if acceptance and poll.get("status") == "completed":
+        if ACCEPTANCE_GATE_ENABLED and acceptance and poll.get("status") == "completed":
             gate = self.gate_result(
                 dispatch_result, poll, acceptance,
                 files=[file_path] if file_path else [],
@@ -5329,13 +5345,22 @@ def _finalize_waiter(
                 # 把关闸已在派发链跑过（含打回/升级）——直接采信，不重跑
                 verification = gate_ver
             elif acceptance:
-                # 带验收栏但没走闸的路（plan 模式等）：判据机检照跑，只是不打回
-                verification = verify_acceptance(
-                    acceptance,
-                    result_text=result_text,
-                    files=files or [],
-                    output_path=(plan_parsed or {}).get("output_path"),
-                )
+                if ACCEPTANCE_GATE_ENABLED:
+                    # 带验收栏但没走闸的路（plan 模式等）：判据机检照跑，只是不打回
+                    verification = verify_acceptance(
+                        acceptance,
+                        result_text=result_text,
+                        files=files or [],
+                        output_path=(plan_parsed or {}).get("output_path"),
+                    )
+                else:
+                    # 2026-07-29 高律师令验收闸整体关停：判据不机检，结果直报并如实标注
+                    verification = {
+                        "level": "agent_reported",
+                        "checks": [],
+                        "criteria_source": acceptance.get("source", "unknown"),
+                        "note": "验收闸已关停（2026-07-29 高律师令），判据未机检，结果直报",
+                    }
             else:
                 # 旧式派单（spec 无验收栏，改动前落盘的 bg 回放等）：照常跑旧口径机检，
                 # 报告里如实标注「无判据未验」（批件①向后兼容项）
@@ -5725,6 +5750,8 @@ def _cmd_run(args) -> int:
     # 本就强制 Thinker 写「完成判据/最终产物落点」，再贴一份就是同一契约两处漂移；
     # think 不加（Thinker 交判断不交产物）；fanout 子任务结构另置，本批不动。
     # 位置在 resolve_mode 之后是刻意的：fast 车道按原始正文长度/关键词路由，追加块不参与路由。
+    # 2026-07-29 高律师令验收闸整体关停：ACCEPTANCE_GATE_ENABLED=False 时本段仍照跑
+    # （验收栏三栏信息价值还在），但后续机检/打回/升级全链路不再触发。
     acceptance = None
     if decision["mode"] in ("worker", "fast"):
         args.request, acceptance = ensure_acceptance_block(args.request)
