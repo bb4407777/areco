@@ -33,7 +33,7 @@ def check(name: str, cond: bool, detail: str = ""):
 
 def _sess(**kw):
     base = {
-        "id": "sess-1", "templateId": "c5", "status": "running",
+        "id": "sess-1", "templateId": "claude-fable5", "status": "running",
         "archived": False, "roomId": "room-1", "trafficState": "conclusion",
         "trafficUpdatedAt": 1000,
     }
@@ -62,71 +62,71 @@ def _caller(sessions, rooms, ctx=None):
 # ── 判据 c + 例外（_session_reuse_decision 层）────────────────────────
 c = _caller([], [])
 
-stand, reason = c._session_reuse_decision("c5", "把 caller.py 的注释改一下", fresh=True)
+stand, reason = c._session_reuse_decision("claude-fable5", "把 caller.py 的注释改一下", fresh=True)
 check("fresh=True → 新会话", stand is None and "干净上下文" in reason, reason)
 
-stand, reason = c._session_reuse_decision("c5", "这个任务需要干净上下文，别带旧记忆")
+stand, reason = c._session_reuse_decision("claude-fable5", "这个任务需要干净上下文，别带旧记忆")
 check("正文含「干净上下文」标记 → 新会话", stand is None and "干净上下文" in reason, reason)
 
-stand, reason = c._session_reuse_decision("c5", "两个模型擂台对比同一道题")
+stand, reason = c._session_reuse_decision("claude-fable5", "两个模型擂台对比同一道题")
 check("擂台 → 强制新会话（公平性）", stand is None and "擂台" in reason, reason)
 
-stand, reason = c._session_reuse_decision("c5", "跑一轮 benchmark 看分数")
+stand, reason = c._session_reuse_decision("claude-fable5", "跑一轮 benchmark 看分数")
 check("benchmark(ASCII 小写) → 强制新会话", stand is None and "擂台" in reason, reason)
 
-stand, reason = c._session_reuse_decision("c5", "核实某案件判决书的金额")
+stand, reason = c._session_reuse_decision("claude-fable5", "核实某案件判决书的金额")
 check("法律案件词 → 强制新会话（防串味）", stand is None and "法律案件" in reason, reason)
 
 _orig = C.SESSION_REUSE_ENABLED
 C.SESSION_REUSE_ENABLED = False
-stand, reason = c._session_reuse_decision("c5", "改代码")
+stand, reason = c._session_reuse_decision("claude-fable5", "改代码")
 check("开关关 → 新会话", stand is None and "SESSION_REUSE_ENABLED" in reason, reason)
 C.SESSION_REUSE_ENABLED = _orig
 
 # ── 判据 a/b（find_reusable_session 层）──────────────────────────────
 c = _caller([_sess()], [_room()], ctx=50_000)
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("空闲旧会话 → 复用命中", stand is not None and stand["kind"] == "session_reuse"
       and stand["room_created"] is False and stand["stand_name"] == "Worker-c5"
       and "复用旧会话(命中缓存" in reason, reason)
 
 c = _caller([_sess(trafficState="working")], [_room()])
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("working → 无空闲", stand is None and "无空闲" in reason, reason)
 
 c = _caller([_sess(trafficState="needs-user")], [_room()])
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("needs-user（屏上挂待选框）→ 无空闲", stand is None and "无空闲" in reason, reason)
 
 c = _caller([_sess(trafficState="")], [_room()])
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("红绿灯查无值 → 按忙处理不复用", stand is None, reason)
 
 c = _caller([_sess(status="exited")], [_room()])
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("进程已死 → 无空闲", stand is None and "无空闲" in reason, reason)
 
 c = _caller([_sess(templateId="hy3")], [_room()])
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("不同模板 → 无空闲", stand is None and "无空闲" in reason, reason)
 
 c = _caller([_sess()], [_room()], ctx=C.SESSION_REUSE_CONTEXT_LIMIT + 1)
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("上下文近满 → 新会话", stand is None and "近满" in reason, reason)
 
 c = _caller([_sess()], [_room()], ctx=None)
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("上下文用量不可得 → 凭 areco 空闲信号放行（不硬编）",
       stand is not None and "上下文用量不可得" in reason, reason)
 
 c = _caller([_sess()], [], ctx=1000)  # 房间列表为空（已归档/查无）
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("所在房间不可用 → 新会话", stand is None and "房间不可用" in reason, reason)
 
 _busy = _sess(id="sess-busy", trafficState="working", trafficUpdatedAt=2000)
 _idle = _sess(id="sess-1", trafficState="conclusion", trafficUpdatedAt=1000)
 c = _caller([_busy, _idle], [_room()], ctx=1000)
-stand, reason = c.find_reusable_session("c5")
+stand, reason = c.find_reusable_session("claude-fable5")
 check("忙的跳过、空闲的命中", stand is not None and stand["stand_session_id"] == "sess-1", reason)
 
 # ── _session_context_tokens：真 transcript 读取 ─────────────────────
@@ -149,7 +149,7 @@ check("无 transcript → None（不硬编）",
 c = _caller([_sess()], [_room()], ctx=1000)
 c._assert_template_exists = lambda tid: None
 c.send_message = lambda team, stand, req: 42
-d = c.dispatch("把 caller.py 的注释改一下", template_id="c5", mode="worker")
+d = c.dispatch("把 caller.py 的注释改一下", template_id="claude-fable5", mode="worker")
 check("dispatch 复用路：route_reason 写明命中缓存",
       d.get("route_reason", "").startswith("复用旧会话(命中缓存"), d.get("route_reason", ""))
 check("dispatch 复用路：不建房不 spawn",
@@ -167,14 +167,14 @@ c2.send_message = lambda team, stand, req: 7
 import caller as _C_mod  # BOOT_WAIT 置零，离线测试别真睡
 _orig_boot = _C_mod.BOOT_WAIT_SEC
 _C_mod.BOOT_WAIT_SEC = 0
-d2 = c2.dispatch("把 caller.py 的注释改一下", template_id="c5", mode="worker")
+d2 = c2.dispatch("把 caller.py 的注释改一下", template_id="claude-fable5", mode="worker")
 _C_mod.BOOT_WAIT_SEC = _orig_boot
 check("dispatch 无空闲：route_reason 写明新会话原因",
       d2.get("route_reason", "").startswith("新会话(无空闲"), d2.get("route_reason", ""))
 check("dispatch 新会话路：建房 + add_stand",
       d2.get("room_created") is True and d2.get("stand_reused") is False, "")
 
-d3 = c2.dispatch("核实某案件判决书的金额", template_id="c5", mode="worker")
+d3 = c2.dispatch("核实某案件判决书的金额", template_id="claude-fable5", mode="worker")
 check("dispatch 法律案件：route_reason 写明隔离原因",
       "法律案件" in d3.get("route_reason", ""), d3.get("route_reason", ""))
 

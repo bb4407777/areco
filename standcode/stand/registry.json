@@ -1,56 +1,57 @@
 {
   "version": "2",
   "_note_default_thinker": "07-28 高律师设置页选定 flash（workbuddy-deepseek=DeepSeek-v4-flash）为默认 Thinker",
+  "_note_rename": "2026-07-29 高律师令：非 workbuddy 系模板 id 改 harness-模型 格式（Kimi 施工）：claude→claude-glm52 / c5→claude-fable5 / cfm→claude-opus5 / kimi→kimi-k3 / agnes→claude-agnes25flash / qoder→qoder-qwen38 / codex→codex-gpt56。workbuddy 系 id 同日经高律师纠正保留原名（workbuddy / workbuddy-deepseek / workbuddy-deepseek-pro / workbuddy-gpt56-remote）——本意只是设置页显示名写清 harness+模型，不动底层 id。name 字段统一「Harness 模型」格式。",
   "default_thinker": "workbuddy-deepseek",
   "default_worker": "workbuddy",
-  "default_heavy_worker": "claude",
+  "default_heavy_worker": "claude-glm52",
   "default_fast_worker": "workbuddy",
   "task_type_defaults": {
     "think": "workbuddy-deepseek-pro",
     "plan": "workbuddy-deepseek-pro",
-    "execute": "claude",
-    "work": "claude",
+    "execute": "claude-glm52",
+    "work": "claude-glm52",
     "fast": "workbuddy"
   },
   "templates": [
     {
       "id": "workbuddy-deepseek-pro",
-      "name": "Thinker（WorkBuddy DeepSeek-v4-pro）",
+      "name": "WorkBuddy DeepSeek Pro",
       "role": "thinker"
     },
     {
-      "id": "claude",
-      "name": "主力 Worker（Claude CLI + GLM-5.2，法律/代码重活）",
+      "id": "claude-glm52",
+      "name": "Claude Code GLM-5.2",
       "role": "worker"
     },
     {
       "id": "workbuddy",
-      "name": "默认 Worker（WorkBuddy hy3=会员3，轻活默认车道）",
+      "name": "WorkBuddy hy3",
       "role": "worker"
     },
     {
       "id": "workbuddy-deepseek",
-      "name": "快速 Worker（WorkBuddy DeepSeek-v4-flash）",
+      "name": "WorkBuddy DeepSeek",
       "role": "worker"
     },
     {
       "id": "zcode",
-      "name": "ZCode",
+      "name": "ZCode（占位未接线：areco config.json 无此模板）",
       "role": "worker"
     },
     {
-      "id": "kimi",
-      "name": "Kimi K3（kimi CLI）",
+      "id": "kimi-k3",
+      "name": "Kimi K3",
       "role": "worker"
     },
     {
-      "id": "agnes",
-      "name": "Agnes 2.5 Flash（Claude Code harness）",
+      "id": "claude-agnes25flash",
+      "name": "Claude Code Agnes2.5Flash",
       "role": "worker"
     },
     {
-      "id": "c5",
-      "name": "Fable5（Claude CLI freemodel · areco c5）",
+      "id": "claude-fable5",
+      "name": "Claude Code Fable5",
       "role": "thinker"
     }
   ]

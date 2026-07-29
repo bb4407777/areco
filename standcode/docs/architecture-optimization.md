@@ -36,9 +36,9 @@
 |------|------|---------------|------|
 | Caller | Hermes（微信平台） | — | 路由、决策、派发、主动轮询、代发微信 |
 | Thinker | WorkBuddy + DeepSeek-v4-pro | `stand-thinker-workbuddy` | 规划、分析、判断、路由 |
-| Worker | Claude CLI + GLM-5.2 | `claude` | 代码、搜索、文书、下载、总结 |
+| Worker | Claude CLI + GLM-5.2 | `claude-glm52` | 代码、搜索、文书、下载、总结 |
 
-备选 Worker：`workbuddy-deepseek`（DeepSeek-v4-flash）、`workbuddy-deepseek-pro`、`codex`（gpt-5.6-sol）、`zcode`。
+备选 Worker：`workbuddy-deepseek`（DeepSeek-v4-flash）、`workbuddy-deepseek-pro`、`codex-gpt56`（gpt-5.6-sol）、`zcode`。
 
 ### 1.3 任务流转（完整管线）
 

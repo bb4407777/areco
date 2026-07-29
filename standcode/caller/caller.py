@@ -306,7 +306,7 @@ _ASK_CONF = _LOCAL_CONF.get("ask_channel") or {}
 ASK_MEMBER = os.environ.get("STANDCODE_ASK_MEMBER") or _ASK_CONF.get("member") or "Fable5"
 ASK_ROOM_ID = os.environ.get("STANDCODE_ASK_ROOM") or _ASK_CONF.get("room_id") or ""
 ASK_TEMPLATE_FALLBACK = (
-    os.environ.get("STANDCODE_ASK_TEMPLATE") or _ASK_CONF.get("template") or "c5"
+    os.environ.get("STANDCODE_ASK_TEMPLATE") or _ASK_CONF.get("template") or "claude-fable5"
 )
 # 忙判定：working=正在干活；needs-user=卡在终端交互框（投进去也没人处理）。
 # conclusion/idle=空闲；exited 视为可直投——room-relay 投递时自动 restart resume。
@@ -1545,11 +1545,13 @@ class Caller:
         """
         # registry 文件完全不可用时的紧急兜底（与 registry.json 当前取值一致；
         # 仅在文件缺失/解析失败时启用，正常路径不参与）
-        # ⑤ 路由反转（2026-07-29）：默认 Worker=hy3（workbuddy），重活锚 claude。
+        # ⑤ 路由反转（2026-07-29）：默认 Worker=hy3（workbuddy），重活锚 claude-glm52。
         # 2026-07-29：默认 Thinker 统一 flash（07-28 高律师设置页选定）。
+        # 2026-07-29：非 workbuddy 系模板 id 改 harness-模型 格式；workbuddy 系 id
+        # 经高律师纠正保留原名（本意只是设置页显示名写清 harness+模型，不动底层 id）。
         _FALLBACK_THINKER = "workbuddy-deepseek"
         _FALLBACK_WORKER = "workbuddy"
-        _FALLBACK_HEAVY = "claude"
+        _FALLBACK_HEAVY = "claude-glm52"
 
         def _apply_fallback(reason: str) -> None:
             logger.warning(
@@ -1998,7 +2000,7 @@ class Caller:
             self._assert_template_exists(template_id)
             STANDBY_DIR.mkdir(parents=True, exist_ok=True)
             # 名字带 4 位随机尾缀：areco 房名全局唯一（含已归档，rooms.ts）——上一个
-            # 待命房归档后名字仍占着，裸「⚙待命·claude」第二次建必 400（2026-07-26 实测）。
+            # 待命房归档后名字仍占着，裸「⚙待命·claude-glm52」第二次建必 400（2026-07-26 实测）。
             room = self.create_room(f"{ROOM_MARK}待命·{template_id}·{uuid.uuid4().hex[:4]}")
             member = self.add_stand(room["id"], template_id)
             info = {
@@ -4532,7 +4534,7 @@ class Caller:
         Caller 把它们汇总成单条消息（可直接喂 relay_to_wechat / cc-send）。
 
         输入 results 每项形如：
-            {"room_id": "...", "stand": "Glm5.2", "role": "thinker",
+            {"room_id": "...", "stand": "Claude Code GLM-5.2", "role": "thinker",
              "status": "done" | "blocked" | "error" | ...,
              "summary": "一句话结论", "files": ["/path/a"], "questions": ["请确认..."]}
 
@@ -5614,7 +5616,7 @@ def _run_by_mode(
 
     # fast：快速 Worker（hy3）单段派发（2026-07-27）。
     # role 必须 None——dispatch 模板优先级是 template_id > role > task_type，传 role="worker"
-    # 会被 default_worker（claude）顶掉，task_map["fast"] 永远轮不到。
+    # 会被 default_worker（claude-glm52）顶掉，task_map["fast"] 永远轮不到。
     # args.task_type 的 argparse 缺省是 "general"（= 用户没指定），此时回落 "fast" 让
     # task_map["fast"]（areco 设置页 fastWorker=workbuddy）接住；显式给了别的 task_type 则尊重。
     if mode == "fast":

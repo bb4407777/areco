@@ -117,7 +117,7 @@ node scripts/selftest.mjs http://127.0.0.1:8790 "密码"   # 端到端自检（�
 顶栏「项目」= 给一件事拉一个群，把多个 agent 编成一队干活：
 
 - **建项目 → 加成员**：成员按模板一键 spawn 为项目专属会话（页面操作，或
-  `POST /api/rooms/:id/members {"templateId":"claude"}`）；专属会话随项目归档级联管理，
+  `POST /api/rooms/:id/members {"templateId":"claude-glm52"}`）；专属会话随项目归档级联管理，
   **删除项目会连带删除专属会话**——讨论收摊用「归档」（可随时恢复），删除是不可逆动作
 - **消息与投递**：房间消息正文带 `@成员名` / `@all` 才注入目标会话终端（人类成员发言默认投全体）；
   目标会话已退出会**自动 resume 拉起再投递**；agent 回执走包内 `scripts/areco-msg.mjs`

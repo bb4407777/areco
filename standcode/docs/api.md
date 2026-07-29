@@ -233,10 +233,10 @@ result = caller.dispatch(
 
 | 模板 id              | 说明                          |
 | -------------------- | ----------------------------- |
-| `claude`             | GLM-5.2（亦是 Thinker 默认）  |
+| `claude-glm52`       | GLM-5.2（亦是 Thinker 默认）  |
 | `workbuddy-deepseek` | WorkBuddy DeepSeek            |
-| `codex`              | gpt-5.6-sol                   |
-| `kimi`               | Kimi K3（额度紧张，仅显式指定）|
+| `codex-gpt56`        | gpt-5.6-sol                   |
+| `kimi-k3`            | Kimi K3（额度紧张，仅显式指定）|
 
 #### 返回值
 
@@ -465,12 +465,12 @@ msg = caller.aggregate_results([
 ```json
 {
   "version": "0.2.0",
-  "default_template": "claude",
-  "default_thinker": "claude",
+  "default_template": "claude-glm52",
+  "default_thinker": "claude-glm52",
   "default_worker": "reasonix",
   "templates": [
     {
-      "id": "claude",
+      "id": "claude-glm52",
       "name": "GLM-5.2",
       "role": "thinker",
       "description": "Thinker 默认，规划/分析/判断/路由",

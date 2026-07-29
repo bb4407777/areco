@@ -68,6 +68,11 @@
       "reasoning_efforts": ["low", "medium", "high", "xhigh"],
       "description": "Qwen3.8-Max-Preview（qoder CLI 默认）"
     },
+    "agnes-2.5-flash": {
+      "provider": "agnes",
+      "model_id": "agnes-2.5-flash",
+      "description": "Agnes-2.5-Flash（Agnes 中转，claude CLI 走 Anthropic 协议）"
+    },
     "claude-fable-5": {
       "provider": "freemodel-cc",
       "model_id": "claude-fable-5",

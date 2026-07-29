@@ -58,11 +58,11 @@ def _mk(sessions=None, rooms=None, db_path=None):
 def test_resolve() -> None:
     print("\n[resolve_ask_channel] 通道定位")
     sess = {"id": "sess-fable", "status": "running", "trafficState": "conclusion",
-            "templateId": "c5"}
+            "templateId": "claude-fable5"}
     ch = _mk([sess]).resolve_ask_channel(room_id="chan01", member="Fable5")
     check(ch["ok"] and ch["team"] == "room-chan01" and ch["session_id"] == "sess-fable",
           "显式 room_id 命中")
-    check(ch["template_id"] == "c5", "fork 模板取自会话 templateId")
+    check(ch["template_id"] == "claude-fable5", "fork 模板取自会话 templateId")
 
     ch = _mk([sess]).resolve_ask_channel(room_id="", member="Fable5")
     check(ch["ok"] and ch["room_id"] == "chan01", "room_id 未配时按成员名唯一定位")
@@ -104,7 +104,7 @@ def test_direct_dispatch() -> None:
     print("\n[dispatch_to_channel] 直投")
     db = os.path.join(_TEST_ISO, "direct.db")
     sess = {"id": "sess-fable", "status": "running", "trafficState": "idle",
-            "templateId": "c5"}
+            "templateId": "claude-fable5"}
     c = _mk([sess], db_path=db)
     ch = c.resolve_ask_channel(room_id="chan01", member="Fable5")
     crumbs: list[dict] = []

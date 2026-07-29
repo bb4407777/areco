@@ -8,7 +8,7 @@ const wsBase = base.replace(/^http/, 'ws')
 const spawn = await fetch(`${base}/api/sessions`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ templateId: 'kimi', name: `e2e-kimi-frame` }),
+  body: JSON.stringify({ templateId: 'kimi-k3', name: `e2e-kimi-frame` }),
 }).then((r) => r.json())
 const sessionId = (spawn.data ?? spawn).id
 console.log('spawned kimi session', sessionId)

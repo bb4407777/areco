@@ -158,7 +158,7 @@ def test_audit_stub_filter() -> None:
     print("\n[report] 测试桩痕迹判定")
     check(C._audit_is_stub({"template": "thinker-tpl", "room_id": "room0"}), "‑tpl 模板判桩")
     check(C._audit_is_stub({"template": "", "room_id": "room12"}), "room\\d 假房号判桩")
-    check(not C._audit_is_stub({"template": "claude", "room_id": "bffaefd2"}), "真实流量不误杀")
+    check(not C._audit_is_stub({"template": "claude-glm52", "room_id": "bffaefd2"}), "真实流量不误杀")
     check(not C._audit_is_stub({"template": "workbuddy-deepseek-pro", "room_id": ""}), "无房号事件不误杀")
 
 
