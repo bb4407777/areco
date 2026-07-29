@@ -44,13 +44,14 @@ def check(cond: bool, label: str) -> bool:
     return cond
 
 
-# ── ensure_acceptance_block：三栏追加 + 幂等 ─────────────────────────
+# ── ensure_acceptance_block：两栏追加 + 幂等 ─────────────────────────
 def test_ensure_block() -> None:
     print("\n[ensure_acceptance_block] 验收栏自动追加")
-    # 1) 什么都没给 → 默认模板（自报判据 + 红线），source=default
+    # 1) 什么都没给 → 默认模板（自报判据），source=default
     req2, acc = C.ensure_acceptance_block("统计一下今天的派单量")
     check(C.ACCEPT_HEADER in req2, "默认模板：追加了验收栏")
-    check("产物路径" in req2 and "红线提醒" in req2, "默认模板：三栏齐（判据/产物路径/红线）")
+    check("产物路径" in req2 and "红线提醒" not in req2,
+          "默认模板：两栏齐（判据/产物路径），红线栏已删（2026-07-29 令：与章程重复）")
     check(acc["source"] == "default" and not acc["criteria"], "默认模板：source=default 无预置判据")
     # 2) 正文落盘动词 → 不提取（2026-07-29 高律师令：文件判据只认「产物路径：」两路）
     req2, acc = C.ensure_acceptance_block("把 caller.py 行数统计写到 /tmp/x.txt")
@@ -61,14 +62,14 @@ def test_ensure_block() -> None:
     req3, acc3 = C.ensure_acceptance_block(req2)
     check(req3 == req2 and req3.count(C.ACCEPT_HEADER) == 1, "幂等：二次调用不叠加")
     check(acc3.get("block_appended") is False, "幂等：标记 block_appended=False")
-    # 4) 用户自带显式判据 → 不重复写判据栏，但补红线
+    # 4) 用户自带显式判据 → 不重复写判据栏；红线栏已删，任何情况都不再追加
     req4, acc4 = C.ensure_acceptance_block("干活。\n验收判据：\n- file:/tmp/a.txt")
     check(acc4["source"] == "explicit", "显式判据：source=explicit")
-    check("红线提醒" in req4, "显式判据：仍补红线栏")
+    check("红线提醒" not in req4, "显式判据：红线栏已删，不再追加")
     check("完工自报（格式见上" not in req4, "显式判据：不再塞默认判据")
-    # 5) 用户已写红线 → 不重复
+    # 5) 用户正文提到红线 → 同样不追加（红线栏整体已删）
     req5, _ = C.ensure_acceptance_block("干活，注意红线：别删库。")
-    check(req5.count("红线提醒") == 0, "已有红线：不重复追加红线行")
+    check(req5.count("红线提醒") == 0, "正文提到红线：仍不追加红线行")
 
 
 # ── extract / 判据解析细节 ─────────────────────────────────────────

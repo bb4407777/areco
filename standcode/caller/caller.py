@@ -808,22 +808,20 @@ def verify_completion(files: list | None = None, output_path: str | None = None)
 # ── 作业单验收栏 + 结果把关闸（2026-07-29 批件①，高律师批准）─────────────
 # 三份独立评审（GLM 质检 R2 / Fable5 评审 / 飞轮日记篇6+篇10）共同 P0：派出去时
 # 验收栏说清「怎么算过」，打回来时强制「差距/锚点/范围」三段式。派单侧
-# ensure_acceptance_block 自动补齐三栏（判据/产物路径/红线），回执侧 verify_acceptance
+# ensure_acceptance_block 自动补齐两栏（判据/产物路径），回执侧 verify_acceptance
 # 把能机检的全验，Caller.gate_result 负责「不过→打回一次→复检→仍不过升级人工」。
+# 注：原③红线提醒栏（法条溯源/密钥禁写/回收站/脱敏）2026-07-29 高律师令删除——
+# 与 CLAUDE.md 章程重复，每个 Worker 自带章程，验收栏只留任务特异信息。
 #
 # ── 验收闸总开关（2026-07-29 高律师令：验收闸整体关停）──────────────────
 # 判据提取当日三次误伤（正文枚举误判路径 / 顿号连路径 / 自报带「」节名），
 # 高律师令整个关掉。开关常量化不删死：False 时——
-#   · 验收栏三栏仍照常追加（信息价值还在），只是不再机检、不打回、不升级，结果直报；
+#   · 验收栏两栏仍照常追加（信息价值还在），只是不再机检、不打回、不升级，结果直报；
 #   · dispatch_and_relay 的 gate_result 把关闸整段跳过；
 #   · _finalize_waiter 的验收判据机检跳过，回执如实标注「闸停未机检」。
 # 判据提取/机检/打回/升级逻辑全部保留，重开改 True 即可（同三闸先例）。
 ACCEPTANCE_GATE_ENABLED = False
 ACCEPT_HEADER = "【作业单·验收栏】"
-ACCEPT_REDLINE = (
-    "红线提醒：法条/案号/判例必须真实可溯源，禁编造；密钥/token/密码不得写进回复或产物；"
-    "删除文件一律进回收站（trash），禁 rm 直删；对外内容脱敏（真实当事人/案号/手机号不外泄）。"
-)
 # Worker 完工自报产物路径的格式约定——verify_acceptance 按它反向机检自报文件
 ACCEPT_SELF_REPORT = "完工回复末尾单列一行「产物路径：/绝对路径」；纯分析/问答类无产物则写「产物路径：无」并给出结论与依据。"
 # 机检判据 DSL 行（可写在作业单或验收栏里，一行一条）：
@@ -912,10 +910,12 @@ def extract_acceptance(request: str) -> dict:
 
 
 def ensure_acceptance_block(request: str) -> tuple[str, dict]:
-    """派单前把「验收栏」三栏补进作业单（幂等）：①验收判据（可机检优先）②产物路径③红线提醒。
+    """派单前把「验收栏」两栏补进作业单（幂等）：①验收判据（可机检优先）②产物路径。
 
-    用户已写的栏目不重复追加、原文不动；缺哪栏补哪栏；已带 ACCEPT_HEADER 直接原样返回
-    （防 bg 回放 / 重派发二次追加）。返回 (request', acceptance)。
+    红线提醒栏已于 2026-07-29 高律师令删除（与 CLAUDE.md 章程重复，Worker 自带章程，
+    验收栏只留任务特异信息）。用户已写的栏目不重复追加、原文不动；缺哪栏补哪栏；
+    已带 ACCEPT_HEADER 直接原样返回（防 bg 回放 / 重派发二次追加）。
+    返回 (request', acceptance)。
     """
     req = (request or "").rstrip()
     acceptance = extract_acceptance(req)
@@ -943,8 +943,6 @@ def ensure_acceptance_block(request: str) -> tuple[str, dict]:
                      else ("完工自报（格式见上；报了路径就会被机检）" if ACCEPTANCE_GATE_ENABLED
                            else "完工自报（格式见上）"))
     )
-    if "红线" not in req:
-        lines.append(ACCEPT_REDLINE)
     acceptance["block_appended"] = True
     return req + "\n" + "\n".join(lines), acceptance
 
