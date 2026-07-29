@@ -22,6 +22,13 @@ SKILL.md 从 2026-07-25 起就写着「每日 cron 分析昨日 terminal 调用�
   最强指标——它抓的是「明知该派还是自己上」，恰好是 workflow-hardening.md 记录的
   2026-07-25 那 6 次纠正的行为特征。
 
+  2026-07-29 口径修正（任务⑦，高律师批准）：
+    ① 直干率按**当班模型**分段——模型轮换后一锅算会把账记错人（07-29 实例：83.3%
+      被归给印象里的当班模型，账对不上）。映射源 gateway agent.log 逐条模型记录，
+      session_model_usage 聚合窗口兜底，都定不了段的进「(未标注)」桶并提示人工标注。
+    ② 制度性命令（INSTITUTIONAL_CMDS：守则/章程强制同轮跑的入库/台账动作）不计入
+      直干率**分子**——它们不是绕过派单；分母不变，报告头部注明剔除条数。
+
 用法：
     python3 scripts/audit-direct-work.py                # 昨日
     python3 scripts/audit-direct-work.py --days 7       # 近 7 天
@@ -34,8 +41,10 @@ cron 建法：走 8020 API（`~/skills/cron` 面板），禁手改 jobs.json。
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -61,23 +70,45 @@ FOLLOW_WINDOW = timedelta(minutes=10)
 # 调用（含完整命令）都在 messages.tool_calls 里。这补上了本脚本 docstring 里一直
 # 声明的空白：「真直干率的分母在 Hermes 侧会话记录，需另一数据源」。
 HERMES_STATE_DB = os.environ.get("HERMES_STATE_DB") or "/Users/gao/.qclaw-hermes/state.db"
+# 「时段→当班模型」映射主源（任务⑦）：gateway agent.log——每次 API 调用/会话轮次
+# 都落一行 `[<session_id>] ... model=<名>`，是本机唯一逐条带时间戳的当班模型记录。
+# state.db 的 session_model_usage 只有 (会话,模型) 聚合窗口，混用会话里窗口互相
+# 重叠（bb5a3cbd 案例重叠 17 小时），定不了段，只配当兜底。
+HERMES_AGENT_LOG = os.environ.get("HERMES_AGENT_LOG") or "/Users/gao/.qclaw-hermes/logs/agent.log"
 TREND_PATH = Path(HOME_DIR) / ".standcode" / "zhigan-daily.jsonl"
+
+# 制度性命令白名单（任务⑦·2026-07-29 口径修正）：守则/章程强制 Caller 本人同轮
+# 执行的入库/台账动作，不是绕过派单的直干——不计入直干率分子，分母不变。
+#   add_memory.py / recall.py   memory 守则1：动手前召回、干完显式入库
+#   gongguoge-log.py            章程：实质动作同轮录功过格（漏录=没干）
+#   fetch-log.py                章程：内容抓取同轮录抓取台账
+#   add-deadline.py             章程：硬截止日一律录期限巡检（同类制度台账，一并剔除）
+# 判据：命令串含脚本文件名即算（统计口径）；新增/改名制度脚本记得同步这里。
+INSTITUTIONAL_CMDS = (
+    "add_memory.py",
+    "recall.py",
+    "gongguoge-log.py",
+    "fetch-log.py",
+    "add-deadline.py",
+)
 CC_SEND_BIN = os.environ.get("CC_SEND_BIN") or _LOCAL_CONF.get("cc_send_bin") or "cc-send"
 WECHAT_TARGET = os.environ.get("WECHAT_TARGET") or _LOCAL_CONF.get("wechat_target") or ""
 
 
-def hermes_terminal_commands(db_path: str, since: datetime, until: datetime) -> list[str] | None:
-    """从 Hermes state.db 抽取窗口内全部 terminal 命令。
+def hermes_terminal_commands(db_path: str, since: datetime, until: datetime) -> list[dict] | None:
+    """从 Hermes state.db 抽取窗口内全部 terminal 命令（带会话与时刻，供按模型定段）。
 
     只读连接（mode=ro）——库归常驻 gateway 所有，审计侧绝不写。
     库不存在 / 打不开 / schema 变了 → 返回 None（上层如实说「没算成」，不出假数字）。
+    返回 [{"cmd", "session", "ts"}]；messages 表没有 model 列，当班模型靠
+    load_model_timeline / hermes_usage_windows 事后归段。
     """
     if not Path(db_path).exists():
         return None
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
         rows = conn.execute(
-            "SELECT tool_calls FROM messages "
+            "SELECT session_id, timestamp, tool_calls FROM messages "
             "WHERE tool_calls IS NOT NULL AND tool_calls LIKE '%\"terminal\"%' "
             "AND timestamp BETWEEN ? AND ?",
             (since.timestamp(), until.timestamp()),
@@ -85,8 +116,8 @@ def hermes_terminal_commands(db_path: str, since: datetime, until: datetime) -> 
         conn.close()
     except sqlite3.Error:
         return None
-    cmds: list[str] = []
-    for (raw,) in rows:
+    out: list[dict] = []
+    for sid, ts, raw in rows:
         try:
             calls = json.loads(raw)
         except Exception:
@@ -100,13 +131,106 @@ def hermes_terminal_commands(db_path: str, since: datetime, until: datetime) -> 
             except Exception:
                 continue
             if cmd.strip():
-                cmds.append(cmd.strip())
-    return cmds
+                out.append({"cmd": cmd.strip(), "session": sid, "ts": ts})
+    return out
 
 
-def analyze_hermes_direct(cmds: list[str]) -> dict | None:
+# agent.log 当班模型行，两类都收（API call / turn_context 等，凡带 [会话]+model= 的）：
+#   2026-07-29 21:31:07,751 INFO [20260729_085316_c4bbfadb] agent.conversation_loop: API call #357: model=k3 ...
+#   2026-07-25 15:08:19,200 INFO [20260723_085630_bb5a3cbd] agent.turn_context: conversation turn: ... model=pool-deepseek-v4-flash ...
+_MODEL_LINE_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ \S+ \[([^\]\s]+)\] \S+ .*?\bmodel=([\w.:/-]+)"
+)
+
+
+def load_model_timeline(log_path: str = HERMES_AGENT_LOG) -> dict:
+    """从 gateway agent.log 抽「会话 → [(时刻, 当班模型)] 升序」逐条映射。
+
+    日志时间是本机时区，转 epoch 后与 messages.timestamp 同轴。
+    日志缺席/读不了 → 空映射（上层回落 usage 窗口，再定不了进「未标注」桶）。
+
+    TODO(任务⑦遗留): agent.log 单文件不轮转，现存起点 2026-07-24；更早窗口只能
+    靠 usage 窗口兜底。若未来加日志轮转/清理，这里要并读历史段，否则断档期的
+    混用会话会退进「(未标注)」桶（届时报告已自带「需人工标注」提示，不出假数字）。
+    """
+    tz = datetime.now(timezone.utc).astimezone().tzinfo
+    timeline: dict = {}
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "model=" not in line:
+                    continue
+                m = _MODEL_LINE_RE.match(line)
+                if not m:
+                    continue
+                try:
+                    ts = (datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                          .replace(tzinfo=tz).timestamp())
+                except ValueError:
+                    continue
+                timeline.setdefault(m.group(2), []).append((ts, m.group(3)))
+    except OSError:
+        return {}
+    for entries in timeline.values():
+        entries.sort()
+    return timeline
+
+
+def hermes_usage_windows(db_path: str) -> dict:
+    """session_model_usage 聚合窗口（兜底源）：会话 → [(first, last, model)]。
+
+    窗口是聚合值，混用会话里互相重叠——只有「全会话单模型」或「时刻唯一命中」
+    才敢下结论，其余交「(未标注)」桶如实示人。只读连接，失败 → 空。
+    """
+    if not Path(db_path).exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        rows = conn.execute(
+            "SELECT session_id, model, MIN(first_seen), MAX(last_seen) "
+            "FROM session_model_usage WHERE first_seen IS NOT NULL "
+            "GROUP BY session_id, model"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return {}
+    wins: dict = {}
+    for sid, model, lo, hi in rows:
+        wins.setdefault(sid, []).append((lo, hi or lo, model))
+    return wins
+
+
+_ATTR_TOLERANCE = 1800  # 秒：日志证据离消息超 30 分钟不硬贴，退窗口兜底
+
+
+def attribute_model(session_id: str, ts: float, timeline: dict, windows: dict) -> str | None:
+    """单条 terminal 消息 → 当班模型；两级来源都定不了段 → None（未标注）。"""
+    entries = timeline.get(session_id)
+    if entries:
+        i = bisect.bisect_left(entries, (ts, ""))
+        near = [e for e in (entries[i - 1] if i else None,
+                            entries[i] if i < len(entries) else None) if e]
+        best = min(near, key=lambda e: abs(e[0] - ts))
+        if abs(best[0] - ts) <= _ATTR_TOLERANCE:
+            return best[1]
+    wins = windows.get(session_id) or []
+    models = {m for _, _, m in wins}
+    if len(models) == 1:
+        return next(iter(models))
+    hits = {m for lo, hi, m in wins if lo - 600 <= ts <= hi + 600}
+    if len(hits) == 1:
+        return next(iter(hits))
+    return None
+
+
+def analyze_hermes_direct(calls: list[dict], timeline: dict, windows: dict) -> dict | None:
     """真 · 直干率：每条 terminal 命令过 caller 的 Gatekeeper 分级。
 
+    口径（任务⑦·2026-07-29 两处修正）：
+      ① 制度性命令（INSTITUTIONAL_CMDS）先于分级剔除——单列 institutional，
+        不进直干分子；分母 terminal_calls 不变。
+      ② 按当班模型分段：attribute_model 逐条归段（agent.log 主源→usage 窗口
+        兜底→「(未标注)」桶），by_model 各段直干率独立计算。
     operator（白名单：caller.py / areco-msg / lens / cc-send / 只读运维）= 本职；
     production / gray = 该派没派的直干。分级器复用 caller.check_should_dispatch——
     与 SKILL.md「禁止直干清单」同源，不另造一套会漂移的白名单。
@@ -117,25 +241,44 @@ def analyze_hermes_direct(cmds: list[str]) -> dict | None:
         from caller import check_should_dispatch  # noqa: E402
     except Exception:
         return None
-    total = len(cmds)
-    operator = blocked = 0
+    total = len(calls)
+    operator = blocked = institutional = 0
     direct: list[str] = []
-    for cmd in cmds:
+    seg: dict = {}
+    for call in calls:
+        cmd = call["cmd"]
+        model = attribute_model(call["session"], call["ts"], timeline, windows) or "(未标注)"
+        s = seg.setdefault(model, {"terminal": 0, "operator": 0, "institutional": 0, "direct": 0})
+        s["terminal"] += 1
+        if any(name in cmd for name in INSTITUTIONAL_CMDS):
+            institutional += 1
+            s["institutional"] += 1
+            continue
         cat = check_should_dispatch(cmd).get("category")
         if cat == "operator":
             operator += 1
+            s["operator"] += 1
         elif cat == "blocked":
             blocked += 1
         else:  # production / gray：非白名单、该派发的活
             direct.append(cmd)
+            s["direct"] += 1
     rate = round(100.0 * len(direct) / total, 1) if total else 0.0
+    by_model = [
+        {"model": m, **v,
+         "direct_rate": round(100.0 * v["direct"] / v["terminal"], 1) if v["terminal"] else 0.0}
+        for m, v in sorted(seg.items(), key=lambda kv: -kv[1]["terminal"])
+    ]
     top = Counter(" ".join(c.split())[:60] for c in direct).most_common(5)
     return {
         "terminal_calls": total,
         "operator": operator,
         "blocked_cmds": blocked,
+        "institutional": institutional,
         "direct": len(direct),
         "direct_rate": rate,
+        "by_model": by_model,
+        "model_source": "agent.log" if timeline else ("usage-window" if windows else None),
         "top_direct": [{"cmd": k, "n": n} for k, n in top],
     }
 
@@ -146,7 +289,8 @@ def append_trend(h: dict, until: datetime) -> None:
         TREND_PATH.parent.mkdir(parents=True, exist_ok=True)
         with TREND_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"date": until.strftime("%Y-%m-%d"), **{
-                k: h[k] for k in ("terminal_calls", "operator", "direct", "direct_rate")
+                k: h[k] for k in ("terminal_calls", "operator", "institutional",
+                                  "direct", "direct_rate")
             }}, ensure_ascii=False) + "\n")
     except OSError:
         pass
@@ -318,11 +462,26 @@ def render(a: dict, threshold: float) -> str:
     if h:
         lines += [
             "",
-            f"真 · 直干率（Hermes state.db，{h['terminal_calls']} 次 terminal 调用）：",
-            f"  白名单 operator {h['operator']}｜直干 {h['direct']}"
+            f"真 · 直干率（Hermes state.db，{h['terminal_calls']} 次 terminal 调用；"
+            f"已剔除制度性命令 {h['institutional']} 条——守则/章程强制的入库/台账动作，不算直干）：",
+            f"  白名单 operator {h['operator']}｜制度动作 {h['institutional']}｜直干 {h['direct']}"
             + (f"｜BLOCKED 命中 {h['blocked_cmds']}" if h["blocked_cmds"] else "")
             + f"  → 直干率 {h['direct_rate']}%",
         ]
+        if h.get("by_model"):
+            src = ("gateway agent.log 逐条模型记录，usage 窗口兜底"
+                   if h.get("model_source") == "agent.log"
+                   else "session_model_usage 聚合窗口（粗粒度兜底）")
+            lines.append(f"  按当班模型分段（映射源：{src}）：")
+            for s in h["by_model"]:
+                lines.append(
+                    f"    {s['model']:22s} terminal {s['terminal']:4d}｜制度 {s['institutional']:3d}"
+                    f"｜直干 {s['direct']:4d}  → {s['direct_rate']}%"
+                )
+            if any(s["model"] == "(未标注)" for s in h["by_model"]):
+                lines.append("    ⚠️ (未标注) 段无机器可读当班记录——模型切换需人工标注")
+        if h["top_direct"]:
+            lines.append("  直干 TOP：")
         for s in h["top_direct"]:
             lines.append(f"    · ×{s['n']}  {s['cmd']}")
         if h["terminal_calls"] and h["direct_rate"] > threshold:
@@ -345,6 +504,8 @@ def main() -> int:
     ap.add_argument("--log", default=None, help="审计日志路径（默认 ~/.standcode/audit.jsonl）")
     ap.add_argument("--hermes-db", default=HERMES_STATE_DB,
                     help="Hermes state.db 路径（真直干率数据源；缺席时如实标注不出假数字）")
+    ap.add_argument("--agent-log", default=HERMES_AGENT_LOG,
+                    help="gateway agent.log 路径（「时段→当班模型」映射主源）")
     ap.add_argument("--no-hermes", action="store_true", help="跳过 Hermes 侧真直干率")
     ap.add_argument("--alert", action="store_true",
                     help="[cron 用] 直干率/跟进失败率超阈值时推微信；阈内静默（零打扰口径）")
@@ -366,8 +527,12 @@ def main() -> int:
 
     # 真 · 直干率（Hermes 侧）：算成才有 hermes 段并落趋势；算不成如实缺席
     if not args.no_hermes:
-        cmds = hermes_terminal_commands(args.hermes_db, since, until)
-        h = analyze_hermes_direct(cmds) if cmds is not None else None
+        calls = hermes_terminal_commands(args.hermes_db, since, until)
+        h = None
+        if calls is not None:
+            timeline = load_model_timeline(args.agent_log)
+            windows = hermes_usage_windows(args.hermes_db)
+            h = analyze_hermes_direct(calls, timeline, windows)
         if h:
             a["hermes"] = h
             append_trend(h, until)
@@ -393,7 +558,10 @@ def main() -> int:
     if args.alert and (follow_breach or direct_breach):
         parts = ["⚠️ StandCode 直干率审计（昨日）"]
         if direct_breach:
-            parts.append(f"直干率 {h['direct_rate']}%（{h['direct']}/{h['terminal_calls']} 次 terminal）超阈值 {args.threshold:g}%")
+            parts.append(f"直干率 {h['direct_rate']}%（{h['direct']}/{h['terminal_calls']} 次 terminal，"
+                         f"已剔除制度 {h['institutional']} 条）超阈值 {args.threshold:g}%")
+            parts += [f"· {s['model']} {s['direct_rate']}%（直干{s['direct']}/{s['terminal']}）"
+                      for s in h.get("by_model", [])[:3]]
             parts += [f"· ×{s['n']} {s['cmd'][:48]}" for s in h["top_direct"][:3]]
         if follow_breach:
             parts.append(f"跟进失败率 {g['follow_fail_rate']}%（判要派 {g['must_dispatch']} 次没派 {g['unfollowed']} 次）")
