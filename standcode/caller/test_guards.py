@@ -392,6 +392,151 @@ def test_b6_reconcile_single_fetch() -> None:
         (C.TASKS_DIR / f"{tid}.json").unlink(missing_ok=True)
 
 
+# ── ⑥ 两道闸校准（2026-07-29 高律师批）────────────────────────────────
+# 空转闸：idle×N 判死须 首字等待超 FIRST_TOKEN_MAX_SEC + 看板新鲜复核零产出；
+# 定稿闸：回复须像交付物才吃 MERGE_WAIT_SEC 短窗，纯进度句吃 PROGRESS_SETTLE_SEC 续等窗。
+def _gate_caller(messages_fn, session_info_fn):
+    """poll_result 离线壳：REST 全 mock，不碰 areco。"""
+    c = C.Caller.__new__(C.Caller)
+    c.get_messages = messages_fn
+    c._session_info = session_info_fn
+    c.sent = []
+    c.send_message = lambda sid, to, body: c.sent.append((sid, to, body))
+    return c
+
+
+def test_deliverable_classifier() -> None:
+    print("\n[⑥定稿闸] _looks_like_deliverable 判别")
+    progress = [
+        "我先看一下这个任务的上下文",
+        "让我来处理，稍等",
+        "收到，马上开始干",
+        "正在检索相关材料",
+        "",
+    ]
+    for t in progress:
+        check(not C._looks_like_deliverable(t), f"进度句判否：{t[:16] or '(空)'}")
+    deliverable = [
+        "结论：一审判决应予维持，理由如下",
+        "产物路径：/tmp/x.md",
+        "已完成，报告在 /Users/gao/Desktop/报告.docx",
+        "共找到 13 条记录，其中 3 条超期",
+        "commit 2c67209 已提交到 main",
+        "我先汇报结论：本案已过诉讼时效",  # 开工白开头但带结论段 → 交付物
+        "经查" + "本案事实与法律适用分析，" * 20,  # ≥200 字长正文
+    ]
+    for t in deliverable:
+        check(C._looks_like_deliverable(t), f"交付物判是：{t[:16]}")
+
+
+def test_idle_gate() -> None:
+    print("\n[⑥空转闸] 首字上限 + 看板复核")
+    orig = (C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC, C.FIRST_TOKEN_MAX_SEC)
+    C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC = 2, 0.01
+    try:
+        # 场景1：真零产出（outputChars 恒定 + 灯 idle）→ 到首字上限才 stall，且重投过一次
+        C.FIRST_TOKEN_MAX_SEC = 0.5
+
+        def _msgs(sid, after_id=0):
+            # 重投取原文（after_id=0）给任务消息；主循环（after_id>=1）永远无回复
+            return ([{"id": 1, "body": "任务原文", "from_agent": "hermes"}]
+                    if after_id == 0 else [])
+
+        c = _gate_caller(_msgs, lambda sid: {
+            "trafficState": "idle", "outputChars": 100, "status": "running"})
+        t0 = time.time()
+        res = c.poll_result(session_id="team-g", timeout=5, poll_interval=0.005,
+                            stand_session_id="s1", after_id=1, stand_name="w")
+        el = time.time() - t0
+        check(res["status"] == "stall", f"真零产出 → stall（实得 {res['status']}）")
+        check(el >= 0.5, f"stall 不早于首字上限 0.5s（实测 {el:.2f}s）")
+        check(len(c.sent) == 1, f"判死前重投过 1 次（实得 {len(c.sent)}）")
+
+        # 场景2：outputChars 持续增长（慢思考模型 spinner/思考流）→ 复核推翻，不 stall 不重投
+        C.FIRST_TOKEN_MAX_SEC = 0.1
+        tick = {"n": 100}
+
+        def _grow(sid):
+            tick["n"] += 7
+            return {"trafficState": "idle", "outputChars": tick["n"], "status": "running"}
+
+        c2 = _gate_caller(_msgs, _grow)
+        res2 = c2.poll_result(session_id="team-g", timeout=0.8, poll_interval=0.005,
+                              stand_session_id="s1", after_id=1, stand_name="w")
+        check(res2["status"] == "timeout", f"有产出被复核推翻 → 不判死（实得 {res2['status']}）")
+        check(len(c2.sent) == 0, "有产出时也不重投扰动")
+
+        # 场景3：首字上限未到 → idle 探针再多也不 stall
+        C.FIRST_TOKEN_MAX_SEC = 30
+        c3 = _gate_caller(_msgs, lambda sid: {
+            "trafficState": "idle", "outputChars": 100, "status": "running"})
+        res3 = c3.poll_result(session_id="team-g", timeout=0.5, poll_interval=0.005,
+                              stand_session_id="s1", after_id=1, stand_name="w")
+        check(res3["status"] == "timeout", f"上限未到不判死（实得 {res3['status']}）")
+    finally:
+        C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC, C.FIRST_TOKEN_MAX_SEC = orig
+
+
+def test_settle_gate() -> None:
+    print("\n[⑥定稿闸] 进度句续等窗 / 交付物短窗")
+    orig = (C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC)
+    C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC = 0.05, 0.6, 0.01
+    try:
+        def _mk_msgs(body):
+            state = {"sent": False}
+
+            def _msgs(sid, after_id=0):
+                if not state["sent"] and after_id >= 1:
+                    state["sent"] = True
+                    return [{"id": 2, "body": body, "from_agent": "w"}]
+                return []
+            return _msgs
+
+        idle_info = lambda sid: {  # noqa: E731
+            "trafficState": "idle", "outputChars": 100, "status": "running"}
+
+        # 场景1：纯进度句 → 不吃短窗，静满续等窗才定稿（settle_reason=progress_timeout）
+        c = _gate_caller(_mk_msgs("我先看一下任务上下文，马上开始"), idle_info)
+        t0 = time.time()
+        res = c.poll_result(session_id="team-s", timeout=5, poll_interval=0.005,
+                            stand_session_id="s1", after_id=1, stand_name="w")
+        el = time.time() - t0
+        check(res["status"] == "completed", f"进度句最终也定稿（实得 {res['status']}）")
+        check(el >= 0.6, f"进度句不吃 {C.MERGE_WAIT_SEC}s 短窗，续等 ≥0.6s（实测 {el:.2f}s）")
+        check(res.get("settle_reason") == "progress_timeout",
+              f"定稿原因=progress_timeout（实得 {res.get('settle_reason')}）")
+
+        # 场景2：像交付物（结论+路径）→ 照旧短窗秒级收口
+        c2 = _gate_caller(_mk_msgs("结论：已完成，产物路径：/tmp/x.md"), idle_info)
+        t0 = time.time()
+        res2 = c2.poll_result(session_id="team-s", timeout=5, poll_interval=0.005,
+                              stand_session_id="s1", after_id=1, stand_name="w")
+        el2 = time.time() - t0
+        check(res2["status"] == "completed" and not res2.get("settle_reason"),
+              f"交付物走短窗定稿（实得 {res2['status']}/{res2.get('settle_reason')}）")
+        check(el2 < 0.6, f"交付物不吃续等窗（实测 {el2:.2f}s）")
+
+        # 场景3：④实证复刻——灯 working + 输出零增长 + 只有开工白 → wedge 不收，
+        # 续等窗满才按 working_wedged 收口（真结果有机会并入）
+        C.OUTPUT_STALL_PROBES_ORIG = C.OUTPUT_STALL_PROBES
+        C.OUTPUT_STALL_PROBES = 2
+        try:
+            c3 = _gate_caller(_mk_msgs("收到，我来处理"), lambda sid: {
+                "trafficState": "working", "outputChars": 100, "status": "running"})
+            t0 = time.time()
+            res3 = c3.poll_result(session_id="team-s", timeout=5, poll_interval=0.005,
+                                  stand_session_id="s1", after_id=1, stand_name="w")
+            el3 = time.time() - t0
+            check(res3["status"] == "completed"
+                  and res3.get("settle_reason") == "working_wedged",
+                  f"wedge 最终收口（实得 {res3['status']}/{res3.get('settle_reason')}）")
+            check(el3 >= 0.6, f"开工白不许 wedge 提前收（④的124s病灶；实测 {el3:.2f}s）")
+        finally:
+            C.OUTPUT_STALL_PROBES = C.OUTPUT_STALL_PROBES_ORIG
+    finally:
+        C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC = orig
+
+
 def main() -> int:
     test_a1_poll_fatal_db_error()
     test_a2_dup_gate()
@@ -399,6 +544,9 @@ def main() -> int:
     test_b4_finalize_waiter()
     test_b5_waiter_alive()
     test_b6_reconcile_single_fetch()
+    test_deliverable_classifier()
+    test_idle_gate()
+    test_settle_gate()
     print(f"\n{'全部通过' if not _fails else '失败 ' + str(len(_fails)) + ' 项'}"
           f"（隔离目录 {_TEST_ISO}）")
     for f in _fails:

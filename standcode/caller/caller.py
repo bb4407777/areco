@@ -157,6 +157,16 @@ MIN_TIMEOUT_SEC = _conf_float("STANDCODE_MIN_TIMEOUT", "min_timeout_sec", 600)
 #   翻倍仍空转返回 status='stall' 交人工。
 OUTPUT_STALL_PROBES = int(_conf_float("STANDCODE_OUTPUT_STALL_PROBES", "output_stall_probes", 12))
 IDLE_STALL_PROBES = int(_conf_float("STANDCODE_IDLE_STALL_PROBES", "idle_stall_probes", 9))
+# ── ⑥ 两道闸校准（2026-07-29 高律师批；当日 6 单空转误杀 + 3 单提前收网实证）────
+# FIRST_TOKEN_MAX_SEC：空转判死（status='stall'）的首字等待上限。idle×N 只是嫌疑——
+#   慢思考模型（flash/Fable5/GLM/kimi/agnes 当日全部中招）首字 90s+ 是常态，杀之前
+#   还须 ① 距任务投递已超本上限 ② 现场新鲜拉一次 areco 看板确认真零产出（outputChars
+#   零增长且灯仍 idle，见 poll_result 2c）。重投自愈不受本上限约束，只受看板复核约束。
+# PROGRESS_SETTLE_SEC：纯进度句（「我先…」「让我来…」）的续等窗。第一条回复不像交付物
+#   （无结论段/产物路径/数字结果，见 _looks_like_deliverable）时不吃 MERGE_WAIT_SEC
+#   短合并窗——窗内有新回复/新输出就继续等，静满本窗才按 progress_timeout 定稿。
+FIRST_TOKEN_MAX_SEC = _conf_float("STANDCODE_FIRST_TOKEN_MAX", "first_token_max_sec", 300)
+PROGRESS_SETTLE_SEC = _conf_float("STANDCODE_PROGRESS_SETTLE", "progress_settle_sec", 180)
 
 # ── 重复派发闸 / 模板健康闸（2026-07-28 派发机制优化 A2/A3）──────────────
 # DUP_WINDOW_SEC 重复闸的时间窗：同一 request 的 running 任务只在窗口内算「在途」——
@@ -677,6 +687,39 @@ ERROR_CODE_MESSAGES = {
 # 只会烧双份额度），error 不重试（未知因重试大概率复现）。
 RETRYABLE_ERROR_CODES = {"lost_session_exited", "lost_heartbeat", "rate_limited"}
 _RATE_LIMIT_RE = re.compile(r"(?:\b402\b|\b429\b|rate.?limit|quota|限流|配额|exceeded)", re.IGNORECASE)
+
+
+# ── ⑥ 定稿闸：交付物判别（2026-07-29 高律师批）──────────────────────────
+# 当日三单实证（任务① 25min / 任务④ 124s / 黎官检索 1167s）：Worker 第一条「开工白」
+# 刚落地就被合并窗收网，真结果烂在房里。settle 前先判「像不像交付物」——含 结论段 /
+# 产物路径 / 数字结果 之一才算；纯进度句（「我先…」「让我来…」）不算，改走
+# PROGRESS_SETTLE_SEC 续等窗。判错代价不对称：进度句误判成交付物 = 回到旧行为
+# （MERGE_WAIT_SEC 秒级收网），交付物误判成进度句 = 多等一个续等窗——所以从严认定、
+# 默认续等。
+_DELIV_CONCLUSION_RE = re.compile(
+    r"结论|综上|汇报如下|结果如下|报告如下|已完成|完成情况|交付|验收|产物路径")
+_DELIV_PATH_RE = re.compile(r"(?:^|[\s：:（(\"'`「『])(?:/|~/)[\w.~/-]{2,}")
+# ≥7 位十六进制且至少一个字母（滤 20260729 这类纯数字日期）——commit hash 即数字结果
+_DELIV_HASH_RE = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
+_DELIV_NUMBER_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:条|个|份|行|次|案|件|篇|页|元|字|图|秒|%|％)")
+_PROGRESS_OPENER_RE = re.compile(
+    r"^(?:好的|收到|明白|马上|稍等|我先|我来|我去|让我|正在|开始|接下来|下面我|现在我|先让我)")
+
+
+def _looks_like_deliverable(text: str) -> bool:
+    """Stand 回复合并文本像不像「交付物」（定稿闸门槛，判据见上注释）。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if (_DELIV_CONCLUSION_RE.search(t) or _DELIV_PATH_RE.search(t)
+            or _DELIV_HASH_RE.search(t)):
+        return True
+    if _PROGRESS_OPENER_RE.match(t) and len(t) < 200:
+        return False  # 短开工白：哪怕带数字（「我先花2分钟…」）也算进度句
+    if _DELIV_NUMBER_RE.search(t):
+        return True
+    return len(t) >= 200  # 长正文按交付物放行——纯进度句写不满 200 字
 
 
 def classify_error_code(status: str, error_text: str = "", lost_reason: str = "") -> str | None:
@@ -2269,6 +2312,10 @@ class Caller:
             · 有回复 ≠ 干完了：Stand 先应一句「收到」再干十分钟，旧逻辑合并窗一过就把
               这句当最终结果。现在定稿前看灯——working = 还在干，继续等并入后续回复；
               conclusion/idle/exited/无灯可看才定稿（SETTLE_MAX_SEC 兜底灯坏死）。
+            · ⑥ 两道闸校准（2026-07-29）：定稿闸——回复须「像交付物」（结论段/产物
+              路径/数字结果之一）才吃 MERGE_WAIT_SEC 短窗，纯进度句改吃
+              PROGRESS_SETTLE_SEC 续等窗；空转闸——stall 判死须同时满足 idle 探针
+              达标 + 首字等待超 FIRST_TOKEN_MAX_SEC + 看板新鲜复核零产出。
             · stuck：trafficState=needs-user（终端内权限框/信任页/选择框）连续
               STUCK_CONFIRM_HITS 个探针周期 → 返回 status='stuck' 带尾屏 last_line。
               timeout=0 无限等 + 卡选项曾是致命组合：黄灯亮着、等待者永远傻等。
@@ -2451,8 +2498,37 @@ class Caller:
             #     ——注入丢失或模型秒退。达 IDLE_STALL_PROBES 个探针重投一次任务原文
             #     （从房间按 after_id 取回，新消息触发投递链重新注入）；翻倍仍空转
             #     → status='stall' 交人工。after_id=0 的老调用方取不到原文，不重投只报 stall。
+            #     ⑥ 校准（2026-07-29 高律师批）：idle×N 只是嫌疑不是死刑——当日
+            #     flash/Fable5/GLM/kimi/agnes 全被 90s 口径误杀过（慢思考模型首字 90s+
+            #     是常态，灯 idle ≠ 没在干）。重投/判死前先新鲜拉一次看板复核：
+            #     outputChars 仍在涨（spinner/思考流都会推高）或灯已非 idle → 判据推翻、
+            #     归零重数；判死另须首字等待超 FIRST_TOKEN_MAX_SEC（默认 300s）。
             if stand_session_id and not stand_replies and idle_hits:
-                if idle_hits >= IDLE_STALL_PROBES and not reinjected and after_id > 0:
+                want_reinject = (idle_hits >= IDLE_STALL_PROBES
+                                 and not reinjected and after_id > 0)
+                want_stall = (idle_hits >= IDLE_STALL_PROBES * 2
+                              and time.time() - start_time >= FIRST_TOKEN_MAX_SEC)
+                producing = False
+                if want_reinject or want_stall:
+                    # 杀/扰动前的看板复核：绕开 STATE_PROBE_SEC 节流缓存现场拉一次
+                    fresh = self._session_info(stand_session_id) or {}
+                    fresh_oc = fresh.get("outputChars")
+                    producing = (
+                        fresh.get("trafficState") not in (None, "idle")
+                        or (fresh_oc is not None and fresh_oc > (last_output_chars or 0))
+                    )
+                    if producing:
+                        logger.info(
+                            "空转判据被看板复核推翻: session=%s idle×%d 但会话有产出"
+                            "（outputChars %s→%s traffic=%s），归零重数",
+                            session_id, idle_hits, last_output_chars, fresh_oc,
+                            fresh.get("trafficState"),
+                        )
+                        idle_hits = 0
+                        sess_info = fresh
+                        if fresh_oc is not None:
+                            last_output_chars = fresh_oc
+                if want_reinject and not producing:
                     reinjected = True
                     try:
                         origin = next(
@@ -2460,7 +2536,7 @@ class Caller:
                              if m.get("id") == after_id), None)
                         if origin and origin.get("body"):
                             self.send_message(session_id, stand_name or "all", origin["body"])
-                            logger.warning("Stand 空转（idle×%d），已重投任务消息: session=%s",
+                            logger.warning("Stand 空转（idle×%d，看板复核零产出），已重投任务消息: session=%s",
                                            idle_hits, session_id)
                             log_audit("poll_reinject", {
                                 "task_id": task_id, "role": role, "template": template,
@@ -2469,7 +2545,7 @@ class Caller:
                             })
                     except Exception as e:
                         logger.warning("重投失败: %s", e)
-                elif idle_hits >= IDLE_STALL_PROBES * 2:
+                elif want_stall and not producing:
                     elapsed = round(time.time() - start_time, 2)
                     last_line = (sess_info or {}).get("lastLine") or ""
                     log_audit("poll_stall", {
@@ -2477,6 +2553,7 @@ class Caller:
                         "blocked": False, "session_id": session_id, "room_id": room_id,
                         "stand_session_id": stand_session_id, "elapsed": elapsed,
                         "reinjected": reinjected,
+                        "first_token_max": FIRST_TOKEN_MAX_SEC,
                     })
                     return {
                         "session_id": session_id,
@@ -2489,7 +2566,8 @@ class Caller:
                         "messages_count": last_id,
                         "stuck_last_line": last_line,
                         "error": (
-                            "Stand 空转：任务已投递但会话零产出"
+                            f"Stand 空转：任务已投递 {elapsed:.0f}s 会话零产出"
+                            f"（首字上限 {FIRST_TOKEN_MAX_SEC:.0f}s 已过，看板复核确认）"
                             + ("（已重投一次仍无效）" if reinjected else "")
                             + "——疑注入丢失或模型秒退，去 areco 看板查看会话"
                         ),
@@ -2499,15 +2577,28 @@ class Caller:
             #    读得到红绿灯时，working = 还在干 → 继续等并入后续回复；
             #    conclusion/idle/exited/读不到灯 → 静默 MERGE_WAIT_SEC 后定稿（原合并窗口径）；
             #    灯坏死兜底：首条回复起 SETTLE_MAX_SEC 仍 working，强制定稿（记 settle_forced）。
+            #    ⑥ 定稿闸收紧（2026-07-29 高律师批）：短合并窗只对「像交付物」的回复开放
+            #    （含结论段/产物路径/数字结果之一，见 _looks_like_deliverable）；纯进度句
+            #    （「我先…」「让我来…」）改吃 PROGRESS_SETTLE_SEC 续等窗——窗内新回复刷新
+            #    last_reply_at、终端输出增长由 output_stall_probes 兜着，都会让它继续等。
+            #    当日实证：任务① 25min / ④ 124s / 黎官检索 1167s 全是第一条进度句刚到
+            #    就被收网，真结果烂在房里。
             if stand_replies:
                 settle = False
                 settle_forced = False
                 settle_reason = None
+                deliverable = _looks_like_deliverable(
+                    "\n\n".join(m.get("body", "") for m in stand_replies if m.get("body"))
+                )
                 if stand_session_id and traffic == "working":
                     # tool 尾假 working（B4 e2e 实测多等 9 分钟）：agent 用 areco-msg 回执后
                     # turn 以工具调用收尾，transcript 灯不落绿——outputChars 连续
                     # OUTPUT_STALL_PROBES 个探针零增长 = 没在干活，收口。
-                    if output_stall_probes >= OUTPUT_STALL_PROBES:
+                    # ⑥：手里只有进度句时 wedge 不收（④ 的 124s 收网正是「灯 working +
+                    # 首字长思考零输出增长 + 一句开工白」），续等满进度窗才放行。
+                    if output_stall_probes >= OUTPUT_STALL_PROBES and (
+                            deliverable
+                            or time.time() - last_reply_at >= PROGRESS_SETTLE_SEC):
                         settle = settle_forced = True
                         settle_reason = "working_wedged"
                         logger.info(
@@ -2525,7 +2616,16 @@ class Caller:
                     pass  # 黄灯累计期：等 stuck 判定或灯变绿，不定稿
                 else:
                     # conclusion/idle/exited/无灯可读（老调用方没传 stand_session_id）
-                    settle = time.time() - last_reply_at >= MERGE_WAIT_SEC
+                    quiet = time.time() - last_reply_at
+                    if deliverable:
+                        settle = quiet >= MERGE_WAIT_SEC
+                    else:
+                        # 纯进度句：静满续等窗才定稿；有探针时还须输出确已停增
+                        # （≥2 个探针零增长 ≈ 10s），防灯短暂落绿但终端还在打字。
+                        settle = (quiet >= PROGRESS_SETTLE_SEC
+                                  and (not stand_session_id or output_stall_probes >= 2))
+                        if settle:
+                            settle_reason = "progress_timeout"
                 if settle:
                     try:
                         tail = self.get_messages(session_id, after_id=last_id)
