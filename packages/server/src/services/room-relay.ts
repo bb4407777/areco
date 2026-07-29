@@ -16,7 +16,7 @@ import type { Session } from './session'
 import { DATA_DIR, MSG_CLI_PATH } from '../config'
 import { createLogger } from '../logger'
 import * as projectDb from './project-db'
-import { ALL_MENTION, CHARTER_FILE, parseMentions, RoomStore } from './rooms'
+import { ALL_MENTION, CHARTER_FILE, KIND_LABEL, parseMentions, RoomStore } from './rooms'
 import { shellQuote } from './templates'
 import { readAgentTranscript } from './agent-transcript'
 import { transcriptPath } from './transcript'
@@ -451,13 +451,16 @@ export class RoomRelay {
           ? `（你是项目「${room.name}」的驻场成员，项目根：${room.rootPath}。动手前先读 ${path.join(room.rootPath, CHARTER_FILE)}（项目宪章=驻留上下文），实质结论回写该文件「工作纪要」节。）`
           : null
       const replyCmd = `node ${shellQuote(MSG_CLI)} ${room.team} ${shellQuote(m.name)} ${shellQuote(from)} '<你的回复>'`
+      // 2026-07-29 高律师令：房间分任务/项目两层，注入文案按 kind 说「任务」或「项目」，
+      // 不再一律写「项目」（任务房间占绝大多数，旧文案误导 agent 以为自己在项目里）。
+      const kindLabel = KIND_LABEL[room.kind]
       const note =
-        `[项目·${room.name}] ${from}: ${flat}` +
+        `[${kindLabel}·${room.name}] ${from}: ${flat}` +
         (directive ? `（${directive}）` : '') +
         (ctx ? `（共享上下文 ${ctx.path}；最近：${ctx.preview}）` : '') +
         (recall ? `\n${recall}\n` : '') +
         (brief ? `\n${brief}\n` : '') +
-        `（⚠️你在终端里的回复${this.rooms.humanName}在项目里看不到，必须执行下面命令把回复发回项目，否则等于没回：${replyCmd}）`
+        `（⚠️你在终端里的回复${this.rooms.humanName}在${kindLabel}里看不到，必须执行下面命令把回复发回${kindLabel}，否则等于没回：${replyCmd}）`
       const nonce = this.injectNote(session.id, note, (sess) => {
         const beforeCount = this.sessionMessageCount(sess) // 注入前消息数（note 尚未落盘）
         // 标记待捕获：agent 若不主动回执，captureTick 取其回复代为回执到项目
