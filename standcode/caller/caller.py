@@ -26,6 +26,10 @@ import requests
 
 logger = logging.getLogger("standcode.caller")
 
+# 本进程启动时刻（≈模块 import 时刻，误差远小于 2s 容差）：等待者 state / ask 席位文件
+# 记录它当 start_ts，_waiter_alive 拿它对 ps lstart 做 pid 复用判别（2026-07-28 B5）。
+_PROC_START_TS = time.time()
+
 # ── 默认配置 ────────────────────────────────────────────────────────
 ARECO_BASE = os.environ.get("ARECO_BASE", "http://127.0.0.1:8790")
 # ── 本机私有配置 ────────────────────────────────────────────────────
@@ -153,6 +157,21 @@ MIN_TIMEOUT_SEC = _conf_float("STANDCODE_MIN_TIMEOUT", "min_timeout_sec", 600)
 #   翻倍仍空转返回 status='stall' 交人工。
 OUTPUT_STALL_PROBES = int(_conf_float("STANDCODE_OUTPUT_STALL_PROBES", "output_stall_probes", 12))
 IDLE_STALL_PROBES = int(_conf_float("STANDCODE_IDLE_STALL_PROBES", "idle_stall_probes", 9))
+
+# ── 重复派发闸 / 模板健康闸（2026-07-28 派发机制优化 A2/A3）──────────────
+# DUP_WINDOW_SEC 重复闸的时间窗：同一 request 的 running 任务只在窗口内算「在途」——
+# 窗口外的 running 是陈旧 state（等待者早死、reconcile 还没扫到），不该拦新派发。
+# 动机：07-28 实证同一任务 47 秒内 `go` 两次，派发链路没有任何重复闸。
+DUP_WINDOW_SEC = _conf_float("STANDCODE_DUP_WINDOW", "dup_window_sec", 7200)
+# 模板健康闸：同模板连续失败 ≥UNHEALTHY_FAIL_LIMIT 次即隔离 UNHEALTHY_TTL_SEC 秒。
+# 动机：07-27 实证 workbuddy-gpt56-remote 已 503/404 仍被路由 3 次、暖池同模板连补
+# 17 次只 warning 无 backoff。隔离期间 dispatch 硬报错（列健康模板，不静默换模板）、
+# refill/claim 直接跳过；成功一次即清除，until 过期自动恢复，pool --heal 手动解除。
+UNHEALTHY_PATH = Path(
+    os.environ.get("STANDCODE_UNHEALTHY") or str(Path(HOME_DIR) / ".standcode" / "unhealthy.json")
+)
+UNHEALTHY_FAIL_LIMIT = int(_conf_float("STANDCODE_UNHEALTHY_FAILS", "unhealthy_fail_limit", 2))
+UNHEALTHY_TTL_SEC = _conf_float("STANDCODE_UNHEALTHY_TTL", "unhealthy_ttl_sec", 1800)
 
 # ── 暖池 standby pool + plan 预热（2026-07-26 提速批件）──────────────────
 # 一单冷派发的固定税 ≈ 12-15s：spawn 后 areco 侧 8s 注入下限（MIN_BOOT）+ relay 2s
@@ -889,6 +908,88 @@ def ledger_append(event: str, room_id: str, **fields) -> None:
         logger.warning("房间台账写入失败 %s: %s", ROOMS_LEDGER_PATH, e)
 
 
+# ── 模板健康闸（2026-07-28 A3）────────────────────────────────────
+# 状态文件 ~/.standcode/unhealthy.json：{template_id: {"failures": n, "last_error": str,
+# "until": epoch}}。读写全部 try/except 兜底——健康闸是辅助设施，绝不能影响派发主链。
+
+def _read_unhealthy() -> dict:
+    """读模板黑名单。文件不存在/损坏一律当空。"""
+    try:
+        d = json.loads(UNHEALTHY_PATH.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_unhealthy(d: dict) -> None:
+    try:
+        UNHEALTHY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = UNHEALTHY_PATH.with_name(UNHEALTHY_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(UNHEALTHY_PATH)
+    except Exception as e:
+        logger.warning("模板黑名单写入失败（不影响派发）: %s", e)
+
+
+def unhealthy_until(tpl: str) -> float:
+    """模板隔离截止 epoch；0 = 未隔离（until 过期自动视为恢复）。"""
+    if not tpl:
+        return 0.0
+    ent = _read_unhealthy().get(tpl) or {}
+    try:
+        until = float(ent.get("until") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return until if until > time.time() else 0.0
+
+
+def template_mark_failure(tpl: str, err) -> None:
+    """记一次模板连续失败；达 UNHEALTHY_FAIL_LIMIT 即隔离 UNHEALTHY_TTL_SEC 秒。"""
+    if not tpl:
+        return
+    try:
+        d = _read_unhealthy()
+        ent = d.get(tpl) or {}
+        failures = int(ent.get("failures") or 0) + 1
+        rec = {"failures": failures, "last_error": str(err)[:300],
+               "until": ent.get("until") or 0}
+        if failures >= UNHEALTHY_FAIL_LIMIT:
+            rec["until"] = time.time() + UNHEALTHY_TTL_SEC
+            logger.warning("模板『%s』连续失败 %d 次，隔离 %.0f 分钟（last_error: %s）",
+                           tpl, failures, UNHEALTHY_TTL_SEC / 60, err)
+        d[tpl] = rec
+        _write_unhealthy(d)
+    except Exception as e:
+        logger.warning("模板黑名单记录失败（不影响派发）: %s", e)
+
+
+def template_mark_success(tpl: str) -> None:
+    """模板成功一次即清除黑名单记录（连续失败计数归零）。"""
+    if not tpl:
+        return
+    try:
+        d = _read_unhealthy()
+        if tpl in d:
+            d.pop(tpl, None)
+            _write_unhealthy(d)
+    except Exception as e:
+        logger.warning("模板黑名单清除失败（不影响派发）: %s", e)
+
+
+def _parse_iso_ts(s: str | None) -> float | None:
+    """_now_iso 产出的 "%Y-%m-%dT%H:%M:%SZ" → epoch；解析失败 None。"""
+    try:
+        return datetime.strptime(s or "", "%Y-%m-%dT%H:%M:%SZ") \
+            .replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def _norm_request(text: str) -> str:
+    """重复派发闸（A2）的 request 规范化：去全部空白 + lower。"""
+    return "".join((text or "").split()).lower()
+
+
 def ledger_load() -> dict:
     """读台账并按 room_id 折叠成 {room_id: 合并后的记录}（后写覆盖前写）"""
     merged: dict[str, dict] = {}
@@ -1425,6 +1526,10 @@ class Caller:
         """
         if not STANDBY_ENABLED:
             return None
+        if unhealthy_until(template_id):
+            # 健康闸（2026-07-28 A3）：黑名单模板不碰（dispatch 的健康闸会先行硬报错，
+            # 这里双保险防 refill/旧席位被认领）
+            return None
         try:
             for f in self._standby_files(template_id):
                 claimed = f.with_name(f.name + f".claiming-{os.getpid()}")
@@ -1496,6 +1601,10 @@ class Caller:
         """
         if not STANDBY_ENABLED:
             return None
+        if unhealthy_until(template_id):
+            # 健康闸（2026-07-28 A3）：黑名单模板直接跳过，不再连刷 404
+            logger.info("暖池补胎跳过：模板『%s』在健康闸黑名单内", template_id)
+            return None
         try:
             if len(self._standby_files(template_id)) >= STANDBY_POOL_SIZE:
                 return None
@@ -1520,9 +1629,11 @@ class Caller:
             ledger_append("created", room["id"], room_name=room.get("name", ""),
                           team=room["team"], template_id=template_id, by="standby_refill")
             log_audit("standby_refill", {"template": template_id, "room_id": room["id"]})
+            template_mark_success(template_id)  # 健康闸：补胎走通一次即清除黑名单记录
             logger.info("暖池补胎: room=%s tpl=%s", room["id"], template_id)
             return info
         except Exception as e:
+            template_mark_failure(template_id, e)  # 健康闸：连挂计数（此前只 warning 无 backoff）
             logger.warning("standby 补胎失败（不影响主链）tpl=%s: %s", template_id, e)
             return None
 
@@ -1800,6 +1911,22 @@ class Caller:
         effective_task_type = task_type or "general"
         effective_role = role or self.roles.get(tid, "worker")
 
+        # 1.1 模板健康闸（2026-07-28 A3）：黑名单模板且 until 未到 → 硬报错，显式
+        #     --template 与默认解析命中同口径，**不静默换模板**（默认角色唯一口径，
+        #     静默换了审计里的 template 就撒谎）。错误信息附健康模板清单
+        #     （areco 模板列表 − 在黑名单的），拿不到列表就只报错不列表。
+        _blocked_until = unhealthy_until(tid)
+        if _blocked_until:
+            _last_err = (_read_unhealthy().get(tid) or {}).get("last_error", "")
+            _healthy = sorted(t for t in self.list_template_ids() if not unhealthy_until(t))
+            raise RuntimeError(
+                f"模板『{tid}』因连续失败被隔离中"
+                f"（至 {datetime.fromtimestamp(_blocked_until).strftime('%H:%M')}，"
+                f"last_error: {str(_last_err)[:120]}）。"
+                + (f"当前健康模板：{', '.join(_healthy)}。" if _healthy else "")
+                + f"确认已修复用 `caller.py pool --heal {tid}` 手动解除，或等到期自动恢复。"
+            )
+
         # 1.5 工作区隔离（默认关）。仅准备目录 + 回填结果；cwd 落地待 areco 支持。
         #     复用通道下忽略——cwd 只能在 spawn 时定，复用的 Stand 早已 spawn 完。
         workspace_info = (
@@ -1831,6 +1958,7 @@ class Caller:
                 msg_id = self.send_message(team, stand_name, request)
             except Exception as e:
                 logger.error("复用派发失败（room=%s tid=%s）：%s", rid, tid, e)
+                template_mark_failure(tid, e)  # 健康闸：复用路发消息失败也计数
                 log_audit("dispatch_failed", {
                     "task_id": task_id, "mode": mode, "role": effective_role,
                     "template": tid, "room_id": rid, "error": str(e),
@@ -1918,6 +2046,7 @@ class Caller:
             msg_id = self.send_message(team, stand_name, request)
         except Exception as e:
             logger.error("派发中途失败（room=%s tid=%s）：%s", rid, tid, e)
+            template_mark_failure(tid, e)  # 健康闸：建房/add_stand/发消息失败回滚路径计数
             log_audit("dispatch_failed", {
                 "task_id": task_id, "mode": mode, "role": effective_role,
                 "template": tid, "room_id": rid, "error": str(e),
@@ -1953,6 +2082,7 @@ class Caller:
         stand_reused, standby_hit,
     ) -> dict:
         """dispatch 收尾（冷启动/复用两条路共用）：result 组装、台账、审计、面包屑、补胎。"""
+        template_mark_success(tid)  # 健康闸：派发走通一次即清除该模板黑名单记录
         result = {
             "task_id": task_id,
             "session_id": team,
@@ -2172,6 +2302,11 @@ class Caller:
             # 1) 拉增量消息
             try:
                 messages = self.get_messages(session_id, after_id=last_id)
+            except RuntimeError:
+                # get_messages 连续失败 ≥MSG_READ_FAIL_LIMIT 的上抛是致命信号（库被锁/
+                # schema 漂移），必须穿透给上层转 error 终态。吞掉的话 timeout=0 时进程
+                # 每轮立即再抛、0.5s 空转永挂——既不报错也不写 inbox（2026-07-28 A1）。
+                raise
             except Exception as e:
                 logger.warning("查询消息失败: %s", e)
                 time.sleep(poll_interval)
@@ -4398,6 +4533,111 @@ def process_inbox_callback(task_id: str) -> dict:
 
 
 
+def _finalize_waiter(
+    caller: "Caller",
+    task_id: str,
+    state: dict,
+    res: dict,
+    *,
+    spec: dict,
+    files: list | None = None,
+    request_summary: str | None = None,
+    with_checks: bool = True,
+    mark_done: bool = True,
+) -> dict:
+    """等待者公共收尾（run --wait / ask / _bg_worker 三处共用，2026-07-28 B4 抽并）。
+
+    三处收尾块此前近乎复制已漂移（ask 路 verify_completion 漏传 plan output_path，
+    plan 模式产物落点机检在 ask 路永远缺项——抽并时顺带修，与 run 路同口径）。
+
+    流程：state 终态回填 → 落盘 → completed 时机检（产物文件 + plan output_path）
+    + 每单成本 → 写 inbox → completed 标 .done（防下轮 digest 双报）。
+    with_checks=False（_bg_worker 旧口径）：跳过机检与成本；
+    mark_done=False（_bg_worker 旧口径）：inbox 不标 .done（由代发链清）。
+    返回 {"status", "result_text", "verification", "cost", "inbox_path"}。
+    """
+    status = res.get("status", "completed")
+    result_text = res.get("result_text", "")
+    state.update({
+        "status": status,
+        "result_text": result_text,
+        "result_preview": result_text[:500],
+        "elapsed": res.get("elapsed"),
+        "completed_at": res.get("completed_at") or _now_iso(),
+        "room_id": res.get("room_id"),
+        "session_id": res.get("session_id"),
+        "stand_name": res.get("stand_name"),
+        "template_id": res.get("template_id"),
+        "role": res.get("role"),
+        # 消息水位线：stuck/失联后若人工解开选项、Stand 继续跑完，迟到结果
+        # 落在房间里 id>此值处——reconcile 补收凭它增量取，不会翻旧账
+        "messages_count": res.get("messages_count"),
+        "stuck_last_line": res.get("stuck_last_line"),
+        # settle_forced 持久化：灯坏死强制定稿的任务，真正干完的迟到结果还会落
+        # 房间——reconcile 凭此标志 + 水位线做增补扫描
+        "settle_forced": res.get("settle_forced"),
+        "settle_reason": res.get("settle_reason"),
+        "error": res.get("error"),
+    })
+    _write_state(task_id, state)
+    # ── 机检收口 + 每单成本（2026-07-26 全量学习优化，agentacct 借鉴件）──
+    # verification：completed 时把可机检判据（产物文件存在且非空）真跑一遍，
+    # 回执按 verified/check_failed/agent_reported 分级标注——Worker 说完成
+    # ≠ 完成，机器过一遍才算数。cost：从 Stand 自己的 transcript 读 usage，
+    # 标 client_reported，拿不到就 None（绝不估算编数）。
+    verification = None
+    cost = None
+    if with_checks:
+        if status == "completed":
+            plan_parsed = res.get("plan_parsed") if isinstance(res.get("plan_parsed"), dict) else {}
+            verification = verify_completion(
+                files=files or [],
+                output_path=(plan_parsed or {}).get("output_path"),
+            )
+        cost = caller.collect_stand_cost(
+            res.get("stand_session_id")
+            or (res.get("execute") or {}).get("stand_session_id")
+            or ""
+        )
+        state["verification"] = verification
+        state["cost"] = cost
+        _write_state(task_id, state)
+    # inbox 与各等待者同构：Hermes 醒来后凭 task_id 读全文（process_inbox_callback 兼容）
+    write_inbox(task_id, {
+        "task_id": task_id,
+        "room_id": res.get("room_id"),
+        "stand": res.get("stand_name") or spec.get("role") or "?",
+        "role": res.get("role") or spec.get("role") or "",
+        "status": status,
+        "result_text": result_text,
+        "files": files or [],
+        "request_summary": request_summary,
+        "request": (spec.get("request") or "")[:200],
+        "verification": verification,
+        "cost": cost,
+        "channel": _current_channel(),
+        "error": res.get("error"),
+    })
+    inbox_final = _inbox_path(task_id)
+    if mark_done and status == "completed":
+        # 双报去重（2026-07-26 高律师批全量修复 B4）：completed 的结果已随本进程退出
+        # 经 gateway notify 全文转述，inbox 再留 pending 会在下轮 digest 二次汇报。
+        # 完成即标 .done；stuck/lost/error/timeout 仍留 pending 由 digest 兜底。
+        try:
+            done = inbox_final.with_name(inbox_final.name + DONE_SUFFIX)
+            inbox_final.rename(done)
+            inbox_final = done
+        except OSError as e:
+            logger.warning("inbox 标 .done 失败（会出现一次重复汇报）: %s", e)
+    return {
+        "status": status,
+        "result_text": result_text,
+        "verification": verification,
+        "cost": cost,
+        "inbox_path": inbox_final,
+    }
+
+
 def _bg_worker(task_id: str) -> int:
     """后台 worker：dispatch → 主动轮询(1s) → 写 inbox + 发触发消息 → 落状态；出错也写 inbox。"""
     state = _read_state(task_id)
@@ -4438,40 +4678,20 @@ def _bg_worker(task_id: str) -> int:
         session_id = res.get("session_id")
         state["work_mode"] = res.get("mode")
 
-        state.update(
-            {
-                "status": "completed" if poll_status == "completed" else poll_status,
-                "result_text": result_text,
-                "result_preview": result_text[:500],
-                "elapsed": res.get("elapsed"),
-                "completed_at": res.get("completed_at") or _now_iso(),
-                "room_id": room_id,
-                "session_id": session_id,
-                "stand_name": res.get("stand_name"),
-                "template_id": res.get("template_id"),
-                "role": res.get("role"),
-                "error": res.get("error"),
-                # 注：完整结果不直接发（inbox 设计：Hermes 读 inbox 后由
-                # process_inbox_callback 代发）。wechat_relayed/wechat_dry_run 改由下方
-                # 触发消息结果决定，避免「dry-run 未真发」误判掩盖真实 cc-send 失败。
-            }
+        # 与 run --wait 同一份公共收尾（2026-07-28 B4 抽并）。bg 旧口径保留：
+        # 不跑机检/成本（with_checks=False）、inbox 不标 .done（结果由
+        # process_inbox_callback 代发后才清）。
+        # 注：完整结果不直接发（inbox 设计：Hermes 读 inbox 后由 process_inbox_callback
+        # 代发）。wechat_relayed/wechat_dry_run 改由下方触发消息结果决定，
+        # 避免「dry-run 未真发」误判掩盖真实 cc-send 失败。
+        _finalize_waiter(
+            caller, task_id, state, res,
+            spec=spec,
+            files=[spec["file"]] if spec.get("file") else [],
+            request_summary=spec.get("summary"),
+            with_checks=False,
+            mark_done=False,
         )
-
-        # 异步回调：写 inbox + 发触发消息（不直接发完整结果）
-        inbox_payload = {
-            "task_id": task_id,
-            "room_id": room_id,
-            "stand": state.get("stand_name") or spec.get("role") or "?",
-            "role": state.get("role") or spec.get("role") or "",
-            "status": state.get("status"),
-            "result_text": result_text,
-            "files": [spec["file"]] if spec.get("file") else [],
-            "request_summary": spec.get("summary"),
-            "request": spec.get("request", "")[:200],
-            "channel": _current_channel(),
-            "error": state.get("error"),
-        }
-        write_inbox(task_id, inbox_payload)
         # 拉模式（2026-07-25 用户定）：触发消息链废除，恒 dry_run=True 只拼不发——
         # 结果只落 inbox，由 Hermes 下次被微信唤醒时拉取（SKILL.md「收信箱拉模式」）。
         trigger = send_callback_trigger(
@@ -4644,6 +4864,51 @@ def _run_by_mode(
     return {**res, "mode": mode}
 
 
+def _find_inflight_dup(request: str, window_sec: float = DUP_WINDOW_SEC) -> dict | None:
+    """扫 TASKS_DIR 找「同一 request 的在途 running 任务」（2026-07-28 A2 重复派发闸）。
+
+    全部满足才算在途重复：① status=running；② spec.request 规范化（压缩空白+lower）
+    与本次相同；③ 等待者存活（B5 加固口径，pid 复用不算活）；④ 创建于 window 内
+    （窗口外的 running 是陈旧 state，等待者早死 reconcile 还没扫到，不该拦新派发）。
+    任一环节读不动都跳过该任务——宁放行不误拦，误拦 = 用户任务凭空消失。
+    """
+    norm = _norm_request(request)
+    if not norm:
+        return None
+    try:
+        files = sorted(TASKS_DIR.glob("*.json"))
+    except OSError:
+        return None
+    now = time.time()
+    for p in files:
+        try:
+            st = json.loads(p.read_text())
+        except Exception:
+            continue
+        if st.get("status") != "running":
+            continue
+        if _norm_request((st.get("spec") or {}).get("request", "")) != norm:
+            continue
+        try:
+            created = _parse_iso_ts(st.get("created_at")) or p.stat().st_mtime
+        except OSError:
+            continue
+        if now - created > window_sec:
+            continue
+        if not _waiter_alive(st.get("pid"), task_id=st.get("task_id") or p.stem,
+                             start_ts=st.get("start_ts"),
+                             request=(st.get("spec") or {}).get("request", "")):
+            continue
+        return {
+            "task_id": st.get("task_id") or p.stem,
+            "room_id": st.get("room_id")
+                       or ((st.get("dispatches") or [{}])[-1].get("room_id")),
+            "pid": st.get("pid"),
+            "created_at": st.get("created_at"),
+        }
+    return None
+
+
 def _cmd_run(args) -> int:
     # --timeout 未显式给时：--wait/--bg 默认 0（无限等到 Stand 完成），普通前台默认 600
     timeout = args.timeout if args.timeout is not None else (
@@ -4740,6 +5005,7 @@ def _cmd_run(args) -> int:
             start_new_session=True,
         )
         state["pid"] = proc.pid
+        state["start_ts"] = time.time()  # worker 进程启动时刻（B5 pid 复用判别用）
         _write_state(task_id, state)
         print(task_id)
         print(f"查状态: python3 {Path(__file__).name} status {task_id}")
@@ -4752,6 +5018,21 @@ def _cmd_run(args) -> int:
     # 本进程退出即触发 gateway watcher 回注原微信会话（零 cc-send、零 API key、零 chat_id 落盘）；
     # 执行者（Stand）全程是 areco 会话，看板可见可接管——等待者只是轻量 poll，不是执行者。
     if getattr(args, "wait", False):
+        # 重复派发闸（2026-07-28 A2，07-28 实证同一任务 47 秒内 go 两次）：同 request
+        # 有在途 running 任务且等待者存活 → 拒派，退出码 2；--force 显式跳过。
+        # 检查放在 _cmd_run --wait 入口一处：go（委托 _cmd_run）与 fanout/plan
+        # （同走 --wait 链）全覆盖。
+        if not getattr(args, "force", False):
+            dup = _find_inflight_dup(args.request)
+            if dup:
+                print(json.dumps({
+                    "status": "duplicate",
+                    "inflight": dup,
+                    "error": (f"同一 request 已有在途任务 {dup['task_id']}"
+                              f"（房间 {dup.get('room_id') or '-'}，等待者 pid {dup.get('pid')}）"
+                              f"——等它跑完；确认它已死可加 --force 强派"),
+                }, ensure_ascii=False, indent=2), file=_sys.stderr)
+                return 2
         task_id = f"wait-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         spec = {
             "request": args.request,
@@ -4775,6 +5056,8 @@ def _cmd_run(args) -> int:
             "status": "running",
             "created_at": _now_iso(),
             "pid": os.getpid(),
+            # 等待者进程启动时刻（B5）：_waiter_alive 拿它对 ps lstart 判 pid 复用
+            "start_ts": _PROC_START_TS,
             "channel": _current_channel(),  # 双通道:reconcile 补收时凭它回对通道
         }
         _write_state(task_id, state)
@@ -4825,83 +5108,42 @@ def _cmd_run(args) -> int:
             ))
             return 2
         except Exception as e:
+            # error 终态也要落 inbox（2026-07-28 A1）：poll 读库致命错误穿透上来的
+            # RuntimeError 等异常，此前只落 state 不写 inbox——结果的唯一副本随进程
+            # 退出消失，digest 也无从兜底。
             state.update({"status": "error", "error": str(e), "completed_at": _now_iso()})
             _write_state(task_id, state)
+            try:
+                write_inbox(task_id, {
+                    "task_id": task_id,
+                    "room_id": None,
+                    "stand": "?",
+                    "role": args.role or "",
+                    "status": "error",
+                    "result_text": "",
+                    "files": [args.file] if args.file else [],
+                    "request_summary": args.summary,
+                    "request": (args.request or "")[:200],
+                    "channel": _current_channel(),
+                    "error": str(e),
+                })
+            except Exception:
+                pass
             print(json.dumps(
                 {"mode": "wait", "task_id": task_id, "status": "error", "error": str(e)},
                 ensure_ascii=False, indent=2,
             ))
             return 1
-        state.update({
-            "status": status,
-            "result_text": result_text,
-            "result_preview": result_text[:500],
-            "elapsed": res.get("elapsed"),
-            "completed_at": res.get("completed_at") or _now_iso(),
-            "room_id": room_id,
-            "session_id": session_id,
-            "stand_name": res.get("stand_name"),
-            "template_id": res.get("template_id"),
-            "role": res.get("role"),
-            # 消息水位线：stuck/失联后若人工解开选项、Stand 继续跑完，迟到结果
-            # 落在房间里 id>此值处——reconcile 补收凭它增量取，不会翻旧账
-            "messages_count": res.get("messages_count"),
-            "stuck_last_line": res.get("stuck_last_line"),
-            # settle_forced 持久化（全量修复 A3）：灯坏死强制定稿的任务，真正干完的
-            # 迟到结果还会落房间——reconcile 凭此标志 + 水位线做增补扫描
-            "settle_forced": res.get("settle_forced"),
-            "settle_reason": res.get("settle_reason"),
-            "error": res.get("error"),
-        })
-        _write_state(task_id, state)
-        # ── 机检收口 + 每单成本（2026-07-26 全量学习优化，agentacct 借鉴件）──
-        # verification：completed 时把可机检判据（产物文件存在且非空）真跑一遍，
-        # 回执按 verified/check_failed/agent_reported 分级标注——Worker 说完成
-        # ≠ 完成，机器过一遍才算数。cost：从 Stand 自己的 transcript 读 usage，
-        # 标 client_reported，拿不到就 None（绝不估算编数）。
-        verification = None
-        if status == "completed":
-            plan_parsed = res.get("plan_parsed") if isinstance(res.get("plan_parsed"), dict) else {}
-            verification = verify_completion(
-                files=[args.file] if args.file else [],
-                output_path=(plan_parsed or {}).get("output_path"),
-            )
-        cost = caller.collect_stand_cost(
-            res.get("stand_session_id")
-            or (res.get("execute") or {}).get("stand_session_id")
-            or ""
+        # 公共收尾（2026-07-28 B4 抽并）：state 终态 → 机检+成本 → inbox → 标 .done
+        fin = _finalize_waiter(
+            caller, task_id, state, res,
+            spec=spec,
+            files=[args.file] if args.file else [],
+            request_summary=args.summary,
         )
-        state["verification"] = verification
-        state["cost"] = cost
-        _write_state(task_id, state)
-        # inbox 与 _bg_worker 同构：Hermes 醒来后凭 task_id 读全文（process_inbox_callback 兼容）
-        write_inbox(task_id, {
-            "task_id": task_id,
-            "room_id": room_id,
-            "stand": res.get("stand_name") or args.role or "?",
-            "role": res.get("role") or args.role or "",
-            "status": status,
-            "result_text": result_text,
-            "files": [args.file] if args.file else [],
-            "request_summary": args.summary,
-            "request": (args.request or "")[:200],
-            "verification": verification,
-            "cost": cost,
-            "channel": _current_channel(),
-            "error": res.get("error"),
-        })
-        inbox_final = _inbox_path(task_id)
-        if status == "completed":
-            # 双报去重（2026-07-26 高律师批全量修复 B4）：completed 的结果已随本进程退出
-            # 经 gateway notify 全文转述，inbox 再留 pending 会在下轮 digest 二次汇报
-            # （「发新命令时汇报之前的进度」即此）。完成即标 .done；
-            # stuck/lost/error/timeout 仍留 pending 由 digest 兜底。
-            try:
-                done = inbox_final.with_name(inbox_final.name + DONE_SUFFIX)
-                inbox_final.rename(done)
-                inbox_final = done
-            except OSError as e:
-                logger.warning("inbox 标 .done 失败（会出现一次重复汇报）: %s", e)
+        verification = fin["verification"]
+        cost = fin["cost"]
+        inbox_final = fin["inbox_path"]
         # --brief：stdout 截断到简报级（全文已落 inbox，凭 inbox_path 可取）。
         # 这段 stdout 会整个进 Hermes 会话历史、随后续每次 API 调用回放——长结果
         # 全文回放是今天工具输出占历史 85% 的主因之一。缺省行为不变（决议口径：
@@ -5053,8 +5295,19 @@ def _cmd_go(args) -> int:
         "dry_run": bool(args.dry_run), "request_preview": request[:200],
     })
     # 头行先落 stdout（flush）：通知回放时 Hermes 一眼见到分诊结论，转述不用再猜。
+    caller = Caller()
+    role = "worker" if mode in ("worker", "fast", "fanout", "plan") else "thinker"
+    if args.template:
+        selected_template = args.template
+    elif mode == "fast":
+        selected_template = caller.task_map.get("fast") or caller.default_worker_id
+    elif role == "thinker":
+        selected_template = caller.default_thinker_id
+    else:
+        selected_template = caller.default_worker_id
     print(json.dumps({
-        "cmd": "go", "mode": mode, "plan_only": plan_only, "summary": summary,
+        "cmd": "go", "mode": mode, "role": role, "template_id": selected_template,
+        "plan_only": plan_only, "summary": summary,
         "route_reason": route_reason[:80],
         "recall": (args.recall or "").strip() or None,
     }, ensure_ascii=False), flush=True)
@@ -5073,6 +5326,7 @@ def _cmd_go(args) -> int:
         template=args.template, room_id=args.room_id,
         summary=summary, file=args.file, timeout=args.timeout,
         no_relay=False, dry_run=False, reuse_plan=bool(args.reuse_plan),
+        force=bool(getattr(args, "force", False)),
     )
     return _cmd_run(ns)
 
@@ -5087,13 +5341,15 @@ def _ask_claim_path(session_id: str) -> Path:
     return ASK_CLAIMS_DIR / f"{session_id}.claim"
 
 
-def acquire_ask_claim(session_id: str, task_id: str) -> bool:
+def acquire_ask_claim(session_id: str, task_id: str, request: str = "") -> bool:
     """抢常驻会话的直投席位。持有者等待者进程已死 → 夺锁重试一次（防死锁烂尾：
     等待者被 kill -9 后席位永远占着，之后所有 ask 全被挤去 fork）。"""
     if not session_id:
         return False
     path = _ask_claim_path(session_id)
-    payload = json.dumps({"pid": os.getpid(), "task_id": task_id, "at": _now_iso()})
+    payload = json.dumps({"pid": os.getpid(), "task_id": task_id, "at": _now_iso(),
+                          "start_ts": _PROC_START_TS,
+                          "req": " ".join((request or "").split())[:40]})
     for _ in range(2):
         try:
             ASK_CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5106,7 +5362,10 @@ def acquire_ask_claim(session_id: str, task_id: str) -> bool:
                 holder = json.loads(path.read_text())
             except Exception:
                 holder = {}
-            if _waiter_alive(holder.get("pid")):
+            # 席位持有者的 cmdline 不含 task_id（ask 链 argv 是请求原文）——只凭
+            # start_ts 对 lstart（pid 复用判别）+ 请求片段/caller.py 回落判活。
+            if _waiter_alive(holder.get("pid"), start_ts=holder.get("start_ts"),
+                             request=holder.get("req", "")):
                 return False  # 真有人占着：转 fork
             try:
                 path.unlink(missing_ok=True)  # 陈锁（持有者已死）：夺
@@ -5188,7 +5447,8 @@ def _cmd_ask(args) -> int:
     # 2) 直投席位：探灯说空闲还要抢到 claim 才算数（同轮并发闸，见 acquire_ask_claim）。
     claim_held = False
     if route == "direct":
-        claim_held = acquire_ask_claim(channel.get("session_id", ""), task_id)
+        claim_held = acquire_ask_claim(channel.get("session_id", ""), task_id,
+                                       request=dispatched_request)
         if not claim_held and not args.direct:
             route, probe_reason = "fork", "直投席位被并发 ask 占用，另开并行任务"
 
@@ -5235,6 +5495,7 @@ def _cmd_ask(args) -> int:
         "task_id": task_id, "mode": "wait", "work_mode": "ask",
         "ask_route": route, "spec": spec, "status": "running",
         "created_at": _now_iso(), "pid": os.getpid(),
+        "start_ts": _PROC_START_TS,  # 同 run --wait：供 _waiter_alive 判 pid 复用
         "channel": _current_channel(),
     }
     _write_state(task_id, state)
@@ -5310,60 +5571,19 @@ def _cmd_ask(args) -> int:
         if claim_held:
             release_ask_claim(channel.get("session_id", ""), task_id)
 
-    status = res.get("status", "completed")
-    result_text = res.get("result_text", "")
-    state.update({
-        "status": status,
-        "result_text": result_text,
-        "result_preview": result_text[:500],
-        "elapsed": res.get("elapsed"),
-        "completed_at": res.get("completed_at") or _now_iso(),
-        "room_id": res.get("room_id"),
-        "session_id": res.get("session_id"),
-        "stand_name": res.get("stand_name"),
-        "template_id": res.get("template_id"),
-        "role": res.get("role"),
-        "messages_count": res.get("messages_count"),
-        "stuck_last_line": res.get("stuck_last_line"),
-        "settle_forced": res.get("settle_forced"),
-        "settle_reason": res.get("settle_reason"),
-        "error": res.get("error"),
-    })
-    _write_state(task_id, state)
-
-    verification = None
-    if status == "completed":
-        verification = verify_completion(files=[args.file] if args.file else [])
-    cost = caller.collect_stand_cost(res.get("stand_session_id") or "")
-    state["verification"] = verification
-    state["cost"] = cost
-    _write_state(task_id, state)
-
-    write_inbox(task_id, {
-        "task_id": task_id,
-        "room_id": res.get("room_id"),
-        "stand": res.get("stand_name") or "?",
-        "role": res.get("role") or "worker",
-        "status": status,
-        "result_text": result_text,
-        "files": [args.file] if args.file else [],
-        "request_summary": summary,
-        "request": request[:200],
-        "verification": verification,
-        "cost": cost,
-        "channel": _current_channel(),
-        "error": res.get("error"),
-    })
-    inbox_final = _inbox_path(task_id)
-    if status == "completed":
-        # 与 run --wait 同口径：completed 已随本进程退出经 notify 全文转述，
-        # inbox 即标 .done 防下轮 digest 双报
-        try:
-            done = inbox_final.with_name(inbox_final.name + DONE_SUFFIX)
-            inbox_final.rename(done)
-            inbox_final = done
-        except OSError as e:
-            logger.warning("inbox 标 .done 失败（会出现一次重复汇报）: %s", e)
+    # 公共收尾（2026-07-28 B4 抽并，顺带修 ask 路 verify_completion 漏传 plan
+    # output_path——旧代码只传 files，plan 模式产物落点机检在 ask 路永远缺项）
+    fin = _finalize_waiter(
+        caller, task_id, state, res,
+        spec=spec,
+        files=[args.file] if args.file else [],
+        request_summary=summary,
+    )
+    status = fin["status"]
+    result_text = fin["result_text"]
+    verification = fin["verification"]
+    cost = fin["cost"]
+    inbox_final = fin["inbox_path"]
 
     out_text = result_text
     truncated = False
@@ -5416,18 +5636,53 @@ def _reconcile_lock() -> bool:
         return False
 
 
-def _waiter_alive(pid) -> bool:
-    """等待者进程还活着吗。pid 复用防误判：还叫 python/caller.py 的才算。
-    查不动时保守当活着——误判死会双写 inbox，误判活只是晚一轮。"""
+def _waiter_alive(pid, task_id: str = "", start_ts: float | None = None,
+                  request: str = "") -> bool:
+    """等待者进程还活着吗（2026-07-28 B5 加固：pid 复用误判升级）。
+
+    旧口径只看 ps 输出含 "caller.py"/"python"——pid 被任何一个常驻 python 复用即永久
+    误判活，死等待者的房间结果永远漏收。新口径（state/席位带 start_ts）三连判：
+      进程存在 且 ps lstart 与 start_ts 吻合（容差 2s）且 command 能认出原等待者——
+      cmdline 含 task_id（_worker 后台链 argv 带 task_id）或请求片段（前台 --wait/ask
+      链 argv 带请求原文）；两者都给不出时回落「含 caller.py/python 即活」的旧保守档。
+    lstart 解析失败/取不到 → 视为死（新口径宁可误判死：启动时间都在手还判不了，
+    说明进程已不是当初那个等待者）。旧 state 无 start_ts → 回落旧逻辑（查不动保守当活：
+    误判死会双写 inbox，误判活只是晚一轮）。
+    """
     if not pid:
         return False
     try:
-        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
-                             capture_output=True, text=True, timeout=5)
-        cmd = (out.stdout or "").strip()
-        return bool(cmd) and ("caller.py" in cmd or "python" in cmd.lower())
+        out = subprocess.run(
+            ["ps", "-o", "pid=,lstart=,command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+            env={**os.environ, "LC_ALL": "C"},  # 锁 C locale，lstart 英文月份才解析得动
+        )
     except Exception:
+        return True  # ps 本身跑不动：保守当活（旧口径同款兜底）
+    line = (out.stdout or "").strip()
+    if not line:
+        return False  # pid 无此进程：新旧口径都判死
+    if not start_ts:
+        # 旧 state 回落：含 caller.py/python 即活
+        return "caller.py" in line or "python" in line.lower()
+    # lstart 形如 "Tue Jul 28 10:00:00 2026"（LC_ALL=C 保证英文）
+    try:
+        parts = line.split(None, 6)
+        lstart = datetime.strptime(
+            " ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y").timestamp()
+        cmdline = parts[6] if len(parts) > 6 else ""
+        if abs(lstart - float(start_ts)) > 2:
+            return False  # pid 复用：启动时间对不上
+    except Exception:
+        return False  # 解析失败 → 视为死
+    if task_id and task_id in cmdline:
         return True
+    req_key = " ".join((request or "").split())[:40]
+    if req_key and req_key in cmdline:
+        return True
+    if not task_id and not req_key:
+        return "caller.py" in cmdline or "python" in cmdline.lower()
+    return False
 
 
 def _stand_msgs(msgs: list[dict], stand_name: str) -> list[dict]:
@@ -5550,6 +5805,14 @@ def _cmd_reconcile(args) -> int:
         return 0
     try:
         caller = Caller()
+        # B6（2026-07-28）：sessions 全量列表每轮只拉一次，四个分支复用——此前每个
+        # 任务各调一次 _session_info（每次全量列表线性匹配），N 倍 API 负载。
+        # 拉取失败 = 空 dict：各分支维持 fail-open（查不到不判死、不拦，与
+        # _session_info 返回 None 同语义）。
+        try:
+            sessions_by_id = {s.get("id"): s for s in caller.list_sessions()}
+        except Exception:
+            sessions_by_id = {}
         cutoff = time.time() - args.max_age_days * 86400
         counts = {"scanned": 0, "harvested": 0, "stuck_marked": 0,
                   "lost_marked": 0, "dead_marked": 0, "waiting": 0}
@@ -5585,7 +5848,7 @@ def _cmd_reconcile(args) -> int:
                     # 无新回复（全量修复 A2）：查会话态——卡死会话被人直接杀掉/归档
                     # （exited）则升级 lost 落通知，否则（还卡着/查不到）留待下轮
                     sid = _last_stand_session(st)
-                    info = (caller._session_info(sid) or {}) if sid else {}
+                    info = (sessions_by_id.get(sid) or {}) if sid else {}
                     if info.get("status") == "exited":
                         err = "卡死会话已退出且无回复——结果丢失，需人工重派"
                         if not args.dry_run:
@@ -5619,7 +5882,7 @@ def _cmd_reconcile(args) -> int:
                     actions.append(f"✅ {task_id} settle_forced 后补收 {len(replies)} 条迟到回复")
                 else:
                     sid = _last_stand_session(st)
-                    info = (caller._session_info(sid) or {}) if sid else {}
+                    info = (sessions_by_id.get(sid) or {}) if sid else {}
                     if info.get("status") == "exited" or info.get("trafficState") in ("conclusion", "idle"):
                         if not args.dry_run:
                             st["settle_forced"] = False
@@ -5655,7 +5918,7 @@ def _cmd_reconcile(args) -> int:
                     _rec_archive_room(caller, st, args.dry_run, actions)
                 else:
                     sid = _last_stand_session(st)
-                    info = (caller._session_info(sid) or {}) if sid else {}
+                    info = (sessions_by_id.get(sid) or {}) if sid else {}
                     if info.get("status") == "exited" or info.get("trafficState") in ("conclusion", "idle"):
                         if not args.dry_run:
                             st["late_scan_done"] = True
@@ -5666,7 +5929,9 @@ def _cmd_reconcile(args) -> int:
                         counts["waiting"] += 1
 
             elif status == "running":
-                if _waiter_alive(st.get("pid")):
+                if _waiter_alive(st.get("pid"), task_id=task_id,
+                                 start_ts=st.get("start_ts"),
+                                 request=(st.get("spec") or {}).get("request", "")):
                     continue
                 counts["scanned"] += 1
                 disp = st.get("dispatches") or []
@@ -5700,7 +5965,7 @@ def _cmd_reconcile(args) -> int:
                     actions.append(
                         f"✅ {task_id} 死等待者补收 {len(replies)} 条回复（房间 {last.get('room_id')}）")
                     continue
-                info = caller._session_info(last.get("stand_session_id") or "") or {}
+                info = sessions_by_id.get(last.get("stand_session_id") or "") or {}
                 traffic, sess = info.get("trafficState"), info.get("status")
                 if traffic == "needs-user":
                     err = (
@@ -6696,12 +6961,22 @@ def _cmd_rooms(args) -> int:
 
 
 def _cmd_pool(args) -> int:
-    """暖池运维：现状 / 播种（warm）/ 清扫（sweep）。
+    """暖池运维 + 模板健康闸：现状 / 播种（warm）/ 清扫（sweep）/ --heal 解除模板隔离。
 
     warm 是幂等的：每个目标模板池满即跳过，适合 cron 定时跑——areco 重启会把待命
     TUI 全杀成 exited（认领时才发现 = 那一单退回冷启动），定时播种把这个窗口收窄。
     """
     caller = Caller()
+    if args.heal:
+        # 手动解除模板隔离（确认模板已修复后用；until 过期本来也会自动恢复）
+        d = _read_unhealthy()
+        if args.heal in d:
+            d.pop(args.heal, None)
+            _write_unhealthy(d)
+            print(f"已解除模板『{args.heal}』的隔离（健康闸）")
+        else:
+            print(f"模板『{args.heal}』不在健康闸黑名单中")
+        return 0
     out: dict = {"enabled": STANDBY_ENABLED, "pool_size": STANDBY_POOL_SIZE,
                  "max_age_sec": STANDBY_MAX_AGE_SEC}
     if args.sweep or args.warm:
@@ -6721,6 +6996,12 @@ def _cmd_pool(args) -> int:
                 refilled.append({"template": tpl, "room_id": r["room_id"]})
         out["refilled"] = refilled
     out["standby"] = caller.standby_status()
+    # 健康闸黑名单（2026-07-28 A3）：until 过期的记录自动视为恢复，不展示
+    _now = time.time()
+    out["unhealthy"] = {
+        t: e for t, e in _read_unhealthy().items()
+        if float(e.get("until") or 0) > _now
+    }
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
@@ -6731,6 +7012,14 @@ def _cmd_pool(args) -> int:
               f"龄 {s.get('age_sec', 0) / 60:.1f}min  会话={s.get('session_status')}")
     if not out["standby"]:
         print("  （空——下一单冷派发会自动播种，或 pool --warm 手动补）")
+    if out["unhealthy"]:
+        print("模板黑名单（健康闸）：")
+        for t, e in sorted(out["unhealthy"].items()):
+            left = (float(e.get("until") or 0) - _now) / 60
+            print(f"  ✖ {t}  连挂 {e.get('failures')} 次，剩 {left:.0f}min 自动恢复"
+                  f"（pool --heal {t} 手动解除）  last_error: {str(e.get('last_error', ''))[:60]}")
+    else:
+        print("模板黑名单：空（无被隔离模板）")
     if args.warm:
         print(f"播种 {len(out.get('refilled') or [])} 个；清扫 {out.get('sweep')}")
     elif args.sweep:
@@ -6810,6 +7099,10 @@ def _build_parser():
         "--workspace-repo", dest="workspace_repo", default=None,
         help="[--isolated] 基于哪个 git 仓库建 worktree；不给则只建空目录",
     )
+    pr.add_argument(
+        "--force", action="store_true",
+        help="跳过重复派发闸（同一 request 有在途 running 任务也强派；默认拦截，退出码 2）",
+    )
     pr.set_defaults(func=_cmd_run)
 
     pg = sub.add_parser(
@@ -6841,6 +7134,8 @@ def _build_parser():
                     help="[plan 模式] 命中足够相似的历史计划则跳过 Thinker 段")
     pg.add_argument("--dry-run", action="store_true",
                     help="只分诊+组包不派发（测试/预览用；audit 照记 dry_run=true）")
+    pg.add_argument("--force", action="store_true",
+                    help="跳过重复派发闸（同一 request 有在途 running 任务也强派；默认拦截，退出码 2）")
     pg.set_defaults(func=_cmd_go)
 
     pk = sub.add_parser(
@@ -6970,12 +7265,15 @@ def _build_parser():
 
     pw = sub.add_parser(
         "pool",
-        help="暖池运维：列出待命 Stand / warm 播种+清扫 / sweep 只清扫（2026-07-26 提速批件）",
+        help="暖池运维：列出待命 Stand / warm 播种+清扫 / sweep 只清扫（2026-07-26 提速批件）；"
+             "--heal 解除模板健康闸隔离",
     )
     pw.add_argument("--warm", action="store_true",
                     help="播种：给默认 Worker/Thinker 模板各补满待命位（幂等，池满跳过）+顺手清扫过期位")
     pw.add_argument("--sweep", action="store_true", help="只清扫：过期待命位归档回收，不播种")
     pw.add_argument("--template", default=None, help="[--warm] 只给指定模板播种")
+    pw.add_argument("--heal", default=None, metavar="模板ID",
+                    help="手动解除模板健康闸隔离（确认模板已修复后用；until 到期本来也会自动恢复）")
     pw.add_argument("--json", action="store_true", help="结构化输出")
     pw.set_defaults(func=_cmd_pool)
 
