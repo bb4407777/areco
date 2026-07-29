@@ -168,6 +168,18 @@ IDLE_STALL_PROBES = int(_conf_float("STANDCODE_IDLE_STALL_PROBES", "idle_stall_p
 FIRST_TOKEN_MAX_SEC = _conf_float("STANDCODE_FIRST_TOKEN_MAX", "first_token_max_sec", 300)
 PROGRESS_SETTLE_SEC = _conf_float("STANDCODE_PROGRESS_SETTLE", "progress_settle_sec", 180)
 
+# ── 三闸总开关（2026-07-29 高律师令：三闸全关，覆盖当日⑥校准口径）──────────
+# 空转闸全关：不判空转、不杀会话、不重投（poll_result 2c 整段停用）；
+# 定稿闸全关：收网只认 Worker 自报完成——有回复即走基础合并窗，不再判「像不像
+#   交付物」（⑥的交付物门槛/进度句续等窗停用，wedge 收口退回 ⑥ 前口径）；
+# 1800s 兜底也关：灯 working 等待无上限（SETTLE_MAX_SEC hold_cap 停用）。
+# 明令做成开关不删死：闸逻辑原样保留，重开改 True 即可。harvest 收割巡检
+# （_cmd_harvest/_room_settled）不读这三个开关——自带红绿灯 + HARVEST_SILENCE_SEC
+# 静默门，独立于此。
+STALL_WATCHDOG_ENABLED = False  # 空转闸：idle 判 stall / 重投自愈
+SETTLE_GATE_ENABLED = False     # 定稿闸：交付物门槛 / 进度句续等窗判别
+HARD_TIMEOUT_ENABLED = False    # 1800s 兜底：hold_cap 强制定稿
+
 # ── 重复派发闸 / 模板健康闸（2026-07-28 派发机制优化 A2/A3）──────────────
 # DUP_WINDOW_SEC 重复闸的时间窗：同一 request 的 running 任务只在窗口内算「在途」——
 # 窗口外的 running 是陈旧 state（等待者早死、reconcile 还没扫到），不该拦新派发。
@@ -1477,7 +1489,8 @@ class Caller:
         # registry 文件完全不可用时的紧急兜底（与 registry.json 当前取值一致；
         # 仅在文件缺失/解析失败时启用，正常路径不参与）
         # ⑤ 路由反转（2026-07-29）：默认 Worker=hy3（workbuddy），重活锚 claude。
-        _FALLBACK_THINKER = "workbuddy-deepseek-pro"
+        # 2026-07-29：默认 Thinker 统一 flash（07-28 高律师设置页选定）。
+        _FALLBACK_THINKER = "workbuddy-deepseek"
         _FALLBACK_WORKER = "workbuddy"
         _FALLBACK_HEAVY = "claude"
 
@@ -2568,6 +2581,11 @@ class Caller:
               路径/数字结果之一）才吃 MERGE_WAIT_SEC 短窗，纯进度句改吃
               PROGRESS_SETTLE_SEC 续等窗；空转闸——stall 判死须同时满足 idle 探针
               达标 + 首字等待超 FIRST_TOKEN_MAX_SEC + 看板新鲜复核零产出。
+            · 三闸全关（2026-07-29 高律师令，覆盖同日⑥口径）：STALL_WATCHDOG_ENABLED /
+              SETTLE_GATE_ENABLED / HARD_TIMEOUT_ENABLED 三常量默认 False——不判
+              空转不重投、收网只认 Worker 自报（有回复即按合并窗收）、灯 working
+              等待无上限。闸逻辑保留未删，重开改 True；stuck（needs-user）与
+              lost（exited/心跳）不属三闸，照常生效。
             · stuck：trafficState=needs-user（终端内权限框/信任页/选择框）连续
               STUCK_CONFIRM_HITS 个探针周期 → 返回 status='stuck' 带尾屏 last_line。
               timeout=0 无限等 + 卡选项曾是致命组合：黄灯亮着、等待者永远傻等。
@@ -2755,7 +2773,10 @@ class Caller:
             #     是常态，灯 idle ≠ 没在干）。重投/判死前先新鲜拉一次看板复核：
             #     outputChars 仍在涨（spinner/思考流都会推高）或灯已非 idle → 判据推翻、
             #     归零重数；判死另须首字等待超 FIRST_TOKEN_MAX_SEC（默认 300s）。
-            if stand_session_id and not stand_replies and idle_hits:
+            #     2026-07-29 高律师令三闸全关：STALL_WATCHDOG_ENABLED=False 整段停用
+            #     （不判空转、不杀会话、不重投），重开改常量 True。
+            if (STALL_WATCHDOG_ENABLED and stand_session_id
+                    and not stand_replies and idle_hits):
                 want_reinject = (idle_hits >= IDLE_STALL_PROBES
                                  and not reinjected and after_id > 0)
                 want_stall = (idle_hits >= IDLE_STALL_PROBES * 2
@@ -2839,7 +2860,10 @@ class Caller:
                 settle = False
                 settle_forced = False
                 settle_reason = None
-                deliverable = _looks_like_deliverable(
+                # 2026-07-29 高律师令三闸全关：SETTLE_GATE_ENABLED=False 时一律视为
+                # 交付物（收网只认 Worker 自报完成，回复即自报）——交付物门槛/进度句
+                # 续等窗全停，wedge 与合并窗退回 ⑥ 前口径；重开改常量 True。
+                deliverable = True if not SETTLE_GATE_ENABLED else _looks_like_deliverable(
                     "\n\n".join(m.get("body", "") for m in stand_replies if m.get("body"))
                 )
                 if stand_session_id and traffic == "working":
@@ -2857,7 +2881,10 @@ class Caller:
                             "定稿: session=%s 灯 working 但输出 %d 探针零增长（tool 尾假 working），收口",
                             session_id, output_stall_probes,
                         )
-                    elif time.time() - first_reply_at >= SETTLE_MAX_SEC:
+                    elif (HARD_TIMEOUT_ENABLED
+                          and time.time() - first_reply_at >= SETTLE_MAX_SEC):
+                        # 2026-07-29 高律师令三闸全关：HARD_TIMEOUT_ENABLED=False 时
+                        # 灯 working 等待无上限，不再 hold_cap 强制定稿。
                         settle = settle_forced = True
                         settle_reason = "hold_cap"
                         logger.warning(

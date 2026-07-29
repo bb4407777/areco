@@ -1,6 +1,7 @@
 {
   "version": "2",
-  "default_thinker": "workbuddy-deepseek-pro",
+  "_note_default_thinker": "07-28 高律师设置页选定 flash（workbuddy-deepseek=DeepSeek-v4-flash）为默认 Thinker",
+  "default_thinker": "workbuddy-deepseek",
   "default_worker": "workbuddy",
   "default_heavy_worker": "claude",
   "default_fast_worker": "workbuddy",

@@ -430,9 +430,11 @@ def test_deliverable_classifier() -> None:
 
 
 def test_idle_gate() -> None:
-    print("\n[⑥空转闸] 首字上限 + 看板复核")
-    orig = (C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC, C.FIRST_TOKEN_MAX_SEC)
+    print("\n[⑥空转闸] 首字上限 + 看板复核（临时开闸测逻辑；2026-07-29 令默认关）")
+    orig = (C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC, C.FIRST_TOKEN_MAX_SEC,
+            C.STALL_WATCHDOG_ENABLED)
     C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC = 2, 0.01
+    C.STALL_WATCHDOG_ENABLED = True  # 闸逻辑保留未删，临时开闸验证
     try:
         # 场景1：真零产出（outputChars 恒定 + 灯 idle）→ 到首字上限才 stall，且重投过一次
         C.FIRST_TOKEN_MAX_SEC = 0.5
@@ -474,13 +476,16 @@ def test_idle_gate() -> None:
                               stand_session_id="s1", after_id=1, stand_name="w")
         check(res3["status"] == "timeout", f"上限未到不判死（实得 {res3['status']}）")
     finally:
-        C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC, C.FIRST_TOKEN_MAX_SEC = orig
+        (C.IDLE_STALL_PROBES, C.STATE_PROBE_SEC, C.FIRST_TOKEN_MAX_SEC,
+         C.STALL_WATCHDOG_ENABLED) = orig
 
 
 def test_settle_gate() -> None:
-    print("\n[⑥定稿闸] 进度句续等窗 / 交付物短窗")
-    orig = (C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC)
+    print("\n[⑥定稿闸] 进度句续等窗 / 交付物短窗（临时开闸测逻辑；2026-07-29 令默认关）")
+    orig = (C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC,
+            C.SETTLE_GATE_ENABLED)
     C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC = 0.05, 0.6, 0.01
+    C.SETTLE_GATE_ENABLED = True  # 闸逻辑保留未删，临时开闸验证
     try:
         def _mk_msgs(body):
             state = {"sent": False}
@@ -534,7 +539,58 @@ def test_settle_gate() -> None:
         finally:
             C.OUTPUT_STALL_PROBES = C.OUTPUT_STALL_PROBES_ORIG
     finally:
-        C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC = orig
+        (C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC,
+         C.SETTLE_GATE_ENABLED) = orig
+
+
+def test_gates_disabled_default() -> None:
+    """三闸全关默认口径（2026-07-29 高律师令）：开关常量全 False 时的线上行为。"""
+    print("\n[三闸全关] 默认 False：不判空转不重投 / 收网只认自报 / 无 1800s 兜底")
+    check(not C.STALL_WATCHDOG_ENABLED and not C.SETTLE_GATE_ENABLED
+          and not C.HARD_TIMEOUT_ENABLED, "三开关常量默认全 False")
+
+    orig = (C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC,
+            C.IDLE_STALL_PROBES, C.FIRST_TOKEN_MAX_SEC, C.SETTLE_MAX_SEC)
+    C.MERGE_WAIT_SEC, C.STATE_PROBE_SEC = 0.05, 0.01
+    C.IDLE_STALL_PROBES, C.FIRST_TOKEN_MAX_SEC = 2, 0.1
+    C.SETTLE_MAX_SEC = 0.1  # 即便配了超小兜底，关闸后也不生效
+    try:
+        # 空转闸关：真零产出 idle 探针达标也不 stall、不重投，只按 timeout 收尾
+        def _msgs(sid, after_id=0):
+            return ([{"id": 1, "body": "任务原文", "from_agent": "hermes"}]
+                    if after_id == 0 else [])
+
+        c = _gate_caller(_msgs, lambda sid: {
+            "trafficState": "idle", "outputChars": 100, "status": "running"})
+        res = c.poll_result(session_id="team-g", timeout=0.5, poll_interval=0.005,
+                            stand_session_id="s1", after_id=1, stand_name="w")
+        check(res["status"] == "timeout", f"空转闸关 → 不判 stall（实得 {res['status']}）")
+        check(len(c.sent) == 0, f"空转闸关 → 不重投（实得 {len(c.sent)} 次）")
+
+        # 定稿闸关 + 兜底关：进度句也当交付物走基础合并窗收网；
+        # 灯 working 超 SETTLE_MAX_SEC 也不 hold_cap 强制定稿
+        state = {"sent": False}
+
+        def _prog(sid, after_id=0):
+            if not state["sent"] and after_id >= 1:
+                state["sent"] = True
+                return [{"id": 2, "body": "我先看一下任务上下文，马上开始",
+                         "from_agent": "w"}]
+            return []
+
+        c2 = _gate_caller(_prog, lambda sid: {
+            "trafficState": "working", "outputChars": 100, "status": "running"})
+        t0 = time.time()
+        res2 = c2.poll_result(session_id="team-s", timeout=5, poll_interval=0.005,
+                              stand_session_id="s1", after_id=1, stand_name="w")
+        el = time.time() - t0
+        check(res2["status"] == "completed", f"收网只认自报 → completed（实得 {res2['status']}）")
+        check(el < 0.6, f"进度句也走短窗，无续等无兜底（实测 {el:.2f}s）")
+        check(res2.get("settle_reason") != "hold_cap",
+              f"无 hold_cap 强制定稿（实得 {res2.get('settle_reason')}）")
+    finally:
+        (C.MERGE_WAIT_SEC, C.PROGRESS_SETTLE_SEC, C.STATE_PROBE_SEC,
+         C.IDLE_STALL_PROBES, C.FIRST_TOKEN_MAX_SEC, C.SETTLE_MAX_SEC) = orig
 
 
 def main() -> int:
@@ -547,6 +603,7 @@ def main() -> int:
     test_deliverable_classifier()
     test_idle_gate()
     test_settle_gate()
+    test_gates_disabled_default()
     print(f"\n{'全部通过' if not _fails else '失败 ' + str(len(_fails)) + ' 项'}"
           f"（隔离目录 {_TEST_ISO}）")
     for f in _fails:
