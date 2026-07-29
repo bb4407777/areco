@@ -241,6 +241,29 @@ LEGAL_CASE_KEYWORDS = (
     "起诉", "答辩", "上诉", "调解",
 )
 
+# ── 额度/限流检测与车道改道（2026-07-29 高律师令，GLM-5.2 额度打满事件）─────────
+# 背景：GLM-5.2（智谱套餐）额度打满，重活车道（法律/代码词 → claude-glm52）瘫痪。
+# ① 重活车道临时改道 kimi-k3：Caller 加载时把重活锚强制到本常量，
+#    GLM 恢复后把常量改回 "claude-glm52" 并撤 registry 停新单标记即恢复。
+HEAVY_LANE_STAND = "kimi-k3"  # 2026-07-29 GLM额度满临时改道，GLM恢复后改回claude-glm52
+# ② Stand 输出扫描：poll/harvest 链对 Stand 回复做大小写不敏感子串匹配，
+#    命中即 a) 该 stand 标停新单（写 STAND_STOP_PATH）b) 涉及车道按备胎表改道
+#    c) cc-send 微信告警高律师 d) 事件追加 StandCode SKILL.md 台账 + 审计日志。
+QUOTA_SIGNAL_WORDS = ("429", "rate limit", "quota", "余额不足", "insufficient", "额度")
+# 车道备胎映射：stand 停新单后其涉及车道的改道目标（stand id → 备胎 stand id）。
+# 轻活备胎 codebuddy-ds-flash 尚未在 registry 注册模板，接入后补录。
+LANE_FALLBACK_MAP = {"claude-glm52": "kimi-k3"}
+# 停新单运行期状态文件：registry 模板静态标记（"status": "停新单"）之外的
+# 自动命中落点；Caller 加载时两路并集生效（_stopped_stands）。
+STAND_STOP_PATH = Path(
+    os.environ.get("STANDCODE_STAND_STOP")
+    or str(Path(HOME_DIR) / ".standcode" / "stand-stop.json")
+)
+# 事件台账：命中自动追加一行到 StandCode SKILL.md（追加失败不阻断处置）。
+STANDCODE_SKILL_MD = Path(
+    os.environ.get("STANDCODE_SKILL_MD") or "/Users/gao/skills/StandCode/SKILL.md"
+)
+
 # ── 审计日志（Gatekeeper BLOCKED + dispatch / poll 关键节点）─────────
 # 每行一条 JSON：{timestamp, event, task_id, role, template, blocked, ...}。
 # STANDCODE_AUDIT_LOG 可覆盖路径（测试用 /tmp 之外的隔离）。
@@ -1122,6 +1145,122 @@ def log_audit(event: str, detail: dict | None = None) -> None:
         logger.warning("审计日志写入失败 event=%s: %s", event, e)
 
 
+# ── 额度/限流信号扫描与处置（2026-07-29 GLM 额度打满事件，高律师令）─────────────
+# "429" 单独加边界保护：裸子串会把「第429条/第429号」（法条引用，本所场景高频）
+# 误判成限流——要求前后不接数字、也不接 第/条/号。
+_QUOTA_429_RE = re.compile(r"(?<![\d第])429(?![\d条号])")
+
+
+def quota_signal_hit(text: str) -> str | None:
+    """扫描 Stand 输出是否命中额度/限流信号词，命中返回该词，否则 None。
+
+    大小写不敏感子串匹配（词表 QUOTA_SIGNAL_WORDS，可按需扩充）。
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    for w in QUOTA_SIGNAL_WORDS:
+        if w == "429":
+            if _QUOTA_429_RE.search(text):
+                return w
+        elif w.lower() in lower:
+            return w
+    return None
+
+
+def _read_stand_stop() -> dict:
+    try:
+        data = json.loads(STAND_STOP_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def handle_quota_hit(stand_id: str, hit_word: str, source: str,
+                     sample: str = "", dry_run: bool = False) -> dict:
+    """额度/限流命中处置（2026-07-29 机制）：停新单 → 车道改道 → 微信告警 → 事件落账。
+
+    a. stand 标停新单：写 STAND_STOP_PATH（幂等——已在册只补命中记录，不重复告警）；
+    b. 涉及车道改道：LANE_FALLBACK_MAP 有备胎则改道（Caller 下次加载生效，
+       见 _apply_lane_reroutes）；
+    c. 微信告警高律师：cc-send 直发（WECHAT_TARGET 未配置则跳过并记录）；
+    d. 事件追加 StandCode SKILL.md「额度事件台账」+ 审计日志。
+    全程 fail-open：任何一步异常只记日志，不阻断 caller 主流程。
+    """
+    stand_id = (stand_id or "unknown").strip() or "unknown"
+    fallback = LANE_FALLBACK_MAP.get(stand_id)
+    actions: list[str] = []
+
+    # a. 停新单（幂等：已停只补一条命中记录）
+    already = False
+    try:
+        state = _read_stand_stop()
+        entry = state.get(stand_id)
+        already = bool(isinstance(entry, dict) and entry.get("stopped"))
+        if not isinstance(entry, dict):
+            entry = {"stopped": True, "stopped_at": _now_iso(),
+                     "reason": f"命中额度/限流信号「{hit_word}」", "hits": []}
+        entry.setdefault("hits", []).append(
+            {"at": _now_iso(), "word": hit_word, "source": source,
+             "sample": (sample or "")[:120]})
+        state[stand_id] = entry
+        STAND_STOP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STAND_STOP_PATH.write_text(
+            json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        actions.append("停新单已登记" if not already else "已在停新单册（补命中记录）")
+    except Exception as e:
+        logger.warning("停新单状态写入失败 stand=%s: %s", stand_id, e)
+        actions.append(f"停新单登记失败: {e}")
+
+    # b. 车道改道（备胎表有映射才动作；实际改道在 Caller 加载时生效）
+    if fallback:
+        actions.append(f"车道改道 {stand_id} → {fallback}（下次 Caller 加载生效）")
+    else:
+        actions.append("备胎表无映射，仅停新单不改道")
+
+    # c. 微信告警（同一 stand 只告警一次，避免 poll 每轮刷屏）
+    alerted = False
+    if not already and not dry_run:
+        msg = (f"🚨 Stand 额度/限流告警：{stand_id} 命中「{hit_word}」（{source}）。"
+               f"已自动停新单" + (f"，涉及车道改道 {fallback}。" if fallback else "。")
+               + f"样本：{(sample or '')[:80]}")
+        if not WECHAT_TARGET:
+            logger.warning("WECHAT_TARGET 未配置，额度告警未发（stand=%s）", stand_id)
+            actions.append("微信告警跳过（WECHAT_TARGET 未配置）")
+        else:
+            try:
+                proc = subprocess.run(
+                    [CC_SEND_BIN, "-s", WECHAT_TARGET, "-m", msg],
+                    capture_output=True, text=True, timeout=15,
+                    env={**os.environ, "HOME": HOME_DIR,
+                         "PATH": f"{HOME_DIR}/.npm-global/bin:{os.environ.get('PATH', '')}"},
+                )
+                alerted = proc.returncode == 0
+                actions.append("微信告警已发" if alerted
+                               else f"微信告警失败 rc={proc.returncode}")
+            except Exception as e:
+                logger.warning("额度告警发送异常 stand=%s: %s", stand_id, e)
+                actions.append(f"微信告警异常: {e}")
+
+    # d. 事件落账：SKILL.md 台账 + 审计日志（失败均不阻断）
+    try:
+        line = (f"- {_now_iso()[:16]} stand `{stand_id}` 命中「{hit_word}」（{source}）→ "
+                f"停新单" + (f"，车道改道 `{fallback}`" if fallback else "")
+                + ("，已微信告警" if alerted else "") + "\n")
+        with open(STANDCODE_SKILL_MD, "a", encoding="utf-8") as f:
+            f.write(line)
+        actions.append("SKILL.md 台账已追加")
+    except Exception as e:
+        logger.warning("SKILL.md 台账追加失败: %s", e)
+    log_audit("quota_hit", {
+        "template": stand_id, "blocked": False, "hit_word": hit_word,
+        "source": source, "fallback": fallback or "", "alerted": alerted,
+        "already_stopped": already, "actions": "; ".join(actions),
+    })
+    return {"stand": stand_id, "hit": hit_word, "fallback": fallback,
+            "alerted": alerted, "already_stopped": already, "actions": actions}
+
+
 def check_should_dispatch(task_description: str) -> dict:
     """Gatekeeper：判断一个任务 / 命令是否必须派发给 Worker（而非 Caller 直干）。
 
@@ -1516,7 +1655,7 @@ class Caller:
         self.default_template_id: str = ""
         self.default_thinker_id: str = ""
         self.default_worker_id: str = ""
-        self.default_heavy_worker_id: str = ""  # ⑤ 重活车道锚（法律/代码词 → claude），不吃 areco 覆盖
+        self.default_heavy_worker_id: str = ""  # ⑤ 重活车道锚（法律/代码词），不吃 areco 覆盖；加载层应用 HEAVY_LANE_STAND 改道
         self.default_caller_id: str = ""  # areco 设置页的 caller 默认（仅记录，caller 角色由入口 agent 自任）
         self.template_names: dict[str, str] = {}
         self.roles: dict[str, str] = {}  # template_id → "thinker" | "worker"
@@ -1562,6 +1701,7 @@ class Caller:
             self.default_template_id = _FALLBACK_WORKER
             self.task_map = {}
             self._apply_areco_defaults()  # registry 挂了仍吃 areco 设置页的角色默认
+            self._apply_lane_reroutes()   # 重活改道/停新单改道照样生效
 
         if not self.registry_path.exists():
             _apply_fallback(f"注册表不存在 {self.registry_path}")
@@ -1613,6 +1753,69 @@ class Caller:
             len(self.task_map),
         )
         self._apply_areco_defaults()
+        self._apply_lane_reroutes()
+
+    def _stopped_stands(self) -> set[str]:
+        """停新单 stand 集合（2026-07-29 额度机制）：registry 模板静态标记
+        （templates[].status 含「停新单」）+ 运行期状态文件 STAND_STOP_PATH
+        （额度信号命中自动写入）两路并集。状态文件读不动 = 只用静态标记。"""
+        stopped: set[str] = set()
+        for t in (self.registry or {}).get("templates", []):
+            if isinstance(t, dict) and t.get("id") and "停新单" in str(t.get("status", "")):
+                stopped.add(t["id"])
+        try:
+            data = json.loads(STAND_STOP_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                stopped.update(k for k, v in data.items()
+                               if isinstance(v, dict) and v.get("stopped"))
+        except Exception:
+            pass
+        return stopped
+
+    def _apply_lane_reroutes(self) -> None:
+        """车道改道（2026-07-29 GLM 额度打满事件，高律师令）。
+
+        ① 重活车道临时改道：重活锚强制 HEAVY_LANE_STAND（GLM 恢复后把常量改回
+           claude-glm52 即恢复）；registry/areco 侧取值不动，改道只发生在加载层。
+        ② 停新单改道：默认锚/task_map 命中停新单 stand 且备胎表 LANE_FALLBACK_MAP
+           有映射的，改道备胎；无映射只 warning（宁可报警也不静默滑错车）。
+        决策一律 logger.warning 留痕（派发结果的 route_reason 由 route_mode 写明）。
+        """
+        # ① 重活车道临时改道
+        if self.default_heavy_worker_id and self.default_heavy_worker_id != HEAVY_LANE_STAND:
+            logger.warning(
+                "重活车道改道：%s → %s（HEAVY_LANE_STAND，2026-07-29 GLM额度满临时改道，"
+                "GLM恢复后改回 claude-glm52）",
+                self.default_heavy_worker_id, HEAVY_LANE_STAND,
+            )
+            self.default_heavy_worker_id = HEAVY_LANE_STAND
+        # ② 停新单 stand 涉及车道改道备胎
+        stopped = self._stopped_stands()
+        if not stopped:
+            return
+        lanes = [("default_thinker_id", "thinker 默认"),
+                 ("default_worker_id", "worker 默认"),
+                 ("default_template_id", "全局兜底")]
+        for attr, label in lanes:
+            cur = getattr(self, attr, "")
+            if cur in stopped:
+                fb = LANE_FALLBACK_MAP.get(cur)
+                if fb:
+                    logger.warning("%s命中停新单 stand %s，改道备胎 %s", label, cur, fb)
+                    setattr(self, attr, fb)
+                else:
+                    logger.warning("%s命中停新单 stand %s，备胎表无映射——保持原值，"
+                                   "派发可能失败，请人工补备胎", label, cur)
+        for tt, cur in list(self.task_map.items()):
+            if cur in stopped:
+                fb = LANE_FALLBACK_MAP.get(cur)
+                if fb:
+                    logger.warning("task_map[%s] 命中停新单 stand %s，改道备胎 %s",
+                                   tt, cur, fb)
+                    self.task_map[tt] = fb
+                else:
+                    logger.warning("task_map[%s] 命中停新单 stand %s，备胎表无映射"
+                                   "——保持原值", tt, cur)
 
     def _apply_areco_defaults(self) -> None:
         """areco 设置页的角色默认覆盖层（优先级：areco 设置 > registry.json > 紧急兜底）。
@@ -2753,6 +2956,15 @@ class Caller:
                     last_reply_at = time.time()
                     if not first_reply_at:
                         first_reply_at = time.time()
+                    # 额度/限流扫描（2026-07-29 机制）：Stand 回复命中信号词即
+                    # 停新单+车道改道+微信告警；handle_quota_hit 幂等不刷屏。
+                    hit = quota_signal_hit(msg.get("body") or "")
+                    if hit:
+                        handle_quota_hit(
+                            template or msg.get("from_agent", "") or "unknown",
+                            hit, source=f"poll:{session_id}",
+                            sample=(msg.get("body") or "")[:120],
+                        )
 
             # 2) 会话状态探针（节流 STATE_PROBE_SEC，一次 API 供 stuck/lost/settle 三判共用）
             traffic: str | None = None
@@ -4340,8 +4552,10 @@ class Caller:
                 "signals": signals,
             }
 
-        # 4) 法律/代码重活 → 主力 Worker（claude/GLM-5.2）。⑤ 路由反转（2026-07-29）：
-        #    claude 只留给重活白名单，route_reason 必须写明命中词（冒烟/审计取证用）。
+        # 4) 法律/代码重活 → 主力 Worker（重活锚 default_heavy_worker）。⑤ 路由反转
+        #    （2026-07-29）：重活锚只留给重活白名单，route_reason 必须写明命中词
+        #    （冒烟/审计取证用）。2026-07-29 GLM 额度满：锚已临时改道 HEAVY_LANE_STAND
+        #    （kimi-k3），reason 同步写明改道，GLM 恢复后随常量改回。
         if heavy_law or heavy_code:
             # FAST_BLOCK 组=法律词+批量/落盘类重量词（任务口径统称「法律词组」），
             # 标签用「法律/重量词」防止把「修复/批量」误读成法条类命中。
@@ -4352,7 +4566,8 @@ class Caller:
             return {
                 "mode": "worker", "plan_only": False,
                 "deliverable": "artifact", "structure": "single_step",
-                "reason": f"命中重活词（{hit_desc}）→ 主力 Worker（claude/GLM-5.2）",
+                "reason": (f"命中重活词（{hit_desc}）→ 主力 Worker（{HEAVY_LANE_STAND}，"
+                           f"2026-07-29 GLM额度满临时改道，原锚 claude-glm52）"),
                 "signals": signals,
             }
 
@@ -5637,8 +5852,9 @@ def _run_by_mode(
 
     # think / worker：单段派发（--isolated 只对 worker 有意义：per-session cwd 隔离工作区）
     # ⑤ 路由反转（2026-07-29）：worker 模式 = 重活车道（法律/代码词才会路由到这），模板
-    # 锚定 default_heavy_worker（claude/GLM-5.2）而非 role 默认——default_worker 已反转为
-    # hy3，走 role 解析重活会滑进轻车。显式 --template 仍最高优先。
+    # 锚定 default_heavy_worker 而非 role 默认——default_worker 已反转为 hy3，走 role
+    # 解析重活会滑进轻车。显式 --template 仍最高优先。
+    # （2026-07-29 GLM 额度满：加载层已把重活锚临时改道 HEAVY_LANE_STAND=kimi-k3）
     res = caller.dispatch_and_relay(
         args.request,
         role=decision["role"],
@@ -6113,7 +6329,8 @@ def _cmd_go(args) -> int:
     elif role == "thinker":
         selected_template = caller.default_thinker_id
     elif mode == "worker":
-        # ⑤ 路由反转：worker 模式=重活车道，锚 default_heavy_worker（claude），
+        # ⑤ 路由反转：worker 模式=重活车道，锚 default_heavy_worker（加载层已应用
+        # HEAVY_LANE_STAND 改道，2026-07-29 GLM 额度满期间=kimi-k3），
         # 与 run 的实际派发口径一致（default_worker 已是 hy3）。
         selected_template = caller.default_heavy_worker_id
     else:
@@ -7098,6 +7315,26 @@ def _cmd_harvest(args) -> int:
             asst = _harvest_assistant_msgs(msgs)
             if not asst:
                 continue
+            # 额度/限流扫描（2026-07-29 机制）：收割前对每条 Stand 回复过信号词，
+            # 命中即停新单+车道改道+微信告警（幂等）。from_agent 是显示名（如
+            # 「Glm5.2」），尽量反查模板 id——停新单/备胎表都按模板 id 记。
+            for m in asst:
+                hit = quota_signal_hit(m.get("body") or "")
+                if not hit:
+                    continue
+                sender = m.get("from_agent") or ""
+                tid = next(
+                    (t for t in caller.template_names
+                     if t == sender or t in sender.lower()
+                     or sender.lower().replace(".", "").replace("-", "")
+                        in t.replace("-", "")),
+                    sender or "unknown",
+                )
+                handle_quota_hit(
+                    tid, hit, source=f"harvest:{rid}",
+                    sample=(m.get("body") or "")[:120],
+                    dry_run=bool(args.dry_run),
+                )
             # 限频：同房报告间隔内跳过（水位线未推进，消息留待下轮不丢）
             last_harv = hw.get("last_harvest_ts")
             if (last_harv and interval_sec > 0
