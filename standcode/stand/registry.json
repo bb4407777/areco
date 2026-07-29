@@ -32,9 +32,24 @@
       "role": "worker"
     },
     {
+      "id": "kimi",
+      "name": "Kimi K3（kimi CLI）",
+      "role": "worker"
+    },
+    {
+      "id": "agnes",
+      "name": "Agnes 2.5 Flash（Claude Code harness）",
+      "role": "worker"
+    },
+    {
       "id": "hermes-secretary",
       "name": "Hermes秘书分身（secretary-01 · k3）",
       "role": "worker"
+    },
+    {
+      "id": "fable5",
+      "name": "Fable5（Claude CLI freemodel · areco c5）",
+      "role": "thinker"
     }
   ]
 }
