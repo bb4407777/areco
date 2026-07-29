@@ -74,13 +74,18 @@ test('WorkBuddy bridge output exposes the exact created/resumed native session i
   assert.equal(workbuddyNativeSessionIdFromOutput('[WorkBuddy] 模型 custom-local:gpt-5.6-sol'), '')
 })
 
-test('WorkBuddy project slugs cover macOS /tmp realpath aliases', () => {
+test('WorkBuddy project slugs cover macOS realpath and desktop Chinese-path formats', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-wb-slug-'))
   try {
     const slugs = workbuddyProjectSlugs(dir)
     assert.ok(slugs.includes(dir.replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '')))
     const real = fs.realpathSync(dir).replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '')
     assert.ok(slugs.includes(real))
+
+    const chineseCwd = '/Users/gao/Desktop/民事案件/26民0506测试（劳动争议）（一审）'
+    const chineseSlugs = workbuddyProjectSlugs(chineseCwd)
+    assert.ok(chineseSlugs.includes(chineseCwd.replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '')))
+    assert.ok(chineseSlugs.includes('Users-gao-Desktop-民事案件-26民0506测试（劳动争议）（一审）'))
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

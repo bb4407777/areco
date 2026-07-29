@@ -35,13 +35,9 @@ export function acceptsInitialPromptArg(template: Template): boolean {
  * 例如 reasonix-stand 包装器最终 exec reasonix，不能只按 basename(session.command) 判源。
  */
 export function handoffAgentKind(session: Session, template?: Template): AgentKind | null {
-  const direct = agentKindOf(session.command)
+  const direct = agentKindOf(session.command, template?.harness)
   if (direct) return direct
   if (path.basename(session.command).startsWith('reasonix-')) return 'reasonix'
-  if (template?.harness === 'codex') return 'codex'
-  if (template?.harness === 'workbuddy') return 'workbuddy'
-  if (template?.harness === 'reasonix') return 'reasonix'
-  if (template?.harness === 'kimi') return 'kimi'
   return null
 }
 

@@ -30,7 +30,7 @@ Areco 中 WorkBuddy GPT-5.6 Remote 卡片实际已有 `~/.workbuddy/projects/...
 ### `packages/server/src/services/agent-transcript.ts`
 
 1. WorkBuddy 定位同时扫描 `~/.codebuddy/projects` 与 `~/.workbuddy/projects`。
-2. `workbuddyProjectSlugs()` 同时覆盖 cwd 原值和 realpath，兼容 `/tmp` → `/private/tmp`。
+2. `workbuddyProjectSlugs()` 同时覆盖 cwd 原值和 realpath，兼容 `/tmp` → `/private/tmp`；每个 cwd 同时生成官方 CodeBuddy CLI 的 Claude 风格 slug（非 ASCII 全替换）和 WorkBuddy Desktop 的路径风格 slug（保留中文及标点、只替换路径分隔符）。
 3. `workbuddyUserQuery()` / `parseWorkbuddy()` 只显示并绑定最后一个 `<user_query>` 真人指令。
 4. WorkBuddy 完全取消时间窗口和 `mtime` 猜绑：只有精确原生 ID或唯一内容证据才可绑定；首句被吞字、无证据、同首句/标题多候选时一律保持未绑定。
 5. 已有确定性 `agentSessionId`、但目标文件尚未落盘时只等待精确文件，禁止退回内容或时间推断。
@@ -45,6 +45,7 @@ Areco 中 WorkBuddy GPT-5.6 Remote 卡片实际已有 `~/.workbuddy/projects/...
 4. native transcript 在全部在册卡片间全局一对一，卡片退出不释放所有权；PTY UUID 已有 owner 时一律拒绝第二次认领，不再根据 owner 是否有首句哈希自动换主。
 5. 历史页和 `SessionManager.spawn()` 双层拒绝恢复已归属于另一张看板卡的 native transcript，避免内部调用绕过 API。
 6. 历史恢复默认模板按 harness 优先查找，官方 WorkBuddy 优先于命令名相同的 bridge。
+7. 会话交接读取统一调用 `agentKindOf(command, harness)`，避免包装器命令名看起来像另一类 agent 时抢在真实 harness 之前误判 transcript 类型。
 
 ### `packages/server/src/services/agent-transcript.test.ts`
 
@@ -87,6 +88,33 @@ Areco 中 WorkBuddy GPT-5.6 Remote 卡片实际已有 `~/.workbuddy/projects/...
 - 第二阶段完整 `npm run build`：通过，包含客户端/服务端 typecheck、Vite 生产构建和服务端打包；仅有既存的大 chunk 体积警告，无构建错误。
 - `git diff --check`：通过。
 - 第二阶段提交：本次“确定性原生 UUID 绑定”独立提交（提交号以 Git 日志为准）。
+
+## 2026-07-29 全量复核补充
+
+复核当前 HEAD、8790 运行态和 5 张 WorkBuddy 看板卡后，新增发现并修复两个尾部缺口：
+
+1. `session-handoff.ts` 虽有 harness fallback，但先按命令名识别；包装器命令名若像另一类 agent，可能提前误判。现已改为 `agentKindOf(session.command, template?.harness)`，并增加“command 看似 codex、harness 明确 workbuddy”的冲突回归。
+2. 新 GPT-5.6 卡 `e6364612` 的真实 transcript 已落盘：
+   `~/.workbuddy/projects/Users-gao-Desktop-民事案件-26民0506江门市蓬江区昱泽幼儿服务中心、江门市蓬江区荷塘镇金逸昱泽幼儿园vs陈子盛（劳动争议）（一审）/1873b95e-2d6e-4c50-902c-a0caf8c64cf7.jsonl`。
+   该目录保留中文和标点，证明 WorkBuddy Desktop slug 与官方 CLI 的 Claude 风格 slug 不同。现已双格式枚举，避免中文案件 cwd 下“UUID 已绑定但文件仍定位不到”。
+
+复核时的真实卡片状态：
+
+| 卡片 | 模板 | `agentSessionId` | 精确文件 / API | 重复占用 |
+|---|---|---|---|---|
+| `f2c4fe80` | GPT-5.6 bridge（旧路径） | `67680e1b-...` | 文件存在；API 可读 | 否 |
+| `b0c99ca9` | GPT-5.6 bridge（旧路径） | `3a7f54ff-...` | 文件存在；API 可读 | 否 |
+| `2b819266` | 官方 DeepSeek | `7af3c973-...` | 文件存在；API 可读 | 否 |
+| `e6364612` | 仓内 GPT-5.6 bridge | `null` | 中文 slug 下文件存在；旧 8790 未接住 PTY UUID，API 空 | 否 |
+| `cb2d8652` | 官方 DeepSeek | `null` | 新建 `e5dcfa2a-...jsonl`（0 字节）；旧 8790 未预分配 ID，API 空 | 否 |
+
+最终校验：
+
+- WorkBuddy 绑定/交接定向回归：36/36；
+- 仓内 GPT-5.6 bridge 独立测试：9/9；
+- Areco 全量测试：197/197；
+- 完整 typecheck + 生产构建：通过；
+- `git diff --check`：通过。
 
 ## 部署门槛
 

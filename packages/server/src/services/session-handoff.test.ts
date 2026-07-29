@@ -59,6 +59,14 @@ test('harness-first 包装器仍按真实 agent 类型读取交接 transcript', 
     ),
     'workbuddy',
   )
+  assert.equal(
+    handoffAgentKind(
+      { command: '/wrapper/codex' } as Session,
+      template({ command: '/wrapper/codex', harness: 'workbuddy' }),
+    ),
+    'workbuddy',
+    'harness 必须优先于具有误导性的包装器命令名',
+  )
 })
 
 test('从 qoder transcriptDir 会话交接能定位 claude-layout 文件并读取全文', () => {

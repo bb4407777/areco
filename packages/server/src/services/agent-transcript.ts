@@ -111,7 +111,16 @@ export function workbuddyProjectSlugs(cwd: string): string[] {
   } catch {
     /* cwd 已不存在时只用原值，恢复仍可走 agentSessionId + 历史目录兜底 */
   }
-  return [...new Set(paths.map((value) => cwdToSlug(value).replace(/^-+/, '')))]
+  return [
+    ...new Set(
+      paths.flatMap((value) => [
+        // 官方 CodeBuddy CLI 使用 Claude 风格：所有非 ASCII 字母数字都替换为连字符。
+        cwdToSlug(value).replace(/^-+/, ''),
+        // WorkBuddy Desktop 保留中文和标点，仅把路径分隔符替换为连字符。
+        value.replace(/[\\/]/g, '-').replace(/^-+/, ''),
+      ]),
+    ),
+  ]
 }
 
 /**
