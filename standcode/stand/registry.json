@@ -47,7 +47,7 @@
       "role": "worker"
     },
     {
-      "id": "fable5",
+      "id": "c5",
       "name": "Fable5（Claude CLI freemodel · areco c5）",
       "role": "thinker"
     }
