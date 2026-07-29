@@ -49,14 +49,16 @@ def test_route_mode() -> None:
         ("梳理一下这三种模式的优缺点", "think", False),
         ("评估这三条迁移路线的可行性", "think", True),   # 弱×2（评估+可行性）→ 多步判断出结构化计划
         ("先出个计划，别动手", "think", True),
-        ("把恩平法院的判决书下载下来", "worker", False),
-        # 2026-07-29 口径：文书=法律重活词，进 FAST_BLOCK → 主 Worker（不再误配 hy3）
+        ("把恩平法院的判决书下载下来", "worker", False),  # 判决=法律重活词 → 主力 Worker
+        # 2026-07-29 口径：文书=法律重活词 → 主 Worker（不误配 hy3）
         ("总结一下这份文书", "worker", False),
-        ("调研 X 并输出一份报告存到桌面", "worker", False),   # 弱×1+落盘：单段自研自写
-        ("把这个下载下来然后设计一个归档方案", "worker", False),  # DIRECT（下载）压制弱双信号
+        ("调研 X 并输出一份报告存到桌面", "worker", False),   # 存到=落盘重活词 → 主力
+        # ⑤ 路由反转（2026-07-29）：无法律/代码重活词的默认车道 = fast（hy3）——
+        # 反转前这条靠 DIRECT（下载）压制弱双信号落 worker，反转后「其余一律轻车」。
+        ("把这个下载下来然后设计一个归档方案", "fast", False),
         ("调研三个方案对比后写入报告存到桌面", "plan", False),   # 弱×3 无压制 → 两段式
         ("分几步把网站改版并部署", "plan", False),              # 强信号单独成立
-        ("设计一个脚本保存到 /tmp/x.py", "worker", False),      # 弱×1+artifact → 单段
+        ("设计一个脚本保存到 /tmp/x.py", "worker", False),      # 保存到=落盘重活词 → 单段主力
     ]
     for req, exp_mode, exp_po in cases:
         r = C.Caller.route_mode(req)
@@ -70,46 +72,57 @@ def test_route_mode() -> None:
         check(C.Caller.route_mode(req)["mode"] == "think", f"回归·不再错配到 plan：{req[:20]}")
 
 
-# ── route_mode：fast 车道（2026-07-27）────────────────────────────
+# ── route_mode：⑤ Worker 路由反转（2026-07-29 高律师批）──────────────
+# 旧口径「轻活白名单进 hy3、默认 claude」→ 新口径「法律/代码重活白名单进 claude、
+# 其余一律 hy3」。法律词沿用 FAST_BLOCK_KEYWORDS，代码词 CODE_KEYWORDS 新增。
 def test_route_mode_fast() -> None:
-    print("\n[route_mode] fast 车道（轻量单步 → hy3）")
+    print("\n[route_mode] ⑤ 路由反转（法律/代码词 → claude，其余 → hy3）")
     hit = [
-        # 2026-07-29 搜索/抓取/摘要类轻活关键词 → hy3
+        # 高律师冒烟单 c：总结类默认轻车
+        "总结下这篇文章",
+        # 2026-07-29 搜索/抓取/摘要类轻活 → hy3（反转后不再依赖白名单词，仍应 fast）
         "搜一下贾扬清Intent Lab最新进展",
         "抓取这个公众号文章",
         "总结这篇链接的内容",
-        "调研一下 StandCode 暖池机制",   # 调研单步、无产出落盘 → fast
-        # 2026-07-27 原轻量动词
+        "调研一下 StandCode 暖池机制",
         "翻译这段话",
         "提取这份合同的金额和日期",
         "确认一下明天开庭时间",
+        # 反转新口径：长文本不再挡 fast（原 120 字长度闸已撤——默认车道无需白名单）
+        "总结一下" + "这份材料很长，" * 30,
     ]
     for req in hit:
         r = C.Caller.route_mode(req)
         check(r["mode"] == "fast" and not r["plan_only"],
-              f"命中 {req[:18]:20s} → {r['mode']}（期望 fast）")
+              f"轻车 {req[:18]:20s} → {r['mode']}（期望 fast）")
 
-    miss = [
-        # 长文本 >120 字：再多轻量动词也不进 fast
-        "总结一下" + "这份文书很长，" * 30,
-        # FAST_BLOCK 一票否决：批量 / 修复 是重量信号
-        "批量总结一下这批判决书",
-        "帮我修复这个脚本再总结一下报错原因",
-        # 2026-07-29 法律重活词一票否决：含案件/文书/法条/核查/判决…→ 主 Worker
+    heavy = [
+        # 高律师冒烟单 a/b：法律词、代码词 → 主力 Worker（claude/GLM-5.2）
+        "查下26民0421案法条",
+        "写个python脚本统计文件",
+        # 法律重活词（FAST_BLOCK_KEYWORDS 组）
         "搜索这个案件的相关法条",
         "抓取这篇判决书的内容",
         "核查一下这份文书的条款",
-        "查一下 25民1000 案件状态",          # 含「案件」→ 主 Worker（07-29 改判，原为 fast）
-        # 调研/搜索 + 产出落盘 → 主 Worker（fast 只接轻量单步）
-        "把调研结果写成报告存到桌面",
-        # 多步（强计划信号）不进 fast
-        "分几步总结这份文书并归档",
-        # 无轻量动词：照原路由
-        "把恩平法院的判决书下载下来",
+        "查一下 25民1000 案件状态",
+        "把调研结果写成报告存到桌面",   # 落盘类重活词
+        "批量总结一下这批判决书",
+        "帮我修复这个脚本再总结一下报错原因",
+        # 代码重活词（CODE_KEYWORDS 新增组；ASCII 词大小写不敏感）
+        "帮我调试这段代码",
+        "查一下这个 BUG 怎么回事",
+        "把改动 commit 到 git 仓库",
     ]
-    for req in miss:
+    for req in heavy:
         r = C.Caller.route_mode(req)
-        check(r["mode"] != "fast", f"不命中 {req[:18]:20s} → {r['mode']}（期望非 fast）")
+        check(r["mode"] == "worker",
+              f"重活 {req[:18]:20s} → {r['mode']}（期望 worker/claude）")
+        check("命中重活词" in r["reason"],
+              f"重活 {req[:14]:16s} route_reason 写明命中词：{r['reason'][:40]}")
+
+    # 多步（强计划信号）仍走 plan，不受反转影响
+    r = C.Caller.route_mode("分几步总结这份文书并归档")
+    check(r["mode"] == "plan", f"多步强信号 → {r['mode']}（期望 plan）")
 
 
 # ── resolve_mode：两代参数收敛 ─────────────────────────────────────

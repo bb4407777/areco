@@ -1,7 +1,8 @@
 {
   "version": "2",
   "default_thinker": "workbuddy-deepseek-pro",
-  "default_worker": "claude",
+  "default_worker": "workbuddy",
+  "default_heavy_worker": "claude",
   "default_fast_worker": "workbuddy",
   "task_type_defaults": {
     "think": "workbuddy-deepseek-pro",
@@ -18,7 +19,12 @@
     },
     {
       "id": "claude",
-      "name": "默认 Worker（Claude CLI + GLM-5.2）",
+      "name": "主力 Worker（Claude CLI + GLM-5.2，法律/代码重活）",
+      "role": "worker"
+    },
+    {
+      "id": "workbuddy",
+      "name": "默认 Worker（WorkBuddy hy3=会员3，轻活默认车道）",
       "role": "worker"
     },
     {

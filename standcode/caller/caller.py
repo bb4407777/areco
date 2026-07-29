@@ -397,6 +397,14 @@ FAST_BLOCK_KEYWORDS = (
     # 产出并落盘类（调研/搜索 + 存档/写报告）超出「轻量单步」，仍走主 Worker。
     "存到", "写到", "保存到", "存档", "落盘",
 )
+#  ⑤ Worker 路由反转（2026-07-29 高律师批）：默认车道从 claude 反转为 hy3，claude 只留
+#  给法律/代码重活白名单。法律词沿用 FAST_BLOCK_KEYWORDS（案件/文书/法条…语义从
+#  「否决 fast」变成「命中即主 Worker」，词表本身不动）；代码词为本次新增组。
+#  ASCII 词（python/bug/git/commit）在 route_mode 里按小写比对，防大小写漏配。
+CODE_KEYWORDS = (
+    "代码", "写脚本", "python", "改代码", "调试", "bug", "部署",
+    "git", "commit", "重构",
+)
 
 
 def _now_iso() -> str:
@@ -1152,6 +1160,7 @@ class Caller:
         self.default_template_id: str = ""
         self.default_thinker_id: str = ""
         self.default_worker_id: str = ""
+        self.default_heavy_worker_id: str = ""  # ⑤ 重活车道锚（法律/代码词 → claude），不吃 areco 覆盖
         self.default_caller_id: str = ""  # areco 设置页的 caller 默认（仅记录，caller 角色由入口 agent 自任）
         self.template_names: dict[str, str] = {}
         self.roles: dict[str, str] = {}  # template_id → "thinker" | "worker"
@@ -1178,8 +1187,10 @@ class Caller:
         """
         # registry 文件完全不可用时的紧急兜底（与 registry.json 当前取值一致；
         # 仅在文件缺失/解析失败时启用，正常路径不参与）
+        # ⑤ 路由反转（2026-07-29）：默认 Worker=hy3（workbuddy），重活锚 claude。
         _FALLBACK_THINKER = "workbuddy-deepseek-pro"
-        _FALLBACK_WORKER = "claude"
+        _FALLBACK_WORKER = "workbuddy"
+        _FALLBACK_HEAVY = "claude"
 
         def _apply_fallback(reason: str) -> None:
             logger.warning(
@@ -1188,6 +1199,7 @@ class Caller:
             )
             self.default_thinker_id = _FALLBACK_THINKER
             self.default_worker_id = _FALLBACK_WORKER
+            self.default_heavy_worker_id = _FALLBACK_HEAVY
             self.default_template_id = _FALLBACK_WORKER
             self.task_map = {}
             self._apply_areco_defaults()  # registry 挂了仍吃 areco 设置页的角色默认
@@ -1205,6 +1217,16 @@ class Caller:
         # 角色默认 + 全局兜底：完全由 registry 驱动
         self.default_thinker_id = data.get("default_thinker") or _FALLBACK_THINKER
         self.default_worker_id = data.get("default_worker") or _FALLBACK_WORKER
+        # ⑤ 重活车道锚（2026-07-29 路由反转）：default_worker 反转为 hy3 后，法律/代码
+        # 重活的模板必须有独立锚点——它刻意不吃 areco 设置页覆盖（设置页只有
+        # worker/fastWorker 两个旋钮，语义都是「默认车道」），否则 areco 掉线或设置
+        # 变动时重活会静默滑进轻车。
+        _exec_default = (data.get("task_type_defaults", {}) or {}).get("execute")
+        if isinstance(_exec_default, dict):  # 旧嵌套写法 {"template_id": "..."}
+            _exec_default = _exec_default.get("template_id")
+        self.default_heavy_worker_id = (
+            data.get("default_heavy_worker") or _exec_default or _FALLBACK_HEAVY
+        )
         # registry 无独立 default_template 字段时，全局兜底 = default_worker
         self.default_template_id = data.get("default_template") or self.default_worker_id
         # task_map：完全由 registry 的 task_type_defaults 构建（不再预填业务默认）
@@ -2188,7 +2210,11 @@ class Caller:
         isolated: bool = False,
         workspace_repo: str | None = None,
     ) -> dict:
-        """派给 Worker（registry.default_worker）：代码、搜索、文书、下载、总结"""
+        """派给 Worker（registry.default_worker；⑤ 反转后默认车道=hy3 轻车）。
+
+        搜索/下载/总结类默认活直接用本方法；法律/代码重活要落主力（claude/GLM-5.2）
+        须显式传 template_id=caller.default_heavy_worker_id——route_mode 的 worker
+        模式在 run 链路里已经这么做，这里不重复判词。"""
         return self.dispatch(
             request,
             task_type=task_type,
@@ -3516,14 +3542,16 @@ class Caller:
             单步无依赖      worker              think
             多步有依赖      plan                think + plan_only
 
-        判定顺序（先到先得）：
+        判定顺序（先到先得；⑤ Worker 路由反转 2026-07-29 高律师批）：
             1. 命中 PLAN_ONLY_KEYWORDS（「只要计划」「别动手」）→ think + plan_only
-            2. 轻量单步（≤120 字、命中 FAST_KEYWORDS、无 FAST_BLOCK/强计划信号）→ fast
-               （→ 快速 Worker（hy3）；保守优先，误判大的进 hy3 比误判小的进 claude 贵）
-            3. 交付物 = 判断（命中 JUDGMENT 且未命中 ARTIFACT）→ think
+            2. 交付物 = 判断（命中 JUDGMENT 且未命中 ARTIFACT）→ think
                （多步则 plan_only=True——多步判断的自然产物就是结构化计划）
-            4. 交付物 = 东西 且 多步有依赖 → plan（两段式）
-            5. 其余 → worker
+            3. 交付物 = 东西 且 多步有依赖 → plan（两段式）
+            4. 法律/代码重活词（法律=FAST_BLOCK_KEYWORDS，代码=CODE_KEYWORDS）→ worker
+               （主力 Worker claude/GLM-5.2，route_reason 写明命中词）
+            5. 其余一律 → fast（快速 Worker hy3）
+               反转说明：旧口径「轻活白名单进 hy3、默认 claude」，新口径「重活白名单进
+               claude、默认 hy3」——FAST_KEYWORDS 只留作 signals 观测，不再参与判定。
 
         刻意不返回 fanout / operator：
             fanout 要求「N 个互不依赖的子任务」，关键词启发式判不出子任务边界——
@@ -3542,9 +3570,12 @@ class Caller:
             }
         """
         text = request or ""
+        text_lower = text.lower()
 
         def _hits(kws) -> list[str]:
-            return [k for k in kws if k in text]
+            # ASCII 词按小写比对（python/bug/git/commit 不吃大小写亏），中文原样子串
+            return [k for k in kws
+                    if (k in text) or (k.isascii() and k.lower() in text_lower)]
 
         judgment = _hits(JUDGMENT_KEYWORDS)
         artifact = _hits(ARTIFACT_KEYWORDS)
@@ -3554,12 +3585,13 @@ class Caller:
         direct_kw = _hits(DIRECT_KEYWORDS)
         plan_only_kw = _hits(PLAN_ONLY_KEYWORDS)
         fast_kw = _hits(FAST_KEYWORDS)
-        fast_block = _hits(FAST_BLOCK_KEYWORDS)
+        heavy_law = _hits(FAST_BLOCK_KEYWORDS)
+        heavy_code = _hits(CODE_KEYWORDS)
         signals = {
             "judgment": judgment, "artifact": artifact,
             "plan": plan_kw, "plan_strong": plan_strong, "plan_weak": plan_weak,
             "direct": direct_kw, "plan_only": plan_only_kw,
-            "fast": fast_kw, "fast_block": fast_block,
+            "fast": fast_kw, "fast_block": heavy_law, "heavy_code": heavy_code,
         }
 
         # 结构维度（2026-07-26 强弱分档，提速批件）：plan 两段式是最贵的模式，误入
@@ -3578,18 +3610,7 @@ class Caller:
                 "signals": signals,
             }
 
-        # 2) 轻量单步 → fast（快速 Worker hy3）。保守优先：长度闸 + 重量信号一票否决，
-        #    拿不准就落后面的 worker（claude），宁重勿轻。
-        if (not multi_step and len(text) <= 120 and fast_kw
-                and not fast_block and not plan_strong):
-            return {
-                "mode": "fast", "plan_only": False,
-                "deliverable": "artifact", "structure": "single_step",
-                "reason": f"轻量单步任务（命中 {fast_kw}，无重量信号）→ 快速 Worker（hy3）",
-                "signals": signals,
-            }
-
-        # 3) 交付物 = 判断（要结论，不要东西）
+        # 2) 交付物 = 判断（要结论，不要东西）
         if judgment and not artifact:
             return {
                 "mode": "think", "plan_only": multi_step,
@@ -3601,7 +3622,7 @@ class Caller:
                 "signals": signals,
             }
 
-        # 4) 交付物 = 东西 且 多步有依赖 → 两段式
+        # 3) 交付物 = 东西 且 多步有依赖 → 两段式
         if multi_step:
             hit_desc = f"强 {plan_strong}" if plan_strong else f"弱×{len(plan_weak)} {plan_weak}"
             return {
@@ -3611,13 +3632,28 @@ class Caller:
                 "signals": signals,
             }
 
-        # 5) 单步执行
+        # 4) 法律/代码重活 → 主力 Worker（claude/GLM-5.2）。⑤ 路由反转（2026-07-29）：
+        #    claude 只留给重活白名单，route_reason 必须写明命中词（冒烟/审计取证用）。
+        if heavy_law or heavy_code:
+            # FAST_BLOCK 组=法律词+批量/落盘类重量词（任务口径统称「法律词组」），
+            # 标签用「法律/重量词」防止把「修复/批量」误读成法条类命中。
+            hit_desc = "、".join(
+                (["法律/重量词 " + "/".join(heavy_law)] if heavy_law else [])
+                + (["代码词 " + "/".join(heavy_code)] if heavy_code else [])
+            )
+            return {
+                "mode": "worker", "plan_only": False,
+                "deliverable": "artifact", "structure": "single_step",
+                "reason": f"命中重活词（{hit_desc}）→ 主力 Worker（claude/GLM-5.2）",
+                "signals": signals,
+            }
+
+        # 5) 其余一律轻车。⑤ 路由反转：默认车道 = 快速 Worker（hy3），不再要求
+        #    FAST_KEYWORDS 白名单命中——误配代价小的方向反过来了。
         return {
-            "mode": "worker", "plan_only": False,
+            "mode": "fast", "plan_only": False,
             "deliverable": "artifact", "structure": "single_step",
-            "reason": (
-                f"单步可完成、判据明确（命中 {direct_kw or artifact or '无信号，按保守默认'}）→ 直派 Worker"
-            ),
+            "reason": "无法律/代码重活词（路由反转 2026-07-29 默认轻车）→ 快速 Worker（hy3）",
             "signals": signals,
         }
 
@@ -4850,11 +4886,15 @@ def _run_by_mode(
         return {**res, "mode": mode}
 
     # think / worker：单段派发（--isolated 只对 worker 有意义：per-session cwd 隔离工作区）
+    # ⑤ 路由反转（2026-07-29）：worker 模式 = 重活车道（法律/代码词才会路由到这），模板
+    # 锚定 default_heavy_worker（claude/GLM-5.2）而非 role 默认——default_worker 已反转为
+    # hy3，走 role 解析重活会滑进轻车。显式 --template 仍最高优先。
     res = caller.dispatch_and_relay(
         args.request,
         role=decision["role"],
         room_id=args.room_id,
-        template_id=args.template,
+        template_id=(args.template or
+                     (caller.default_heavy_worker_id if mode == "worker" else None)),
         plan_only=decision["plan_only"],
         mode=mode,
         isolated=bool(getattr(args, "isolated", False)),
@@ -5303,6 +5343,10 @@ def _cmd_go(args) -> int:
         selected_template = caller.task_map.get("fast") or caller.default_worker_id
     elif role == "thinker":
         selected_template = caller.default_thinker_id
+    elif mode == "worker":
+        # ⑤ 路由反转：worker 模式=重活车道，锚 default_heavy_worker（claude），
+        # 与 run 的实际派发口径一致（default_worker 已是 hy3）。
+        selected_template = caller.default_heavy_worker_id
     else:
         selected_template = caller.default_worker_id
     print(json.dumps({
@@ -6695,6 +6739,18 @@ def _cmd_route(args) -> int:
     r = Caller.route_mode(args.request)
     gk = check_should_dispatch(args.request)
     mode = r["mode"]
+    # ⑤ 路由反转取证（2026-07-29）：路由结论附实际会派的模板 id（含 areco 设置页
+    # 覆盖后的真值）——冒烟/审计不用再猜「fast 是谁、worker 是谁」。
+    try:
+        _c = Caller()
+        template_id = (
+            (_c.task_map.get("fast") or _c.default_worker_id) if mode == "fast"
+            else _c.default_heavy_worker_id if mode == "worker"
+            else _c.default_thinker_id if mode in ("think", "plan")
+            else _c.default_worker_id
+        )
+    except Exception:
+        template_id = None
     # suggest 直出成品命令（2026-07-26 二阶）：任务原文 shlex.quote 嵌入、summary 自动取
     # 压缩空白后的前 24 字——Hermes 拿到即可原样执行，省掉一轮「往骨架里填参数」的组装。
     summary = " ".join((args.request or "").split())[:24]
@@ -6707,6 +6763,7 @@ def _cmd_route(args) -> int:
         suggest = "拒绝执行（BLOCKED 红线，勿派发勿直干）"
     out = {
         "mode": mode,
+        "template_id": template_id,
         "plan_only": r.get("plan_only", False),
         "deliverable": r.get("deliverable"),
         "structure": r.get("structure"),
