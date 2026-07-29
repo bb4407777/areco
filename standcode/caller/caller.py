@@ -764,6 +764,243 @@ def verify_completion(files: list | None = None, output_path: str | None = None)
     return {"level": level, "checks": checks}
 
 
+# ── 作业单验收栏 + 结果把关闸（2026-07-29 批件①，高律师批准）─────────────
+# 三份独立评审（GLM 质检 R2 / Fable5 评审 / 飞轮日记篇6+篇10）共同 P0：派出去时
+# 验收栏说清「怎么算过」，打回来时强制「差距/锚点/范围」三段式。派单侧
+# ensure_acceptance_block 自动补齐三栏（判据/产物路径/红线），回执侧 verify_acceptance
+# 把能机检的全验，Caller.gate_result 负责「不过→打回一次→复检→仍不过升级人工」。
+ACCEPT_HEADER = "【作业单·验收栏】"
+ACCEPT_REDLINE = (
+    "红线提醒：法条/案号/判例必须真实可溯源，禁编造；密钥/token/密码不得写进回复或产物；"
+    "删除文件一律进回收站（trash），禁 rm 直删；对外内容脱敏（真实当事人/案号/手机号不外泄）。"
+)
+# Worker 完工自报产物路径的格式约定——verify_acceptance 按它反向机检自报文件
+ACCEPT_SELF_REPORT = "完工回复末尾单列一行「产物路径：/绝对路径」；纯分析/问答类无产物则写「产物路径：无」并给出结论与依据。"
+# 机检判据 DSL 行（可写在作业单或验收栏里，一行一条）：
+#   file:/绝对路径              → 文件存在且非空（目录算过）
+#   file_contains:/路径:关键词   → 文件存在且含关键词
+#   result_contains:关键词       → Worker 回复正文含关键词
+#   commit:/仓库路径             → 回复里报的 commit hash 真实存在于该仓库
+_CRIT_DSL_RE = re.compile(r"^(file_contains|result_contains|file|commit)\s*[:：]\s*(.+)$")
+_CRIT_OUTPUT_RE = re.compile(r"^产物路径\s*[:：]\s*(.+?)\s*$")
+# 落盘动词后的绝对路径 → 自动抽成 file 判据（「写到 /tmp/x.txt」这类最常见口头判据）
+_CRIT_PATH_VERB_RE = re.compile(
+    r"(?:写到|写进|写入|存到|存进|保存到|保存至|输出到|落到|落盘到|追加到|生成到|导出到)"
+    r"\s*[：:]?\s*[（(]?\s*((?:/|~/)[^\s，。；;,、）)\]』」」*]+)"
+)
+# commit hash 候选：≥7 位十六进制且至少含一个字母（滤掉 20260729 这类纯数字日期）
+_COMMIT_HASH_RE = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
+
+
+def _criteria_from_text(text: str, origin: str = "explicit") -> list[dict]:
+    """扫一段文本，抽出全部可机检判据。
+
+    三路来源：① DSL 行（file:/file_contains:/result_contains:/commit:）
+    ② 「产物路径：/xxx」行 ③ 落盘动词后的绝对路径（origin 标 auto）。
+    返回 [{"kind","arg","raw","origin"}]，按出现序去重。
+    """
+    crits: list[dict] = []
+    seen: set[str] = set()
+
+    def add(kind: str, arg: str, raw: str, org: str) -> None:
+        arg = arg.strip().strip("`'\"").rstrip("。.，,；;")
+        if kind in ("file", "commit"):
+            # 剥掉尾部全角括号注释（本模板自己就写「file:/x（文件存在且非空）」，
+            # 回环解析时注释不能混进路径；半角括号可能是文件名一部分，不动）
+            arg = re.sub(r"（[^）]*）\s*$", "", arg).rstrip()
+        key = f"{kind}:{arg}"
+        if not arg or key in seen:
+            return
+        seen.add(key)
+        crits.append({"kind": kind, "arg": arg, "raw": raw.strip(), "origin": org})
+
+    for raw in (text or "").splitlines():
+        s = raw.strip().lstrip("-·*•").strip()
+        # checkbox / 编号前缀（"[ ] 1. file:…" / "1、file:…"）剥掉再匹配
+        s = re.sub(r"^(?:\[[ xX✓]?\]\s*)?(?:\d+[.、）)]\s*)?", "", s)
+        m = _CRIT_DSL_RE.match(s)
+        if m:
+            add(m.group(1), m.group(2), s, "explicit")
+            continue
+        m = _CRIT_OUTPUT_RE.match(s)
+        if m:
+            p = m.group(1).strip().strip("`'\"")
+            if p not in ("无", "None", "-") and (p.startswith("/") or p.startswith("~")):
+                add("file", p, s, "explicit")
+    for m in _CRIT_PATH_VERB_RE.finditer(text or ""):
+        add("file", m.group(1), m.group(0), origin if origin != "explicit" else "auto")
+    return crits
+
+
+def extract_acceptance(request: str) -> dict:
+    """只解析不改写：从作业单文本里提取验收信息（plan 模式与收尾复核用）。
+
+    返回 {"criteria": [...], "source": "explicit"|"auto"|"default"}——
+    explicit=用户自己写了判据/验收段；auto=仅从落盘动词自动抽到路径；
+    default=什么都没抽到（验收只能靠 Worker 完工自报产物路径反向机检）。
+    """
+    req = request or ""
+    crits = _criteria_from_text(req)
+    has_section = bool(re.search(r"验收判据|验收标准|完成判据|验收栏", req)) or ACCEPT_HEADER in req
+    if has_section or any(c["origin"] == "explicit" for c in crits):
+        source = "explicit"
+    elif crits:
+        source = "auto"
+    else:
+        source = "default"
+    return {"criteria": crits, "source": source}
+
+
+def ensure_acceptance_block(request: str) -> tuple[str, dict]:
+    """派单前把「验收栏」三栏补进作业单（幂等）：①验收判据（可机检优先）②产物路径③红线提醒。
+
+    用户已写的栏目不重复追加、原文不动；缺哪栏补哪栏；已带 ACCEPT_HEADER 直接原样返回
+    （防 bg 回放 / 重派发二次追加）。返回 (request', acceptance)。
+    """
+    req = (request or "").rstrip()
+    acceptance = extract_acceptance(req)
+    if ACCEPT_HEADER in req:
+        acceptance["block_appended"] = False
+        return req, acceptance
+
+    lines = ["", f"——{ACCEPT_HEADER}（Caller 自动追加，完工按此交付，机检不过会被打回）——"]
+    crits = acceptance["criteria"]
+    if acceptance["source"] != "explicit":
+        lines.append("验收判据（能机检的会逐条真跑）：")
+        if crits:
+            for i, c in enumerate(crits, 1):
+                lines.append(f"{i}. {c['kind']}:{c['arg']}（文件存在且非空）")
+            lines.append(f"{len(crits) + 1}. {ACCEPT_SELF_REPORT}")
+        else:
+            lines.append(f"1. {ACCEPT_SELF_REPORT}")
+    prestated = {c["arg"] for c in crits}
+    lines.append(
+        "产物路径：" + ("；".join(sorted(prestated)) if prestated
+                     else "完工自报（格式见上；报了路径就会被机检）")
+    )
+    if "红线" not in req:
+        lines.append(ACCEPT_REDLINE)
+    acceptance["block_appended"] = True
+    return req + "\n" + "\n".join(lines), acceptance
+
+
+def _check_file_criterion(path: str) -> tuple[bool, str]:
+    """file 判据：存在且非空（目录算过）。与 verify_completion 同口径。"""
+    try:
+        fp = Path(os.path.expanduser(path))
+        if not fp.exists():
+            return False, "文件不存在"
+        if fp.is_dir():
+            return True, "目录存在"
+        size = fp.stat().st_size
+        return (size > 0), (f"{size} 字节" if size > 0 else "文件为空（0 字节）")
+    except OSError as e:
+        return False, f"无法访问: {e}"
+
+
+def _run_criterion(kind: str, arg: str, result_text: str) -> tuple[bool, str]:
+    """跑一条机检判据，返回 (passed, detail)。未知 kind 按不过处理（fail-closed）。"""
+    if kind == "file":
+        return _check_file_criterion(arg)
+    if kind == "file_contains":
+        path, _, needle = arg.partition(":")
+        if not needle:
+            return False, "格式应为 file_contains:/路径:关键词"
+        ok, detail = _check_file_criterion(path)
+        if not ok:
+            return False, detail
+        try:
+            content = Path(os.path.expanduser(path)).read_text(encoding="utf-8", errors="ignore")
+        except OSError as e:
+            return False, f"读取失败: {e}"
+        return (needle in content), ("含关键词" if needle in content else f"文件不含「{needle[:40]}」")
+    if kind == "result_contains":
+        hit = arg in (result_text or "")
+        return hit, ("回复含关键词" if hit else f"回复不含「{arg[:40]}」")
+    if kind == "commit":
+        repo = os.path.expanduser(arg)
+        if not Path(repo).is_dir():
+            return False, f"仓库目录不存在: {arg}"
+        hashes = _COMMIT_HASH_RE.findall(result_text or "")[:20]
+        for h in hashes:
+            try:
+                r = subprocess.run(
+                    ["git", "-C", repo, "cat-file", "-e", f"{h}^{{commit}}"],
+                    capture_output=True, timeout=10,
+                )
+                if r.returncode == 0:
+                    return True, f"commit {h} 在仓库中真实存在"
+            except Exception:
+                continue
+        return False, ("回复未报 commit hash" if not hashes
+                       else f"回复报的 hash（{hashes[0]}…）不在仓库 {arg}")
+    return False, f"未知判据类型 {kind}"
+
+
+def verify_acceptance(
+    acceptance: dict | None,
+    result_text: str = "",
+    files: list | None = None,
+    output_path: str | None = None,
+) -> dict:
+    """判据机检（verify_completion 的验收栏升级版）：作业单判据 + Worker 自报产物路径
+    + 旧口径 files/output_path 全跑一遍。返回形状与 verify_completion 兼容
+    （level/checks），另带 criteria_source / attempts / bounced / escalated 供把关闸回填。
+    """
+    acc = acceptance or {}
+    crits = [dict(c) for c in (acc.get("criteria") or []) if isinstance(c, dict)]
+    # Worker 完工自报的「产物路径：/xxx」也算它给出的机检承诺——报了就要对得上
+    for c in _criteria_from_text(result_text or "", origin="self_report"):
+        if c["kind"] == "file":
+            c["origin"] = "self_report"
+            crits.append(c)
+    checks: list[dict] = []
+    seen: set[str] = set()
+    for c in crits:
+        key = f"{c.get('kind')}:{c.get('arg')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        passed, detail = _run_criterion(str(c.get("kind")), str(c.get("arg")), result_text)
+        checks.append({"check": key, "passed": bool(passed), "detail": detail,
+                       "origin": c.get("origin", "")})
+    # 旧口径（--file / plan 最终产物落点）并入，不与判据重复
+    legacy = verify_completion(files=files, output_path=output_path)
+    for ch in legacy.get("checks", []):
+        if ch["check"] not in seen:
+            seen.add(ch["check"])
+            checks.append(ch)
+    source = acc.get("source") or "none"
+    if not checks:
+        note = ("Worker 自报「产物路径：无」，无可机检判据" if "产物路径" in (result_text or "")
+                else "无可机检判据（判据未给出机检格式，产物路径也未自报）")
+        return {"level": "agent_reported", "checks": [], "criteria_source": source, "note": note}
+    level = "verified" if all(c["passed"] for c in checks) else "check_failed"
+    return {"level": level, "checks": checks, "criteria_source": source}
+
+
+def build_rejection_message(verification: dict, attempt: int = 1) -> str:
+    """三段式打回话术（强制结构：差距/锚点/修改范围，禁「再改改」式零信息反馈）。"""
+    failed = [c for c in (verification or {}).get("checks", []) if not c.get("passed")]
+    lines = [
+        f"❌【验收未过·打回第 {attempt} 次】你自称完成，但机检判据未过。按下面三段补齐，"
+        "不接受「已完成/已修复」式空回复。",
+        "一、差距（机检实测，不是感觉）：",
+    ]
+    for c in failed:
+        lines.append(f"  · {c['check']} —— {c.get('detail') or '未通过'}")
+    lines.append("二、锚点（对着这些落点改）：")
+    for c in failed:
+        kind, _, arg = c["check"].partition(":")
+        lines.append(f"  · {arg}（判据类型 {kind}）")
+    lines.append(
+        "三、修改范围：只补上述未过项，已过的部分不要动、不要重写整份回复。"
+        "补完后回复每条未过判据的落实证据（产物绝对路径 / commit hash / 关键输出原文），"
+        "末尾单列一行「产物路径：/绝对路径」。"
+    )
+    return "\n".join(lines)
+
+
 def _audit_is_stub(r: dict) -> bool:
     """审计条目是否测试桩痕迹（thinker-tpl/worker-tpl 假模板、room0 类假房号）。
 
@@ -1037,8 +1274,17 @@ def _parse_iso_ts(s: str | None) -> float | None:
 
 
 def _norm_request(text: str) -> str:
-    """重复派发闸（A2）的 request 规范化：去全部空白 + lower。"""
-    return "".join((text or "").split()).lower()
+    """重复派发闸（A2）的 request 规范化：去全部空白 + lower。
+
+    验收栏（2026-07-29 批件①）是 Caller 附加的样板、不是用户意图：比对前剥掉，
+    否则改动前落盘的旧 state（原文）对上新派发（已追加验收栏）会漏判重复。
+    """
+    t = text or ""
+    i = t.find(ACCEPT_HEADER)
+    if i != -1:
+        j = t.rfind("\n", 0, i)  # 追加块从行首剥（行首带「——」装饰）
+        t = t[: j if j != -1 else i]
+    return "".join(t.split()).lower()
 
 
 def ledger_load() -> dict:
@@ -1423,7 +1669,8 @@ class Caller:
             return data.get("sessions", [])
         return data or []
 
-    def finish_room(self, dispatch_result: dict, status: str, settle_forced: bool = False) -> dict:
+    def finish_room(self, dispatch_result: dict, status: str, settle_forced: bool = False,
+                    keep_reason: str | None = None) -> dict:
         """一次派发的收口：成功即归档自建房间，其余情况留在看板。
 
         只归档「StandCode 自己新建」的房间（dispatch_result["room_created"]）——
@@ -1444,6 +1691,11 @@ class Caller:
         if not dispatch_result.get("room_created", False):
             ledger_append("kept", room_id, task_id=task_id, status=status, reason="reused_room")
             return {"archived": False, "room_id": room_id, "reason": "reused_room"}
+        if keep_reason:
+            # 调用方点名保留（如 verify_escalated：判据两过不了升级人工）——归档会级联
+            # 杀 Stand 并被 sweeper 删房，取证现场就没了
+            ledger_append("kept", room_id, task_id=task_id, status=status, reason=keep_reason)
+            return {"archived": False, "room_id": room_id, "reason": keep_reason}
         if not AUTO_ARCHIVE:
             ledger_append("kept", room_id, task_id=task_id, status=status, reason="auto_archive_off")
             return {"archived": False, "room_id": room_id, "reason": "auto_archive_off"}
@@ -3213,6 +3465,98 @@ class Caller:
             "returncode": proc.returncode,
         }
 
+    def gate_result(
+        self,
+        dispatch_result: dict,
+        poll: dict,
+        acceptance: dict,
+        *,
+        files: list | None = None,
+        poll_timeout: int = 0,
+        max_bounce: int = 1,
+    ) -> dict:
+        """结果把关闸（2026-07-29 批件①）：机检 → 不过打回一次 → 复检 → 仍不过升级人工。
+
+        必须在 finish_room 归档之前调（归档级联杀 Stand，打回就没人接了）。
+        打回走同房间同 Stand（上下文还在，补齐差价最小）；话术强制三段式
+        （差距/锚点/范围，build_rejection_message）。复检对「首轮+补齐轮」合并文本跑——
+        自报产物路径可能只出现在补齐轮。
+
+        返回 {"poll", "verification", "bounced", "escalated"}；poll 为（可能已并入
+        补齐轮的）最新结果，verification 带 attempts/bounced/escalated 三个把关字段。
+        """
+        verification = verify_acceptance(
+            acceptance, result_text=poll.get("result_text", ""), files=files,
+        )
+        bounced = False
+        escalated = False
+        attempts = 1
+        if verification.get("level") == "check_failed" and max_bounce > 0:
+            failed = [c["check"] for c in verification.get("checks", []) if not c.get("passed")]
+            rejection = build_rejection_message(verification, attempt=1)
+            log_audit("verify_bounce", {
+                "task_id": dispatch_result.get("task_id", ""),
+                "role": dispatch_result.get("role", ""),
+                "template": dispatch_result.get("template_id", ""),
+                "room_id": dispatch_result.get("room_id"),
+                "failed_checks": failed[:5],
+            })
+            try:
+                mid = self.send_message(
+                    dispatch_result["session_id"],
+                    dispatch_result.get("stand_name", "") or "all",
+                    rejection,
+                )
+            except Exception as e:
+                # 打回发不出去（房间没了/库锁死）≠ 判据过了——如实标注并升级
+                escalated = True
+                verification["note"] = f"打回发送失败，升级人工：{e}"
+            else:
+                bounced = True
+                attempts = 2
+                poll2 = self.poll_result(
+                    room_id=dispatch_result.get("room_id"),
+                    session_id=dispatch_result["session_id"],
+                    stand_session_id=dispatch_result.get("stand_session_id"),
+                    after_id=mid,
+                    stand_name=dispatch_result.get("stand_name", ""),
+                    timeout=poll_timeout,
+                    task_id=dispatch_result.get("task_id", ""),
+                    role=dispatch_result.get("role", ""),
+                    template=dispatch_result.get("template_id", ""),
+                )
+                if poll2.get("status") == "completed" and poll2.get("result_text"):
+                    merged = (
+                        poll.get("result_text", "")
+                        + "\n\n──【验收打回后补齐（第 2 轮）】──\n"
+                        + poll2.get("result_text", "")
+                    )
+                    poll = {**poll, **poll2, "result_text": merged}
+                    verification = verify_acceptance(
+                        acceptance, result_text=merged, files=files,
+                    )
+                    if verification.get("level") == "check_failed":
+                        escalated = True
+                else:
+                    escalated = True
+                    verification["note"] = (
+                        f"打回后未收到有效补齐（{poll2.get('status')}），升级人工"
+                    )
+        verification["attempts"] = attempts
+        verification["bounced"] = bounced
+        verification["escalated"] = escalated
+        if escalated:
+            verification.setdefault("note", "打回一次仍未过判据，升级 Caller 人工复核")
+            log_audit("verify_escalated", {
+                "task_id": dispatch_result.get("task_id", ""),
+                "role": dispatch_result.get("role", ""),
+                "template": dispatch_result.get("template_id", ""),
+                "room_id": dispatch_result.get("room_id"),
+                "note": verification.get("note", ""),
+            })
+        return {"poll": poll, "verification": verification,
+                "bounced": bounced, "escalated": escalated}
+
     def dispatch_and_relay(
         self,
         request: str,
@@ -3229,6 +3573,7 @@ class Caller:
         mode: str = "",
         isolated: bool = False,
         workspace_repo: str | None = None,
+        acceptance: dict | None = None,
     ) -> dict:
         """一键派发 → 主动轮询 → 代发微信
 
@@ -3271,6 +3616,18 @@ class Caller:
             template=dispatch_result.get("template_id", ""),
         )
 
+        # ── 结果把关闸（2026-07-29 批件①）：completed 且带验收栏 → 先机检再收口。
+        # 位置必须在 finish_room 之前：归档级联杀 Stand，打回要趁房间还活着。
+        gate = None
+        if acceptance and poll.get("status") == "completed":
+            gate = self.gate_result(
+                dispatch_result, poll, acceptance,
+                files=[file_path] if file_path else [],
+                poll_timeout=poll_timeout,
+            )
+            poll = gate["poll"]
+            poll["verification"] = gate["verification"]
+
         status = poll.get("status")
         result_text = poll.get("result_text", "")
         relayed = False
@@ -3298,9 +3655,13 @@ class Caller:
             )
             relayed = wechat.get("ok", False)
 
-        # 收口：结果已收完（且已代发/已落 inbox），成功就把自建房间归档，别在看板堆着
-        archive = self.finish_room(dispatch_result, status,
-                                   settle_forced=bool(poll.get("settle_forced")))
+        # 收口：结果已收完（且已代发/已落 inbox），成功就把自建房间归档，别在看板堆着。
+        # 把关闸升级人工的例外：房间留看板取证（归档会杀 Stand + 被 sweeper 删房）。
+        archive = self.finish_room(
+            dispatch_result, status,
+            settle_forced=bool(poll.get("settle_forced")),
+            keep_reason="verify_escalated" if (gate and gate["escalated"]) else None,
+        )
 
         return {
             **dispatch_result,
@@ -4590,12 +4951,17 @@ def summarize_inbox(payload: dict) -> str:
     level = ver.get("level")
     if status == "completed":
         if level == "verified":
-            head = f"✅ {conclusion}（已验证：产物机检通过）"
+            head = (f"✅ {conclusion}（已验证：产物机检通过"
+                    f"{'，经打回补齐' if ver.get('bounced') else ''}）")
         elif level == "check_failed":
             failed = [c["check"] for c in ver.get("checks", []) if not c.get("passed")]
-            head = f"❌ {conclusion}（判据未过：{'、'.join(failed[:3]) or '机检失败'}——Worker 自称完成但产物对不上）"
+            if ver.get("escalated"):
+                head = (f"❌ {conclusion}（判据未过·已打回 1 次仍未过，升级人工复核："
+                        f"{'、'.join(failed[:3]) or '机检失败'}）")
+            else:
+                head = f"❌ {conclusion}（判据未过：{'、'.join(failed[:3]) or '机检失败'}——Worker 自称完成但产物对不上）"
         else:
-            head = f"⚠️ {conclusion}（Worker 自述，无可机检判据）"
+            head = f"⚠️ {conclusion}（{ver.get('note') or 'Worker 自述，无可机检判据'}）"
     else:
         head = f"✅ {conclusion}" if status == "completed" else f"⚠️ {conclusion}"
     msg_parts = [head]
@@ -4726,10 +5092,30 @@ def _finalize_waiter(
     if with_checks:
         if status == "completed":
             plan_parsed = res.get("plan_parsed") if isinstance(res.get("plan_parsed"), dict) else {}
-            verification = verify_completion(
-                files=files or [],
-                output_path=(plan_parsed or {}).get("output_path"),
-            )
+            acceptance = spec.get("acceptance") if isinstance(spec.get("acceptance"), dict) else None
+            gate_ver = res.get("verification") if isinstance(res.get("verification"), dict) else None
+            if gate_ver:
+                # 把关闸已在派发链跑过（含打回/升级）——直接采信，不重跑
+                verification = gate_ver
+            elif acceptance:
+                # 带验收栏但没走闸的路（plan 模式等）：判据机检照跑，只是不打回
+                verification = verify_acceptance(
+                    acceptance,
+                    result_text=result_text,
+                    files=files or [],
+                    output_path=(plan_parsed or {}).get("output_path"),
+                )
+            else:
+                # 旧式派单（spec 无验收栏，改动前落盘的 bg 回放等）：照常跑旧口径机检，
+                # 报告里如实标注「无判据未验」（批件①向后兼容项）
+                verification = verify_completion(
+                    files=files or [],
+                    output_path=(plan_parsed or {}).get("output_path"),
+                )
+                verification["criteria_source"] = "none"
+                if verification.get("level") == "agent_reported" and \
+                        spec.get("mode") in ("worker", "fast", "plan"):
+                    verification["note"] = "旧式派单（无验收栏），无判据未验"
         cost = caller.collect_stand_cost(
             res.get("stand_session_id")
             or (res.get("execute") or {}).get("stand_session_id")
@@ -4807,7 +5193,10 @@ def _bg_worker(task_id: str) -> int:
         )
         # dry_run=True：后台不直接发完整结果（inbox 设计：Hermes 读 inbox 后代发）
         # poll_timeout=0：无限等待，直到 Stand 完成
-        res = _run_by_mode(caller, decision, bg_args, 0, dry_run=True)
+        res = _run_by_mode(
+            caller, decision, bg_args, 0, dry_run=True,
+            acceptance=spec.get("acceptance") if isinstance(spec.get("acceptance"), dict) else None,
+        )
         result_text = res.get("result_text", "")
         poll_status = res.get("status", "completed")
         room_id = res.get("room_id")
@@ -4881,6 +5270,7 @@ def _run_by_mode(
     args,
     timeout: int,
     dry_run: bool,
+    acceptance: dict | None = None,
 ) -> dict:
     """按模式跑一次「派发 + 轮询」，把四种模式的返回归一成同一形状。
 
@@ -4982,6 +5372,7 @@ def _run_by_mode(
             dry_run=dry_run,
             request_summary=args.summary,
             file_path=args.file,
+            acceptance=acceptance,
         )
         return {**res, "mode": mode}
 
@@ -4999,6 +5390,7 @@ def _run_by_mode(
         mode=mode,
         isolated=bool(getattr(args, "isolated", False)),
         workspace_repo=getattr(args, "workspace_repo", None),
+        acceptance=(acceptance if mode == "worker" else None),
         **common,
     )
     return {**res, "mode": mode}
@@ -5094,6 +5486,17 @@ def _cmd_run(args) -> int:
 
     args.plan = decision["mode"] == "plan"  # 供下方 bg spec 回放沿用旧字段
 
+    # ── 作业单验收栏（2026-07-29 批件①）：路由定夺后、派发前补齐三栏 ──
+    # worker/fast 自动追加（幂等，已带验收栏不重复）；plan 只解析不追加——PLAN_TEMPLATE
+    # 本就强制 Thinker 写「完成判据/最终产物落点」，再贴一份就是同一契约两处漂移；
+    # think 不加（Thinker 交判断不交产物）；fanout 子任务结构另置，本批不动。
+    # 位置在 resolve_mode 之后是刻意的：fast 车道按原始正文长度/关键词路由，追加块不参与路由。
+    acceptance = None
+    if decision["mode"] in ("worker", "fast"):
+        args.request, acceptance = ensure_acceptance_block(args.request)
+    elif decision["mode"] == "plan":
+        acceptance = extract_acceptance(args.request)
+
     # ── 后台（已弃用 2026-07-25）──
     if getattr(args, "bg", False):
         print(
@@ -5120,6 +5523,7 @@ def _cmd_run(args) -> int:
             "reuse_plan": getattr(args, "reuse_plan", False),
             "no_relay": args.no_relay,
             "dry_run": args.dry_run,
+            "acceptance": acceptance,
         }
         log_path = TASKS_DIR / f"{task_id}.log"
         TASKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5187,6 +5591,7 @@ def _cmd_run(args) -> int:
             "mode": decision["mode"],
             "plan_only": decision["plan_only"],
             "subs": decision["subs"],
+            "acceptance": acceptance,
         }
         state = {
             "task_id": task_id,
@@ -5225,7 +5630,8 @@ def _cmd_run(args) -> int:
         caller._on_dispatch = _breadcrumb
         try:
             # dry_run=True：relay_to_wechat 只拼不发——微信回复由 gateway notify 唤醒 Hermes 后自行组织
-            res = _run_by_mode(caller, decision, args, timeout, dry_run=True)
+            res = _run_by_mode(caller, decision, args, timeout, dry_run=True,
+                               acceptance=acceptance)
             result_text = res.get("result_text", "")
             status = res.get("status", "completed")
             room_id = res.get("room_id")
@@ -5324,7 +5730,8 @@ def _cmd_run(args) -> int:
     caller = Caller()
     fg_dry_run = bool(args.no_relay) or bool(args.dry_run)
     try:
-        res = _run_by_mode(caller, decision, args, timeout, dry_run=fg_dry_run)
+        res = _run_by_mode(caller, decision, args, timeout, dry_run=fg_dry_run,
+                           acceptance=acceptance)
     except ModeConflictError as e:
         print(json.dumps(
             {"status": "mode_conflict", "error": str(e)},
@@ -6648,12 +7055,14 @@ def _cmd_inbox(args) -> int:
             # 证据分级（agentacct 借鉴，与 summarize_inbox 同口径）
             ver = d.get("verification") or {}
             if status == "completed" and ver.get("level") == "verified":
-                print(f"✅ {concl[:120]}（已验证）")
+                print(f"✅ {concl[:120]}（已验证{'·打回补齐' if ver.get('bounced') else ''}）")
             elif status == "completed" and ver.get("level") == "check_failed":
                 failed = [c["check"] for c in ver.get("checks", []) if not c.get("passed")]
-                print(f"❌ {concl[:120]}（判据未过:{'、'.join(failed[:2]) or '机检失败'}）")
+                tag = "已打回仍未过·升级人工" if ver.get("escalated") else "判据未过"
+                print(f"❌ {concl[:120]}（{tag}:{'、'.join(failed[:2]) or '机检失败'}）")
             elif status == "completed" and ver.get("level") == "agent_reported":
-                print(f"⚠️ {concl[:120]}（自述）")
+                note = "无判据未验" if "无验收栏" in str(ver.get("note") or "") else "自述"
+                print(f"⚠️ {concl[:120]}（{note}）")
             else:
                 print(f"✅ {concl[:120]}")
             pts = []
