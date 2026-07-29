@@ -403,3 +403,240 @@ test('项目房间驻场简报：每个进程代际只带一次 PROJECT.md 指�
   assert.match(sent['sb'][0], /^\[任务·/, '任务房间注入前缀应为「任务·」（2026-07-29 高律师令）')
   assert.match(sent['sb'][0], /在任务里看不到，必须执行下面命令把回复发回任务/, '任务房间回执提示应说「任务」')
 })
+
+// ---- 2026-07-29 冒名回执事件（hy3 接手 Glm5.2 会话后照抄旧回执命令，成果记到 GLM 头上）三层修复 ----
+
+/** 带模板信息的假 SessionManager：get 返回带 templateId/isRunning/trafficState 的会话，
+ *  templateNameOf 按映射解析（模板名取不到返回 null）。接口同 mockManager，另加署名校正所需字段 */
+function mockManagerTpls(
+  sessionSpecs: { id: string; templateId: string; isRunning?: boolean }[],
+  tplNames: Record<string, string>
+): { manager: unknown; sent: Sent } {
+  const sent: Sent = {}
+  const byId = new Map(sessionSpecs.map((s) => [s.id, s]))
+  const manager = {
+    list: () => sessionSpecs.map((s) => ({ id: s.id, status: s.isRunning === false ? 'exited' : 'running' })),
+    get: (id: string) => {
+      const s = byId.get(id)
+      if (!s) throw new Error(`会话不存在: ${id}`)
+      return {
+        id: s.id,
+        templateId: s.templateId,
+        isRunning: s.isRunning !== false,
+        trafficState: 'idle',
+        onceQuiet: (fn: () => void) => fn(),
+        sendline: (text: string) => {
+          ;(sent[id] ??= []).push(text)
+        },
+        on: () => {},
+        off: () => {},
+      }
+    },
+    templateNameOf: (session: { templateId: string }) => tplNames[session.templateId] ?? null,
+  }
+  return { manager, sent }
+}
+
+/** 临时接管 console.log 抓 room-relay 的 log 行（logger warn 走 console.log），finally 必须恢复 */
+function spyLogs(): { lines: string[]; restore: () => void } {
+  const lines: string[] = []
+  const orig = console.log
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(' '))
+  }
+  return {
+    lines,
+    restore: () => {
+      console.log = orig
+    },
+  }
+}
+
+test('Layer1：投递 note 含反冒名指令，回执命令仍带成员名（正常路径可直接复制粘贴）', () => {
+  const { rooms, roomId } = setup()
+  const { manager, sent } = mockManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  relay.postMessage(roomId, 'Owner', '@A 处理一下')
+  const note = sent['sa'][0]
+  assert.match(note, /必须执行下面命令/, '回执命令提示仍在')
+  assert.match(note, /'A' 'Owner' '<你的回复>'/, '回执命令仍带成员名，正常路径可直接复制')
+  assert.match(note, /实际执行者不是 A 本人/, '应点名「会话被接手/代跑」的情形')
+  assert.match(note, /改成执行者自己的实际 Stand 名/, '应要求改成实际执行者署名')
+  assert.match(note, /禁止照抄原署名/, '应含明确禁令')
+})
+
+test('Layer2：绑定会话被别的模板接手时，tick 摄入的外部回执 from 校正为当前模板名（主循环分支）', () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create(`areco-sign${++seq}`)
+  rooms.addMember(room.id, { name: 'Glm5.2', kind: 'session', sessionId: 'sa', templateId: 'tpl-glm' })
+  const { manager, sent } = mockManagerTpls([{ id: 'sa', templateId: 'tpl-hy3' }], { 'tpl-hy3': 'hy3' })
+  const broadcasts: { type: string; roomId?: string; message?: { from: string } }[] = []
+  const relay = new RoomRelay(rooms, manager as never, (msg) => broadcasts.push(msg as never))
+  futureStart(relay)
+  const tick = () => (relay as unknown as { tick(): void }).tick()
+  tick() // 初见建游标（本房尚无消息）
+  const spy = spyLogs()
+  try {
+    projectDb.send(room.team, 'Glm5.2', 'Owner', '干完了，成果如下') // hy3 照抄旧命令，署名仍是 Glm5.2
+    tick()
+  } finally {
+    spy.restore()
+  }
+  const rows = projectDb.history(room.team, 10)
+  assert.equal(rows[rows.length - 1].from, 'hy3', '库里行 from_agent 应被改写为当前模板名')
+  const roomMsg = broadcasts.find((b) => b.type === 'roomMessage' && b.roomId === room.id)
+  assert.equal(roomMsg?.message?.from, 'hy3', '广播消息应用校正后署名')
+  assert.ok(
+    spy.lines.some((w) => /署名修正 Glm5\.2→hy3/.test(w) && /tpl-hy3/.test(w)),
+    '应记「署名修正 X→Y（会话被模板 Z 接手）」warn'
+  )
+  // 校正后 from 非成员名：走「from 不在 members 默认 session」兜底——无 @ 不投递、不误判 human、不死循环
+  assert.equal(sent['sa'], undefined, '校正后不得误投回绑定会话')
+})
+
+test('Layer2：初见房间分支（启动后新帖）同样校正署名', () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create(`areco-sign-ff${++seq}`)
+  rooms.addMember(room.id, { name: 'Glm5.2', kind: 'session', sessionId: 'sa', templateId: 'tpl-glm' })
+  projectDb.send(room.team, 'Glm5.2', 'Owner', '接手机器人的第一条回执')
+  const { manager } = mockManagerTpls([{ id: 'sa', templateId: 'tpl-hy3' }], { 'tpl-hy3': 'hy3' })
+  const broadcasts: { type: string; roomId?: string; message?: { from: string } }[] = []
+  const relay = new RoomRelay(rooms, manager as never, (msg) => broadcasts.push(msg as never))
+  // startedAt 拨到「现在」：本条新帖不被快进（他案存量因远早于此被快进跳过）
+  ;(relay as unknown as { startedAtMs: number }).startedAtMs = Date.now()
+  ;(relay as unknown as { tick(): void }).tick()
+  const rows = projectDb.history(room.team, 10)
+  assert.equal(rows[rows.length - 1].from, 'hy3', '初见分支摄入的新帖也应被校正')
+  // 共享临时根下他案房间同轮也会广播（本 relay 初见全部房间），须按 roomId 捞本房的
+  const roomMsg = broadcasts.find((b) => b.type === 'roomMessage' && b.roomId === room.id)
+  assert.equal(roomMsg?.message?.from, 'hy3')
+})
+
+test('Layer2：templateId 一致 / 会话已死 / 校正目标与房内成员重名——边界行为', () => {
+  // 一致：不动
+  const rooms = new RoomStore('Owner')
+  const room1 = rooms.create(`areco-sign-same${++seq}`)
+  rooms.addMember(room1.id, { name: 'Glm5.2', kind: 'session', sessionId: 'sa', templateId: 'tpl-glm' })
+  const { manager: m1 } = mockManagerTpls([{ id: 'sa', templateId: 'tpl-glm' }], { 'tpl-glm': 'Glm5.2' })
+  const relay1 = new RoomRelay(rooms, m1 as never, () => {})
+  futureStart(relay1)
+  const tick1 = () => (relay1 as unknown as { tick(): void }).tick()
+  tick1()
+  projectDb.send(room1.team, 'Glm5.2', 'Owner', '正常回执')
+  tick1()
+  const rows1 = projectDb.history(room1.team, 10)
+  assert.equal(rows1[rows1.length - 1].from, 'Glm5.2', 'templateId 一致时不动')
+
+  // 会话已死（exited 仍在 Map）：不动——死会话的 templateId 证明不了当前执行者
+  const room2 = rooms.create(`areco-sign-dead${++seq}`)
+  rooms.addMember(room2.id, { name: 'Glm5.2', kind: 'session', sessionId: 'sd', templateId: 'tpl-glm' })
+  const { manager: m2 } = mockManagerTpls(
+    [
+      { id: 'sa', templateId: 'tpl-glm' },
+      { id: 'sd', templateId: 'tpl-hy3', isRunning: false },
+    ],
+    { 'tpl-hy3': 'hy3' }
+  )
+  const relay2 = new RoomRelay(rooms, m2 as never, () => {})
+  futureStart(relay2)
+  const tick2 = () => (relay2 as unknown as { tick(): void }).tick()
+  tick2()
+  projectDb.send(room2.team, 'Glm5.2', 'Owner', '会话死后到达的回执')
+  tick2()
+  const rows2 = projectDb.history(room2.team, 10)
+  assert.equal(rows2[rows2.length - 1].from, 'Glm5.2', '绑定会话已退出时不动')
+
+  // 校正目标名与房内另一成员重名：照改（from 只作署名，member 匹配走错名兜底）
+  const room3 = rooms.create(`areco-sign-clash${++seq}`)
+  rooms.addMember(room3.id, { name: 'Glm5.2', kind: 'session', sessionId: 'sa', templateId: 'tpl-glm' })
+  rooms.addMember(room3.id, { name: 'hy3', kind: 'session', sessionId: 'se', templateId: 'tpl-hy3' })
+  const { manager: m3 } = mockManagerTpls(
+    [
+      { id: 'sa', templateId: 'tpl-hy3' },
+      { id: 'se', templateId: 'tpl-hy3' },
+    ],
+    { 'tpl-hy3': 'hy3' }
+  )
+  const relay3 = new RoomRelay(rooms, m3 as never, () => {})
+  futureStart(relay3)
+  const tick3 = () => (relay3 as unknown as { tick(): void }).tick()
+  tick3()
+  projectDb.send(room3.team, 'Glm5.2', 'Owner', '校正后与 B 成员重名')
+  tick3()
+  const rows3 = projectDb.history(room3.team, 10)
+  assert.equal(rows3[rows3.length - 1].from, 'hy3', '与房内另一成员重名也照改')
+})
+
+test('Layer2 懒补：存量 member（无 templateId）首轮见到存活 session 即回填并持久化', () => {
+  const { rooms, roomId, team } = setup() // setup 的 addMember 不带 templateId = 存量 member
+  const { manager } = mockManagerTpls(
+    [
+      { id: 'sa', templateId: 'tpl-glm' },
+      { id: 'sb', templateId: 'tpl-ds' },
+    ],
+    { 'tpl-glm': 'Glm5.2' }
+  )
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  futureStart(relay)
+  const tick = () => (relay as unknown as { tick(): void }).tick()
+  tick()
+  projectDb.send(team, 'A', 'Owner', '一条来自 A 的回执')
+  tick()
+  const memberA = rooms.get(roomId).members.find((m) => m.name === 'A')
+  assert.equal(memberA?.templateId, 'tpl-glm', '首轮见到即回填绑定会话的 templateId')
+  const persisted = new RoomStore('Owner').get(roomId).members.find((m) => m.name === 'A')
+  assert.equal(persisted?.templateId, 'tpl-glm', '回填应持久化到 rooms.json')
+  const rows = projectDb.history(team, 10)
+  assert.equal(rows[rows.length - 1].from, 'A', '回填即绑定现状，署名不动')
+  // 下一轮再见到：不覆盖既有值（stampMemberTemplate 只补空缺）
+  projectDb.send(team, 'A', 'Owner', '第二条')
+  tick()
+  assert.equal(rooms.get(roomId).members.find((m) => m.name === 'A')?.templateId, 'tpl-glm')
+})
+
+test('Layer3：captureTick 自动捕获回执用会话当前实际模板名署名，取不到回退成员名', () => {
+  const { rooms, roomId, team, name } = setup()
+  const { manager } = mockManagerTpls(
+    [
+      { id: 'sa', templateId: 'tpl-hy3' },
+      { id: 'sb', templateId: 'tpl-gone' }, // 模板名取不到 → 回退成员名
+    ],
+    { 'tpl-hy3': 'hy3' }
+  )
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const r = relay as unknown as {
+    readSessionDelta: () => unknown[]
+    pendingCapture: Map<
+      string,
+      { team: string; roomName: string; roomId: string; memberName: string; fromName: string; beforeCount: number; injectedAt: number }
+    >
+    captureTick: () => void
+  }
+  r.readSessionDelta = () => [{ role: 'assistant', parts: [{ kind: 'text', text: '自动捕获的回复' }] }]
+  r.pendingCapture.set('sa', {
+    team,
+    roomName: name,
+    roomId,
+    memberName: 'A',
+    fromName: 'Owner',
+    beforeCount: 0,
+    injectedAt: Date.now(),
+  })
+  r.captureTick()
+  let rows = projectDb.history(team, 10)
+  assert.equal(rows[rows.length - 1].from, 'hy3', '自动捕获署名应为当前实际模板名（防接手后代跑冒名）')
+  assert.equal(rows[rows.length - 1].to, 'Owner', '收件人仍是原投递者')
+
+  r.pendingCapture.set('sb', {
+    team,
+    roomName: name,
+    roomId,
+    memberName: 'B',
+    fromName: 'Owner',
+    beforeCount: 0,
+    injectedAt: Date.now(),
+  })
+  r.captureTick()
+  rows = projectDb.history(team, 10)
+  assert.equal(rows[rows.length - 1].from, 'B', '模板名取不到时回退成员名')
+})

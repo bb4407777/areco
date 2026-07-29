@@ -330,6 +330,9 @@ export interface RoomMember {
   kind: 'human' | 'session'
   /** kind=session 绑定的会话；会话退出后保留（界面示离线），名字仍可被 @（只落库不投递） */
   sessionId: string | null
+  /** kind=session 加入时绑定会话的模板 id（可选：存量 rooms.json 无此字段，relay 首轮见到懒补）。
+   *  与绑定会话当前 templateId 不一致 = 会话被别的模板接手，tick 摄入时据此校正回执署名（2026-07-29）。 */
+  templateId?: string
 }
 
 /** 房间类型（2026-07-26）：task=有完结、会归档的流水；project=驻扎在文件夹里的常驻域（rootPath 必填，PROJECT.md 为驻留上下文） */

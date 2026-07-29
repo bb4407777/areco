@@ -34,3 +34,13 @@ test('空参数拒绝', () => {
   assert.throws(() => db.send('', 'a', 'b', 'x'))
   assert.throws(() => db.send('room-t1', 'a', 'b', '   '))
 })
+
+test('correctMessageSender 改写 from_agent（冒名回执署名校正，2026-07-29）', () => {
+  const m = db.send('room-t2', 'Glm5.2', 'Owner', '接手后的回执')
+  db.correctMessageSender(m.id, 'hy3')
+  const rows = db.history('room-t2', 10)
+  assert.equal(rows[rows.length - 1].from, 'hy3', 'from_agent 应被改写')
+  assert.equal(rows[rows.length - 1].body, '接手后的回执', '其余字段不动')
+  assert.equal(db.messageById(m.id)?.from, 'hy3')
+  assert.throws(() => db.correctMessageSender(m.id, '  '), /newFrom/)
+})

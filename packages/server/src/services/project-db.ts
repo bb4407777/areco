@@ -196,6 +196,20 @@ export function history(team: string, limit = 100): ProjectMessageRow[] {
   }
 }
 
+/**
+ * 署名校正（2026-07-29 冒名回执事件：会话被别的模板接手后照抄旧回执命令，
+ * from_agent 记成原成员名）：room-relay tick 摄入时按绑定会话当前模板改写本行署名。
+ */
+export function correctMessageSender(id: number, newFrom: string): void {
+  if (!newFrom.trim()) throw new Error('newFrom 不能为空')
+  const db = open()
+  try {
+    db.prepare('UPDATE messages SET from_agent = ? WHERE id = ?').run(newFrom, id)
+  } finally {
+    db.close()
+  }
+}
+
 /** 跨所有项目房间搜消息正文（LIKE，% _ \ 转义防通配符误判），按 id 倒序返回 limit 条 */
 export function search(q: string, limit = 50): ProjectMessageRow[] {
   const needle = q.trim()

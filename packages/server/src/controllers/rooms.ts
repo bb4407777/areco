@@ -174,7 +174,12 @@ export class RoomControllers {
       // 文件工具也天然落在域内；显式传 cwd（如 StandCode worktree 隔离）仍优先。
       const cwd = body.cwd?.trim() || (room.kind === 'project' ? (room.rootPath ?? undefined) : undefined)
       const summary = this.manager.spawn(template.id, { roomId: room.id, cwd })
-      const member = this.rooms.addMember(room.id, { name: template.name, kind: 'session', sessionId: summary.id })
+      const member = this.rooms.addMember(room.id, {
+        name: template.name,
+        kind: 'session',
+        sessionId: summary.id,
+        templateId: template.id, // 落绑定模板 id：后续会话被别的模板接手时 relay 据此校正回执署名（2026-07-29）
+      })
       this.relay.broadcastRooms()
       ok(ctx, member)
     })

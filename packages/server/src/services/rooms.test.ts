@@ -132,3 +132,23 @@ test('kind：默认 task；project 必须带根目录；旧数据缺字段迁移
   fs.writeFileSync(legacyPath, JSON.stringify([{ ...task, kind: undefined }]), 'utf8')
   assert.equal(new RoomStore('Owner').get(task.id).kind, 'task', '旧数据缺 kind 应迁移为 task')
 })
+
+test('addMember 落绑定 templateId；stampMemberTemplate 只补空缺并持久化（2026-07-29 署名校正）', () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create('模板回填测试')
+  const withTpl = rooms.addMember(room.id, { name: 'A', kind: 'session', sessionId: 'sa', templateId: 'tpl-glm' })
+  assert.equal(withTpl.templateId, 'tpl-glm', 'addMember 应落上传入的 templateId')
+  const legacy = rooms.addMember(room.id, { name: 'B', kind: 'session', sessionId: 'sb' })
+  assert.equal(legacy.templateId, undefined, '未传 templateId（存量路径）不落字段')
+
+  rooms.stampMemberTemplate(room.id, 'B', 'tpl-ds')
+  assert.equal(rooms.get(room.id).members.find((m) => m.name === 'B')?.templateId, 'tpl-ds', '空缺应被回填')
+  rooms.stampMemberTemplate(room.id, 'B', 'tpl-other')
+  assert.equal(rooms.get(room.id).members.find((m) => m.name === 'B')?.templateId, 'tpl-ds', '已有值不覆盖')
+  rooms.stampMemberTemplate(room.id, 'B', '')
+  assert.equal(rooms.get(room.id).members.find((m) => m.name === 'B')?.templateId, 'tpl-ds', '空串不写')
+
+  const reloaded = new RoomStore('Owner').get(room.id)
+  assert.equal(reloaded.members.find((m) => m.name === 'A')?.templateId, 'tpl-glm', 'templateId 应持久化')
+  assert.equal(reloaded.members.find((m) => m.name === 'B')?.templateId, 'tpl-ds', '回填应持久化')
+})

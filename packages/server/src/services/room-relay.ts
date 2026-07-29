@@ -220,6 +220,50 @@ export class RoomRelay {
     return { id: m.id, roomId: room.id, from: m.from, to: m.to, body: m.body, createdAt: m.createdAt, humanRelay: m.humanRelay }
   }
 
+  /**
+   * 署名校正（2026-07-29 冒名回执事件：hy3 接手 Glm5.2 会话后照抄旧包装里的回执命令，
+   * 干的活记到 GLM 头上）。外部 areco-msg 直写的旧包装命令无法召回，故 tick 摄入时按
+   * 「成员绑定会话的当前实际模板」校正 from：
+   *  - from 命中 kind=session 成员，且绑定会话存活，且 member.templateId ≠ session 当前
+   *    templateId（= 会话被别的模板接手）→ from 改写为当前模板显示名，库里行同步 UPDATE，
+   *    记 log.warn。校正目标名与房内另一成员重名也照改（from 只作署名，成员匹配走错名兜底）。
+   *  - 存量 member 缺 templateId：首轮见到能取到存活 session 即懒补回填并持久化。
+   *  - 取不到 session / 会话已退出 / templateId 一致 / 模板名取不到：原样放过。
+   */
+  private resolveActualSender(room: RoomInfo, m: projectDb.ProjectMessageRow): projectDb.ProjectMessageRow {
+    const member = room.members.find((x) => x.kind === 'session' && x.name === m.from)
+    if (!member?.sessionId) return m
+    let session: Session
+    try {
+      session = this.manager.get(member.sessionId)
+    } catch {
+      return m // 会话已从 Map 摘除：无从判断实际执行者，原样放过
+    }
+    if (!session.isRunning) return m // 只认存活会话：死会话的 templateId 证明不了当前执行者
+    // 懒补：存量 member 无 templateId，首轮见到即回填持久化（回填即绑定现状，必然一致，无需校正）
+    if (!member.templateId) {
+      if (session.templateId) {
+        try {
+          this.rooms.stampMemberTemplate(room.id, member.name, session.templateId)
+        } catch (err) {
+          log.warn(`项目「${room.name}」成员 ${member.name} templateId 回填失败`, err)
+        }
+      }
+      return m
+    }
+    if (member.templateId === session.templateId) return m
+    const actual = this.manager.templateNameOf(session)
+    if (!actual || actual === m.from) return m
+    try {
+      projectDb.correctMessageSender(m.id, actual)
+    } catch (err) {
+      log.warn(`项目「${room.name}」署名修正落库失败 消息 #${m.id}`, err)
+      return m
+    }
+    log.warn(`项目「${room.name}」署名修正 ${m.from}→${actual}（消息 #${m.id}，绑定会话被模板 ${session.templateId} 接手）`)
+    return { ...m, from: actual }
+  }
+
   private tick() {
     for (const room of this.rooms.list()) {
       let msgs: projectDb.ProjectMessageRow[]
@@ -258,8 +302,9 @@ export class RoomRelay {
         this.cursors.set(room.id, msgs.length ? msgs[msgs.length - 1].id : 0)
         for (const m of msgs) {
           if (m.id <= ff) continue
-          this.broadcast({ type: 'roomMessage', roomId: room.id, message: this.toRoomMessage(room, m) })
-          this.onMessageStored(room, m)
+          const msg = this.resolveActualSender(room, m)
+          this.broadcast({ type: 'roomMessage', roomId: room.id, message: this.toRoomMessage(room, msg) })
+          this.onMessageStored(room, msg)
         }
         continue
       }
@@ -268,8 +313,9 @@ export class RoomRelay {
         if (m.id <= cursor) continue
         this.cursors.set(room.id, m.id)
         hadNew = true
-        this.broadcast({ type: 'roomMessage', roomId: room.id, message: this.toRoomMessage(room, m) })
-        this.onMessageStored(room, m)
+        const msg = this.resolveActualSender(room, m)
+        this.broadcast({ type: 'roomMessage', roomId: room.id, message: this.toRoomMessage(room, msg) })
+        this.onMessageStored(room, msg)
       }
       if (hadNew) this.refreshContext(room) // 外部（areco-msg.mjs 回执等）进来的消息：批量后刷新一次
       this.sweepTimeouts(room) // 每 2s 轮询顺带扫 serial 超时：当前放行位超 deadline 未回复 → 放下一位
@@ -460,7 +506,8 @@ export class RoomRelay {
         (ctx ? `（共享上下文 ${ctx.path}；最近：${ctx.preview}）` : '') +
         (recall ? `\n${recall}\n` : '') +
         (brief ? `\n${brief}\n` : '') +
-        `（⚠️你在终端里的回复${this.rooms.humanName}在${kindLabel}里看不到，必须执行下面命令把回复发回${kindLabel}，否则等于没回：${replyCmd}）`
+        `（⚠️你在终端里的回复${this.rooms.humanName}在${kindLabel}里看不到，必须执行下面命令把回复发回${kindLabel}，否则等于没回：${replyCmd}。` +
+        `如果实际执行者不是 ${m.name} 本人（会话被他人接手/代跑），必须先把命令里的署名「${m.name}」改成执行者自己的实际 Stand 名再执行，禁止照抄原署名——否则成果会记到 ${m.name} 头上）`
       const nonce = this.injectNote(session.id, note, (sess) => {
         const beforeCount = this.sessionMessageCount(sess) // 注入前消息数（note 尚未落盘）
         // 标记待捕获：agent 若不主动回执，captureTick 取其回复代为回执到项目
@@ -787,7 +834,9 @@ export class RoomRelay {
       const timeout = now - cap.injectedAt > CAPTURE_TIMEOUT_MS
       if (text && (replyDone || timeout)) {
         try {
-          const stored = projectDb.send(cap.team, cap.memberName, cap.fromName, text.slice(0, CAPTURE_TEXT_MAX))
+          // 署名用会话当前实际模板名（防接手后代跑冒名，2026-07-29）；取不到回退成员名
+          const captureFrom = this.manager.templateNameOf(session) ?? cap.memberName
+          const stored = projectDb.send(cap.team, captureFrom, cap.fromName, text.slice(0, CAPTURE_TEXT_MAX))
           const room = this.rooms.list().find((r) => r.team === cap.team)
           if (room) {
             this.cursors.set(room.id, Math.max(this.cursors.get(room.id) ?? 0, stored.id))

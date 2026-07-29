@@ -84,6 +84,11 @@ export class SessionManager extends EventEmitter {
     return agentKindOf(session.command, this.templates.get(session.templateId)?.harness)
   }
 
+  /** 会话当前模板的显示名（模板已删/取不到返回 null）：房间回执署名校正用（2026-07-29 冒名回执事件） */
+  templateNameOf(session: Session): string | null {
+    return this.templates.get(session.templateId)?.name ?? null
+  }
+
   // ---- 启动/关闭 ----
 
   restore() {

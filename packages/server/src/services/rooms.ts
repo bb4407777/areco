@@ -226,10 +226,25 @@ export class RoomStore {
       while (taken.has(`${name}·${n}`)) n++
       name = `${name}·${n}`
     }
-    const final: RoomMember = { name, kind: member.kind, sessionId: member.sessionId }
+    const final: RoomMember = {
+      name,
+      kind: member.kind,
+      sessionId: member.sessionId,
+      // 绑定模板 id 随成员落盘（2026-07-29 署名校正）：存量 member 缺此字段由 relay 懒补
+      ...(member.templateId ? { templateId: member.templateId } : {}),
+    }
     room.members.push(final)
     this.save()
     return final
+  }
+
+  /** 回填成员绑定模板 id（2026-07-29 署名校正的存量懒补）：只补空缺，有值不覆盖 */
+  stampMemberTemplate(roomId: string, memberName: string, templateId: string): void {
+    const room = this.get(roomId)
+    const m = room.members.find((x) => x.kind === 'session' && x.name === memberName)
+    if (!m || m.templateId || !templateId) return
+    m.templateId = templateId
+    this.save()
   }
 
   removeMember(id: string, name: string) {
