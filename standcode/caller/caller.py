@@ -244,15 +244,15 @@ LEGAL_CASE_KEYWORDS = (
 
 # ── 额度/限流检测与车道改道（2026-07-29 高律师令，GLM-5.2 额度打满事件）─────────
 # 背景：GLM-5.2（智谱套餐）额度打满，重活车道（法律/代码词 → claude-glm52）瘫痪。
-# ① 重活车道临时改道 kimi-k3：Caller 加载时把重活锚强制到本常量，
+# ① 重活车道锚（HEAVY_LANE_STAND）：2026-07-29 GLM 额度满期间临时改道 kimi-k3；
 #    GLM 恢复后把常量改回 "claude-glm52" 并撤 registry 停新单标记即恢复。
-HEAVY_LANE_STAND = "kimi-k3"  # 2026-07-29 GLM额度满临时改道，GLM恢复后改回claude-glm52
+HEAVY_LANE_STAND = "claude-glm52"  # 2026-07-30 GLM额度恢复，重活车道改回正常锚 claude-glm52
 # ② Stand 输出扫描：poll/harvest 链对 Stand 回复做大小写不敏感子串匹配，
 #    命中即 a) 该 stand 标停新单（写 STAND_STOP_PATH）b) 涉及车道按备胎表改道
 #    c) cc-send 微信告警高律师 d) 事件追加 StandCode SKILL.md 台账 + 审计日志。
 QUOTA_SIGNAL_WORDS = ("429", "rate limit", "quota", "余额不足", "insufficient", "额度")
 # 车道备胎映射：stand 停新单后其涉及车道的改道目标（stand id → 备胎 stand id）。
-# 轻活备胎 codebuddy-ds-flash 尚未在 registry 注册模板，接入后补录。
+# 轻活备胎 workbuddy-deepseek（07-30 由 codebuddy-ds-flash 回退 workbuddy 系原名，registry 已注册），接入后补录。
 LANE_FALLBACK_MAP = {"claude-glm52": "kimi-k3"}
 # 停新单运行期状态文件：registry 模板静态标记（"status": "停新单"）之外的
 # 自动命中落点；Caller 加载时两路并集生效（_stopped_stands）。
@@ -4555,8 +4555,8 @@ class Caller:
 
         # 4) 法律/代码重活 → 主力 Worker（重活锚 default_heavy_worker）。⑤ 路由反转
         #    （2026-07-29）：重活锚只留给重活白名单，route_reason 必须写明命中词
-        #    （冒烟/审计取证用）。2026-07-29 GLM 额度满：锚已临时改道 HEAVY_LANE_STAND
-        #    （kimi-k3），reason 同步写明改道，GLM 恢复后随常量改回。
+        #    （冒烟/审计取证用）。2026-07-30 GLM 额度恢复，重活锚 HEAVY_LANE_STAND
+        #    已改回 claude-glm52，正常派发、不再提示改道。
         if heavy_law or heavy_code:
             # FAST_BLOCK 组=法律词+批量/落盘类重量词（任务口径统称「法律词组」），
             # 标签用「法律/重量词」防止把「修复/批量」误读成法条类命中。
@@ -4567,8 +4567,7 @@ class Caller:
             return {
                 "mode": "worker", "plan_only": False,
                 "deliverable": "artifact", "structure": "single_step",
-                "reason": (f"命中重活词（{hit_desc}）→ 主力 Worker（{HEAVY_LANE_STAND}，"
-                           f"2026-07-29 GLM额度满临时改道，原锚 claude-glm52）"),
+                "reason": (f"命中重活词（{hit_desc}）→ 主力 Worker（{HEAVY_LANE_STAND}）"),
                 "signals": signals,
             }
 
