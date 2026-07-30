@@ -22,9 +22,7 @@
     {
       "id": "claude-glm52",
       "name": "Claude Code GLM-5.2",
-      "role": "worker",
-      "status": "停新单",
-      "_note_status": "2026-07-29 GLM-5.2（智谱套餐）额度打满，停新单；重活车道经 caller.py HEAVY_LANE_STAND 临时改道 kimi-k3。GLM 恢复后撤本 status 并把 HEAVY_LANE_STAND 改回 claude-glm52"
+      "role": "worker"
     },
     {
       "id": "workbuddy",
