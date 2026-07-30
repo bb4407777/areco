@@ -17,7 +17,7 @@ import {
   useDialog,
   useMessage,
 } from 'naive-ui'
-import type { StandCodeCatalog, StandCodeConfig, StatsSummary, Template } from '../../../shared/protocol'
+import type { StandCodeCatalog, StandCodeConfig, StatsSummary, Template, UiPrefs } from '../../../shared/protocol'
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
@@ -78,6 +78,21 @@ async function saveStandcode() {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
     savingStandcode.value = false
+  }
+}
+
+// 新建会话模式：角色（Worker/Thinker，默认）｜模板（旧形式）。服务端 SoT（ui.spawnMode，GET/PUT /api/ui/prefs）
+const spawnMode = ref<'role' | 'template'>('role')
+const savingSpawnMode = ref(false)
+async function setSpawnMode(v: 'role' | 'template') {
+  spawnMode.value = v
+  savingSpawnMode.value = true
+  try {
+    await api.put<UiPrefs>('/api/ui/prefs', { spawnMode: v })
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    savingSpawnMode.value = false
   }
 }
 const showEdit = ref(false)
@@ -158,6 +173,12 @@ onMounted(async () => {
     standcodeCatalog.value = await api.get<StandCodeCatalog>('/api/standcode/catalog')
   } catch {
     // 前端构建产物会先于用户择时重启 8790 生效；旧服务端没有该端点时保持设置页其余功能可用。
+  }
+  try {
+    const prefs = await api.get<UiPrefs>('/api/ui/prefs')
+    spawnMode.value = prefs.spawnMode === 'template' ? 'template' : 'role'
+  } catch {
+    // 同上：旧服务端无 /api/ui/prefs 时保持本地默认（role）
   }
 })
 
@@ -516,6 +537,25 @@ function clearLog() {
       <div class="log-tip" style="margin-top: 8px">
         StandCode caller.py 派发时优先用这里的角色默认；角色留空 = 回落 StandCode stand/registry.json 的对应默认。
       </div>
+      <div class="pref-row" style="margin-top: 8px">
+        <div>
+          <div class="pref-label">新建会话模式</div>
+          <div class="pref-hint">
+            角色 = 新建会话只选 Worker/Thinker（默认，模板按上面映射自动解析）；模板 = 旧模板下拉形式。保存在服务端，跨浏览器/设备生效
+          </div>
+        </div>
+        <n-select
+          :value="spawnMode"
+          :options="[
+            { label: '角色（Worker/Thinker）', value: 'role' },
+            { label: '模板（旧形式）', value: 'template' },
+          ]"
+          size="small"
+          style="max-width: 220px"
+          :loading="savingSpawnMode"
+          @update:value="setSpawnMode"
+        />
+      </div>
     </n-card>
 
     <n-card size="small" class="block">
@@ -530,21 +570,21 @@ function clearLog() {
       <div class="pref-row">
         <div>
           <div class="pref-label">显示思考过程</div>
-          <div class="pref-hint">默认关闭，勾选后才展开思考块；运行中最新思考以打字机实时滚动</div>
+          <div class="pref-hint">默认关闭，勾选后才展开思考块；运行中最新思考以打字机实时滚动。保存在服务端，跨浏览器/设备生效</div>
         </div>
         <n-switch :value="ui.showThinking" @update:value="ui.setShowThinking" />
       </div>
       <div class="pref-row">
         <div>
           <div class="pref-label">显示工具调用</div>
-          <div class="pref-hint">默认关闭，勾选后才展示工具调用及入参</div>
+          <div class="pref-hint">默认关闭，勾选后才展示工具调用及入参。保存在服务端，跨浏览器/设备生效</div>
         </div>
         <n-switch :value="ui.showToolUse" @update:value="ui.setShowToolUse" />
       </div>
       <div class="pref-row">
         <div>
           <div class="pref-label">显示工具结果</div>
-          <div class="pref-hint">默认关闭，勾选后才展示工具返回结果</div>
+          <div class="pref-hint">默认关闭，勾选后才展示工具返回结果。保存在服务端，跨浏览器/设备生效</div>
         </div>
         <n-switch :value="ui.showToolResult" @update:value="ui.setShowToolResult" />
       </div>

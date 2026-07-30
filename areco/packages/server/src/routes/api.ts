@@ -15,6 +15,12 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.get('/standcode/defaults', c.getStandcodeDefaults)
   router.get('/standcode/catalog', c.getStandcodeCatalog)
   router.put('/standcode/defaults', c.updateStandcodeDefaults)
+  // worker/thinker 角色 → 模板实时映射（新建会话角色模式卡片 + role spawn 预览）
+  router.get('/standcode/roles', c.getStandcodeRoles)
+
+  // 对话模式显示开关（showThinking/showToolUse/showToolResult）：服务端为 SoT，localStorage 仅缓存
+  router.get('/ui/prefs', c.getUiPrefs)
+  router.put('/ui/prefs', c.updateUiPrefs)
 
   // StandCode 任务管理：列出 caller.py 后台任务状态 / 提交新任务（subprocess 调 caller.py run --bg）
   router.get('/tasks', c.listTasks)

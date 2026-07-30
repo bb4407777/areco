@@ -68,6 +68,30 @@ export interface StandCodeConfig {
   fastWorker?: string
 }
 
+/**
+ * 对话模式显示开关（config.json 的 ui 段，GET/PUT /api/ui/prefs）。
+ * 服务端是 SoT，浏览器 localStorage 只是本地缓存：跨浏览器/设备生效，免疫站点数据清除。
+ * 字段缺省 = 未显式设置，客户端回落本地默认值（显示开关 false、spawnMode 'role'）。
+ */
+export interface UiPrefs {
+  showThinking?: boolean
+  showToolUse?: boolean
+  showToolResult?: boolean
+  /** 新建会话表单形态：role = 只选 Worker/Thinker（默认，模板下沉为实现层）；
+   *  template = 旧模板下拉。设置页「StandCode 默认角色」卡片可切回。 */
+  spawnMode?: 'role' | 'template'
+}
+
+/** StandCode 角色 → 模板的解析结果（GET /api/standcode/roles、role spawn 共用）。
+ *  source：settings = 设置页 standcode 段；registry = standcode/stand/registry.json 回落；
+ *  fallback = 前两层都无有效映射，兜底取第一个启用中的模板。 */
+export interface RoleResolved {
+  role: 'worker' | 'thinker'
+  templateId: string
+  templateName: string
+  source: 'settings' | 'registry' | 'fallback'
+}
+
 export interface StandCodeCatalogHarness {
   description?: string
   reasoningEfforts: string[]

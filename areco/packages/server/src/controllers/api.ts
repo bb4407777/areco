@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from 'koa'
-import type { ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StatsSummary, Template, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
+import type { RoleResolved, ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StatsSummary, Template, TranscriptMessage, TranscriptPage, UiPrefs } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
@@ -29,11 +29,14 @@ import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$|^-[A-Za-z0-9._-]+$/
 import { handoffPrompt, writeHandoffFile } from '../services/handoff'
 import { effectiveClaudeHome } from '../services/templates'
-import { standCodeCatalog } from '../services/standcode-resolver'
+import { resolveRoleTemplate, standCodeCatalog } from '../services/standcode-resolver'
+import { createLogger } from '../logger'
 import { FileService } from '../services/files'
 import { acceptsInitialPromptArg, readSessionHandoffMessages } from '../services/session-handoff'
 
 const execFileAsync = promisify(execFile)
+
+const log = createLogger('api')
 
 // StandCode caller.py 集成（任务管理 API）：
 //   - 任务状态目录与 caller.py 的 STANDCODE_TASKS_DIR 同口径（默认 ~/.standcode/tasks）
@@ -166,6 +169,18 @@ export class ApiControllers {
   /** 设置页模板编辑器用的只读目录：harness/model 名称与已验证推理档位，不含任何 provider env。 */
   getStandcodeCatalog = (ctx: Context) => ok(ctx, standCodeCatalog())
 
+  /** GET /api/standcode/roles：worker/thinker 角色当前实际映射到的模板（含来源标记），
+   *  新建会话「角色模式」卡片展示与调用方预览用；解析链同 role spawn。 */
+  getStandcodeRoles = (ctx: Context) =>
+    guard(ctx, () => {
+      const templates = this.templates.list()
+      const roles: Record<'worker' | 'thinker', RoleResolved> = {
+        worker: resolveRoleTemplate('worker', this.config.standcode, templates),
+        thinker: resolveRoleTemplate('thinker', this.config.standcode, templates),
+      }
+      ok(ctx, roles)
+    })
+
   /** PUT /api/standcode/defaults：逐角色设置/清除默认模板 id。写回 config.json 即时生效。
    *  空串 = 清除该角色（消费方回落 registry.json）；非空必须是已存在的模板 id
    *  （防写了不存在的 id，派发时才炸）。 */
@@ -188,6 +203,34 @@ export class ApiControllers {
       else delete this.config.standcode
       saveConfig(this.config)
       ok(ctx, this.config.standcode ?? {})
+    })
+
+  /** GET /api/ui/prefs：对话模式显示开关（服务端为 SoT，客户端启动时拉取覆盖本地缓存） */
+  getUiPrefs = (ctx: Context) => ok(ctx, this.config.ui ?? {})
+
+  /** PUT /api/ui/prefs：逐键设置/清除显示开关与新建会话模式。写回 config.json 即时生效。
+   *  null = 清除该键（客户端回落本地默认）；显示开关必须是布尔，spawnMode 须为 role/template。 */
+  updateUiPrefs = (ctx: Context) =>
+    guard(ctx, () => {
+      const body = (ctx.request.body ?? {}) as Partial<Record<keyof UiPrefs, unknown>>
+      const keys = ['showThinking', 'showToolUse', 'showToolResult', 'spawnMode'] as const
+      const provided = keys.filter((k) => body[k] !== undefined)
+      if (!provided.length) throw new Error(`未提供可更新字段（${keys.join('/')}）`)
+      const ui: UiPrefs = { ...(this.config.ui ?? {}) }
+      for (const k of provided) {
+        const v = body[k]
+        if (v === null) delete ui[k]
+        else if (k === 'spawnMode') {
+          if (v === 'role' || v === 'template') ui.spawnMode = v
+          else throw new Error(`spawnMode 须为 role 或 template（null = 清除）`)
+        }
+        else if (typeof v === 'boolean') ui[k] = v
+        else throw new Error(`${k} 须为布尔值（null = 清除）`)
+      }
+      if (Object.keys(ui).length) this.config.ui = ui
+      else delete this.config.ui
+      saveConfig(this.config)
+      ok(ctx, this.config.ui ?? {})
     })
 
   // ---- templates ----
@@ -220,9 +263,26 @@ export class ApiControllers {
 
   spawnSession = (ctx: Context) =>
     guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { templateId?: string; cwd?: string; name?: string }
-      if (!body.templateId) throw new Error('templateId 不能为空')
-      ok(ctx, this.manager.spawn(body.templateId, { cwd: body.cwd, name: body.name }))
+      const body = (ctx.request.body ?? {}) as {
+        templateId?: string
+        role?: 'worker' | 'thinker'
+        cwd?: string
+        name?: string
+      }
+      let templateId = body.templateId
+      // 角色模式：role 优先于 templateId（同给时记 log）——角色是用户意图，模板只是实现层
+      if (body.role !== undefined) {
+        if (body.role !== 'worker' && body.role !== 'thinker') {
+          throw new Error(`role 须为 worker 或 thinker（收到: ${String(body.role)}）`)
+        }
+        const resolved = resolveRoleTemplate(body.role, this.config.standcode, this.templates.list())
+        if (templateId && templateId !== resolved.templateId) {
+          log.info(`spawn 同时给了 templateId=${templateId} 与 role=${body.role}，按 role 解析为 ${resolved.templateId}（role 优先）`)
+        }
+        templateId = resolved.templateId
+      }
+      if (!templateId) throw new Error('templateId 不能为空')
+      ok(ctx, this.manager.spawn(templateId, { cwd: body.cwd, name: body.name }))
     })
 
   stopSession = (ctx: Context) =>

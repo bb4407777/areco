@@ -1,4 +1,4 @@
-import type { StandCodeCatalog, Template } from '../../../shared/protocol'
+import type { RoleResolved, StandCodeCatalog, StandCodeConfig, Template } from '../../../shared/protocol'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ROOT_DIR } from '../config'
@@ -250,4 +250,56 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
     cwd: harness.cwd,
     pre: harness.pre?.length ? [...harness.pre] : undefined,
   }
+}
+
+// StandCode 角色回落层：registry.json 的 default_worker/default_thinker
+// （与 STANDCODE_CONFIG_DIR 同源 ROOT_DIR，角色解析复用同一根，不引入第二配置源）。
+const STAND_REGISTRY_PATH =
+  process.env.STANDCODE_REGISTRY_PATH || path.join(ROOT_DIR, 'standcode', 'stand', 'registry.json')
+
+interface StandRegistry {
+  default_worker?: string
+  default_thinker?: string
+}
+
+/**
+ * 角色（worker/thinker）→ 模板解析，新建会话「角色模式」的唯一解析链：
+ *   1. 设置页（config.json 的 standcode 段，source=settings）
+ *   2. standcode/stand/registry.json 的 default_worker/default_thinker（source=registry）
+ *   3. 第一个启用中的模板兜底（source=fallback）
+ * 每步校验模板存在且 enabled，否则继续下落；一层都没有（无任何启用模板）→ 抛错，
+ * 与 resolveStandCode 同款显式失败语义，不静默。
+ */
+export function resolveRoleTemplate(
+  role: 'worker' | 'thinker',
+  config: StandCodeConfig | undefined,
+  templates: Template[],
+): RoleResolved {
+  const findEnabled = (id: string | undefined): Template | null => {
+    if (!id) return null
+    const t = templates.find((tpl) => tpl.id === id)
+    return t && t.enabled ? t : null
+  }
+
+  const fromSettings = findEnabled(config?.[role])
+  if (fromSettings) {
+    return { role, templateId: fromSettings.id, templateName: fromSettings.name, source: 'settings' }
+  }
+
+  let registryId: string | undefined
+  try {
+    const registry = JSON.parse(fs.readFileSync(STAND_REGISTRY_PATH, 'utf-8')) as StandRegistry
+    registryId = role === 'worker' ? registry.default_worker : registry.default_thinker
+  } catch {
+    /* registry 读不到 = 该层无映射，继续下落兜底 */
+  }
+  const fromRegistry = findEnabled(registryId)
+  if (fromRegistry) {
+    return { role, templateId: fromRegistry.id, templateName: fromRegistry.name, source: 'registry' }
+  }
+
+  const first = templates.find((t) => t.enabled)
+  if (first) return { role, templateId: first.id, templateName: first.name, source: 'fallback' }
+
+  throw new Error(`角色 ${role} 解析不到可用模板：设置页与 registry 均无有效映射，且没有任何启用中的模板`)
 }
