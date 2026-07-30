@@ -39,7 +39,7 @@ ARECO_BASE = os.environ.get("ARECO_BASE", "http://127.0.0.1:8790")
 # ⚠️ 这一段必须在 ARECO_ROOT 之前——HOME_DIR 是所有「家目录派生路径」的唯一源头。
 # 改动前 ARECO_ROOT/TASKS_DIR 走 Path.home()、而 HOME_DIR 走 local.json，两者在隔离
 # HOME 下会分裂：REST 照样连本机 8790 建出真房间、起真 Stand（烧额度），随后 send_message
-# 却对着 $HOME/Code/areco/data/projects.db 找不到库而炸——留下一个永远收不到任务的孤儿房。
+# 却对着 $HOME/Code/StandCode/areco/data/projects.db 找不到库而炸——留下一个永远收不到任务的孤儿房。
 # 本机大量 agent 跑在隔离 HOME 下，这不是假想（见 memory: isolated-home-tool-pitfall）。
 _LOCAL_CONF_PATH = Path(__file__).resolve().parent.parent / "config" / "local.json"
 try:
@@ -51,18 +51,19 @@ WECHAT_TARGET = os.environ.get("WECHAT_TARGET") or _LOCAL_CONF.get("wechat_targe
 HOME_DIR = os.environ.get("STANDCODE_HOME") or _LOCAL_CONF.get("home_dir") or str(Path.home())
 
 def _detect_areco_root() -> str | None:
-    # 2026-07-26 subtree 并入后 caller.py 位于 <areco仓根>/standcode/caller/，向上两级
-    # 即仓根——同仓自证，彻底免疫隔离 HOME 分裂（见上）。npm 安装场景
-    # （node_modules/standcode/caller/）向上两级是 node_modules，靠 areco 源码仓
-    # 特有的 packages/server 标志排除，防止把别人的目录误认成 areco。
-    root = Path(__file__).resolve().parents[2]
+    # 2026-07-26 subtree 并入后 caller.py 位于 <仓根>/standcode/caller/；
+    # 2026-07-30 高律师定底座收进 areco/ 子目录：仓根下 areco/ 才是底座根
+    # （packages/server 标志也随之下移一级）。npm 安装场景
+    # （node_modules/standcode/caller/）向上两级是 node_modules，node_modules/areco
+    # 下无 packages/server 标志，同样被排除，防止把别人的目录误认成 areco。
+    root = Path(__file__).resolve().parents[2] / "areco"
     return str(root) if (root / "packages" / "server").is_dir() else None
 
 
 ARECO_ROOT = (
     os.environ.get("ARECO_ROOT")
     or _detect_areco_root()
-    or str(Path(HOME_DIR) / "Code" / "areco")
+    or str(Path(HOME_DIR) / "Code" / "StandCode" / "areco")
 )
 PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
 REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
