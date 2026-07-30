@@ -9,7 +9,7 @@ import type { RoleResolved, ScreenTailPayload, SessionCleanupResult, StandCodeCo
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
-import { DATA_DIR, ROOT_DIR, saveConfig } from '../config'
+import { DATA_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
 import { agentKindOf, codexSessionIdOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseCodex, parseQclaw, parseWorkbuddy, readAgentTranscript } from '../services/agent-transcript'
 import {
@@ -29,7 +29,7 @@ import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$|^-[A-Za-z0-9._-]+$/
 import { handoffPrompt, writeHandoffFile } from '../services/handoff'
 import { effectiveClaudeHome } from '../services/templates'
-import { resolveRoleTemplate, standCodeCatalog } from '../services/standcode-resolver'
+import { resolveRoleTemplate, standCodeCatalog, standcodeRoot } from '../services/standcode-resolver'
 import { createLogger } from '../logger'
 import { FileService } from '../services/files'
 import { acceptsInitialPromptArg, readSessionHandoffMessages } from '../services/session-handoff'
@@ -42,7 +42,7 @@ const log = createLogger('api')
 //   - 任务状态目录与 caller.py 的 STANDCODE_TASKS_DIR 同口径（默认 ~/.standcode/tasks）
 //   - caller 脚本默认读仓内 standcode/caller/caller.py（2026-07-26 subtree 并入后同仓自证），可用 STANDCODE_CALLER 覆盖
 const STANDCODE_TASKS_DIR = process.env.STANDCODE_TASKS_DIR || path.join(os.homedir(), '.standcode', 'tasks')
-const STANDCODE_CALLER = process.env.STANDCODE_CALLER || path.join(ROOT_DIR, 'standcode', 'caller', 'caller.py')
+const STANDCODE_CALLER = process.env.STANDCODE_CALLER || path.join(standcodeRoot(), 'caller', 'caller.py')
 
 function ok(ctx: Context, data: unknown) {
   ctx.body = { ok: true, data }

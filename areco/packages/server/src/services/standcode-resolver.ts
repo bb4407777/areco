@@ -3,11 +3,21 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { ROOT_DIR } from '../config'
 
+// StandCode 调度层根：2026-07-30 monorepo 分层（仓根 = standcode/ + areco/ 平级）后，
+// ROOT_DIR 是 areco 层根（cwd=areco/），standcode/ 在其**上一级**；旧布局（ROOT_DIR 直接
+// 含 standcode/）与 npm 安装场景仍兼容——逐层探，探到谁用谁。
+export function standcodeRoot(): string {
+  if (process.env.STANDCODE_ROOT) return process.env.STANDCODE_ROOT
+  const direct = path.join(ROOT_DIR, 'standcode')
+  if (fs.existsSync(direct)) return direct
+  return path.join(path.dirname(ROOT_DIR), 'standcode')
+}
+
 // 配置目录可覆盖：2026-07-26 StandCode 已 subtree 并入本仓 standcode/，默认直接读
-// 仓内 standcode/config（ROOT_DIR 与 config.json 同源：env ARECO_ROOT > cwd），
+// 仓内 standcode/config（经 standcodeRoot 定位，同仓自证），
 // 不再依赖仓外物理路径——那正是此前「换台机器整层静默失效」的根源。
 const STANDCODE_CONFIG_DIR =
-  process.env.STANDCODE_CONFIG_DIR || path.join(ROOT_DIR, 'standcode', 'config')
+  process.env.STANDCODE_CONFIG_DIR || path.join(standcodeRoot(), 'config')
 
 interface HarnessSpec {
   command: string
@@ -253,9 +263,9 @@ export function resolveStandCode(template: Template): StandCodeResolved | null {
 }
 
 // StandCode 角色回落层：registry.json 的 default_worker/default_thinker
-// （与 STANDCODE_CONFIG_DIR 同源 ROOT_DIR，角色解析复用同一根，不引入第二配置源）。
+// （与 STANDCODE_CONFIG_DIR 同源 standcodeRoot，角色解析复用同一根，不引入第二配置源）。
 const STAND_REGISTRY_PATH =
-  process.env.STANDCODE_REGISTRY_PATH || path.join(ROOT_DIR, 'standcode', 'stand', 'registry.json')
+  process.env.STANDCODE_REGISTRY_PATH || path.join(standcodeRoot(), 'stand', 'registry.json')
 
 interface StandRegistry {
   default_worker?: string
