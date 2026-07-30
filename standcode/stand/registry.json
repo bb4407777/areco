@@ -31,7 +31,7 @@
     },
     {
       "id": "workbuddy-deepseek",
-      "name": "WorkBuddy DeepSeek",
+      "name": "WorkBuddy DeepSeek Flash",
       "role": "worker"
     },
     {
