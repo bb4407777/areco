@@ -77,12 +77,12 @@ def test_parse() -> None:
     print("\n[extract_acceptance] 判据解析")
     acc = C.extract_acceptance(
         "修 bug。\n验收判据：\n1. file:/tmp/out.md（文件存在且非空）\n"
-        "2. result_contains:全绿\n3. commit:/Users/gao/Code/areco\n产物路径：/tmp/out.md"
+        "2. result_contains:全绿\n3. commit:/Users/gao/Code/StandCode\n产物路径：/tmp/out.md"
     )
     kinds = {(c["kind"], c["arg"]) for c in acc["criteria"]}
     check(("file", "/tmp/out.md") in kinds, "全角注释被剥掉（file:/tmp/out.md）")
     check(("result_contains", "全绿") in kinds, "result_contains 解析")
-    check(("commit", "/Users/gao/Code/areco") in kinds, "commit 判据解析")
+    check(("commit", "/Users/gao/Code/StandCode") in kinds, "commit 判据解析")
     check(len([c for c in acc["criteria"] if c["arg"] == "/tmp/out.md"]) == 1,
           "产物路径与判据同路径去重")
     acc2 = C.extract_acceptance("产物路径：无")

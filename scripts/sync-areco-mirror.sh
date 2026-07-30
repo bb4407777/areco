@@ -7,7 +7,7 @@
 # 次晨即镜像领先主仓（主从倒挂）。现先主后镜像保序，两仓与本地 main 恒等；
 # 任一步非 ff 即整体失败告警——主仓被绕过本地直推 / 镜像仓被直推，都回本地解决，勿 force。
 set -euo pipefail
-REPO="${ARECO_REPO:-/Users/gao/Code/areco}"
+REPO="${ARECO_REPO:-/Users/gao/Code/StandCode}"
 MIRROR="${ARECO_MIRROR:-ssh://git@ssh.github.com:443/bb4407777/areco.git}"
 cd "$REPO"
 git push origin main

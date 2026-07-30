@@ -75,7 +75,7 @@ python3 caller/caller.py run --wait "回复两个字：成功"
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `ARECO_BASE` | `http://127.0.0.1:8790` | areco 服务地址 |
-| `ARECO_ROOT` | `~/Code/areco` | areco 仓根（直写 projects.db 用） |
+| `ARECO_ROOT` | `~/Code/StandCode` | areco 仓根（直写 projects.db 用） |
 | `CC_SEND_BIN` | `cc-send`（或 config/local.json） | 微信代发脚本 |
 | `WECHAT_TARGET` | 空（或 config/local.json） | 微信目标会话；空 = 跳过代发 |
 | `STANDCODE_TASKS_DIR` | `~/.standcode/tasks` | 任务状态目录 |

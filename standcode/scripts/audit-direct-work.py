@@ -565,7 +565,7 @@ def main() -> int:
             parts += [f"· ×{s['n']} {s['cmd'][:48]}" for s in h["top_direct"][:3]]
         if follow_breach:
             parts.append(f"跟进失败率 {g['follow_fail_rate']}%（判要派 {g['must_dispatch']} 次没派 {g['unfollowed']} 次）")
-        parts.append("明细：python3 ~/Code/areco/standcode/scripts/audit-direct-work.py")
+        parts.append("明细：python3 ~/Code/StandCode/standcode/scripts/audit-direct-work.py")
         send_alert("\n".join(parts))
 
     return 1 if (follow_breach or direct_breach) else 0

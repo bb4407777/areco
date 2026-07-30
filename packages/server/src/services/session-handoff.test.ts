@@ -45,7 +45,7 @@ test('首条 prompt 投递按 harness/CLI 能力判断，不拿 transcriptDir �
 })
 
 test('harness-first 包装器仍按真实 agent 类型读取交接 transcript', () => {
-  const session = { command: '/Users/gao/Code/areco/bin/reasonix-stand' } as unknown as Session
+  const session = { command: '/Users/gao/Code/StandCode/bin/reasonix-stand' } as unknown as Session
   assert.equal(handoffAgentKind(session), 'reasonix')
   assert.equal(handoffAgentKind(session, template({ command: session.command, harness: 'reasonix' })), 'reasonix')
   assert.equal(

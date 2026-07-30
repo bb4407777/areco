@@ -99,7 +99,7 @@ Caller.send_message()
 | 注册表 | `stand/registry.json` | 7 模板 + 5 类任务映射 + 角色默认 |
 | API 文档 | `docs/api.md` | v0.4 完整协议 |
 | 行为手册 | `skills/StandCode/SKILL.md` | Hermes Caller 行为约束 |
-| areco 模板 | `Code/areco/config.json` | 15 个模板含 StandCode 4 个 |
+| areco 模板 | `Code/StandCode/config.json` | 15 个模板含 StandCode 4 个 |
 | Inbox 目录 | `data/inbox/` | 异步回调结果中转 |
 | Gatekeeper | `caller.py:check_should_dispatch()` | 命令分类：operator vs production vs gray |
 | 流程固化 | `docs/workflow-hardening.md` | 根因 + 方案 A-D + 4 起错误案例 |
