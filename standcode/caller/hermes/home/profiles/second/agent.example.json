@@ -1,0 +1,30 @@
+{
+  "agentId": "<agent_id，如 hermes_default>",
+  "name": "<分身名称>",
+  "vibe": "<一句话气质描述>",
+  "avatar": "<头像 URL，可留空字符串>",
+  "emoji": "",
+  "bio": [
+    {
+      "title": "经历",
+      "desc": "<与 SOUL.md「经历」段一致的人物经历>"
+    },
+    {
+      "title": "风格",
+      "desc": "<与 SOUL.md「风格」段一致的表达风格>"
+    },
+    {
+      "title": "工作守则",
+      "desc": "<⚠️ 占位：真身守则属内部信息不进仓。此处放与本地 SOUL.md 真身「工作守则」段一致的全文；复原方法见 standcode/caller/hermes/README.md「人格文件自备」一节。>"
+    }
+  ],
+  "skills": [
+    "<启用的 skill 名 1>",
+    "<启用的 skill 名 2>"
+  ],
+  "sessionIds": [],
+  "sessionTitles": {},
+  "sessionUpdatedAts": {},
+  "createdAt": 0,
+  "updatedAt": 0
+}

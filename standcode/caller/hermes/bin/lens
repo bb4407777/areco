@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""lens — Hermes 瘦命令工具箱（2026-07-26，Fable5，管理者批"全部落地"）
+
+存在的理由：Hermes 会话历史 85% 是 terminal 输出，每个字节都随后续每次 API 调用
+反复回放。2026-07-26 实测最大单条是 curl areco 裸 JSON（20KB）。lens 把高频查询
+收敛成固定的紧凑输出（每个子命令 ≤ 约 2KB），替代裸 curl / 裸 grep。
+
+用法：
+  lens rooms [--all]            areco 房间列表（默认未归档，≤12 行）
+  lens hist <room_id> [n]       房间末 n 条消息（默认 5，每条截 120 字）
+  lens sessions                 areco 会话总览（按状态计数 + 前 12 个）
+  lens grep <grep参数...>       grep 包装：自动 -m3 每文件、输出 ≤60 行
+  lens get <api路径> 　         任意 areco API GET → 结构摘要（不出全文）
+  lens send <会话id> [文本]     向独立会话注入指令（POST /sessions/:id/input，
+                                署名 Hermes+审计落盘；无文本=裸回车过确认提示；
+                                --no-submit 只写不回车，--quiet 等输出安静再注入）
+
+疗效审计：每次调用追加一行 JSONL 到 ~/.qclaw-hermes/logs/lens-usage.jsonl
+（rtk 的教训：计数只在内存里，重启清零，事后无法证明它干没干活——落盘才可审计）。
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+ARECO = os.environ.get("ARECO_BASE", "http://127.0.0.1:8790")
+# 日志落点按脚本自身位置推导(bin/../logs)——expanduser 在隔离 HOME agent 下会劫持到
+# 幻影目录(memory: isolated-home-tool-pitfall),脚本自锚定与 HOME 无关。
+USAGE_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "logs", "lens-usage.jsonl")
+MAX_BYTES = 4000  # 单次输出硬顶（终极兜底，正常子命令远小于此）
+
+
+def _log_usage(sub: str, argv: list, out_bytes: int) -> None:
+    try:
+        os.makedirs(os.path.dirname(USAGE_LOG), exist_ok=True)
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "sub": sub,
+                "args": " ".join(argv)[:120],
+                "bytes_out": out_bytes,
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # 审计不阻塞主功能
+
+
+def _api_get(path: str):
+    url = ARECO + (path if path.startswith("/") else "/" + path)
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        body = resp.read()
+    data = json.loads(body)
+    # areco 惯例 {ok, data}
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return data
+
+
+def _clip(s, n):
+    s = " ".join(str(s or "").split())
+    return s[:n] + ("…" if len(s) > n else "")
+
+
+def cmd_rooms(argv):
+    show_all = "--all" in argv
+    data = _api_get("/api/rooms")
+    rooms = data.get("rooms", data) if isinstance(data, dict) else data
+    if not show_all:
+        rooms = [r for r in rooms if r.get("archivedAt") is None]
+    rooms.sort(key=lambda r: r.get("lastMessageAt") or r.get("createdAt") or "", reverse=True)
+    lines = [f"{'[归档] ' if r.get('archivedAt') else ''}{r.get('id','?')}  "
+             f"{_clip(r.get('name'), 24)}  {_clip(r.get('lastMessageAt'), 16)}"
+             for r in rooms[:12]]
+    lines.append(f"共 {len(rooms)} 个" + ("" if show_all else "未归档") + "房间"
+                 + (f"（只列前 12）" if len(rooms) > 12 else ""))
+    return "\n".join(lines)
+
+
+def cmd_hist(argv):
+    if not argv:
+        return "用法: lens hist <room_id> [n]"
+    room, n = argv[0], int(argv[1]) if len(argv) > 1 else 5
+    room = room[5:] if room.startswith("room-") else room  # team 名与短 id 都接受
+    data = _api_get(f"/api/rooms/{room}/messages?limit={n}")
+    msgs = data.get("messages", data) if isinstance(data, dict) else data
+    if not isinstance(msgs, list):
+        return f"（非预期结构：{_clip(json.dumps(msgs, ensure_ascii=False), 200)}）"
+    msgs = msgs[-n:]
+    lines = [f"{m.get('created_at') or m.get('createdAt') or '?'} "
+             f"{m.get('from_agent') or m.get('from') or '?'}→{m.get('to_agent') or m.get('to') or '?'}: "
+             f"{_clip(m.get('body'), 120)}"
+             for m in msgs]
+    return "\n".join(lines) if lines else "（房间无消息）"
+
+
+def cmd_sessions(argv):
+    data = _api_get("/api/sessions")
+    sess = data.get("sessions", data) if isinstance(data, dict) else data
+    by_status = {}
+    for s in sess:
+        by_status.setdefault(s.get("status", "?"), []).append(s)
+    lines = ["状态计数: " + " ".join(f"{k}={len(v)}" for k, v in sorted(by_status.items()))]
+    shown = 0
+    for s in sess:
+        if shown >= 12:
+            break
+        lines.append(f"  {_clip(s.get('name') or s.get('id'), 30)}  {s.get('status','?')}")
+        shown += 1
+    if len(sess) > 12:
+        lines.append(f"（共 {len(sess)} 个，只列前 12）")
+    return "\n".join(lines)
+
+
+def cmd_grep(argv):
+    if not argv:
+        return "用法: lens grep <grep参数...>（自动加 -m3 每文件上限与 60 行输出上限）"
+    args = list(argv)
+    if not any(a == "-m" or a.startswith("-m") for a in args):
+        args = ["-m", "3"] + args
+    proc = subprocess.run(["grep", "-I"] + args, capture_output=True, text=True, timeout=30)
+    lines = proc.stdout.splitlines()
+    out = [_clip(l, 160) for l in lines[:60]]
+    if len(lines) > 60:
+        out.append(f"…[截断：共 {len(lines)} 行匹配，只显示前 60]")
+    if not lines:
+        out = [f"（无匹配，grep 退出码 {proc.returncode}）"]
+    return "\n".join(out)
+
+
+def _summarize(obj, depth=0):
+    pad = "  " * depth
+    lines = []
+    if isinstance(obj, dict):
+        for k, v in list(obj.items())[:15]:
+            if isinstance(v, (dict, list)) and depth < 1:
+                head = f"{pad}{k}: {'{…}' if isinstance(v, dict) else f'[{len(v)}]'}"
+                lines.append(head)
+                lines.extend(_summarize(v, depth + 1))
+            else:
+                lines.append(f"{pad}{k}: {_clip(json.dumps(v, ensure_ascii=False), 80)}")
+    elif isinstance(obj, list):
+        lines.append(f"{pad}len={len(obj)}")
+        if obj:
+            lines.append(f"{pad}first: {_clip(json.dumps(obj[0], ensure_ascii=False), 160)}")
+    else:
+        lines.append(f"{pad}{_clip(obj, 160)}")
+    return lines
+
+
+def cmd_get(argv):
+    if not argv:
+        return "用法: lens get </api/...>"
+    data = _api_get(argv[0])
+    lines = _summarize(data)[:40]
+    return "\n".join(lines) if any(l.strip() for l in lines) else "（返回为空）"
+
+
+def cmd_send(argv):
+    """POST /api/sessions/:id/input——独立会话注入（2026-07-26 #2wlt）。
+
+    署名固定 Hermes（本工具箱就是给 Hermes 用的），服务端逐条落审计。
+    端点上线要等 8790 下一次重启；此前调用会收到 404 提示，属预期。
+    """
+    args = [a for a in argv if not a.startswith("--")]
+    if not args:
+        return "用法: lens send <会话id> [文本] [--no-submit] [--quiet]"
+    sid = args[0]
+    text = " ".join(args[1:])
+    payload = json.dumps({
+        "from": "Hermes",
+        "text": text,
+        "submit": "--no-submit" not in argv,
+        "quiet": "--quiet" in argv,
+    }).encode()
+    req = urllib.request.Request(
+        f"{ARECO}/api/sessions/{sid}/input", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "端点尚未生效（/sessions/:id/input 需 areco 8790 重启后可用）"
+        return f"注入失败 HTTP {e.code}: {_clip(e.read().decode(errors='ignore'), 160)}"
+    data = d.get("data", d)
+    return (f"已注入 {data.get('sessionId','?')} submit={data.get('submit')} "
+            f"quiet={data.get('quiet')} text={_clip(data.get('textPreview') or '(裸回车)', 60)}")
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    sub, argv = sys.argv[1], sys.argv[2:]
+    table = {"rooms": cmd_rooms, "hist": cmd_hist, "sessions": cmd_sessions,
+             "grep": cmd_grep, "get": cmd_get, "send": cmd_send}
+    fn = table.get(sub)
+    if not fn:
+        print(f"未知子命令 {sub}；可用: {'/'.join(table)}")
+        return 2
+    try:
+        out = fn(argv)
+    except Exception as e:
+        out = f"lens {sub} 失败: {e}"
+    out = out if len(out.encode()) <= MAX_BYTES else out.encode()[:MAX_BYTES].decode(errors="ignore") + "…[硬顶截断]"
+    print(out)
+    _log_usage(sub, argv, len(out.encode()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

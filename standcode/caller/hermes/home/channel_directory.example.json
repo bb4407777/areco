@@ -1,0 +1,13 @@
+{
+  "updated_at": "<由 gateway 自动维护>",
+  "platforms": {
+    "weixin": [
+      {
+        "id": "<微信用户ID>@im.wechat",
+        "name": "<微信用户ID>@im.wechat",
+        "type": "dm",
+        "thread_id": null
+      }
+    ]
+  }
+}

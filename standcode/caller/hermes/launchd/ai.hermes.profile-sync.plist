@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.profile-sync</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12</string>
+		<string>/Users/gao/.qclaw-hermes/bin/hermes-profile-sync.py</string>
+	</array>
+	<key>WatchPaths</key>
+	<array>
+		<string>/Users/gao/.qclaw-hermes/config.yaml</string>
+		<string>/Users/gao/.qclaw-hermes/SOUL.md</string>
+		<string>/Users/gao/.qclaw-hermes/agent.json</string>
+	</array>
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/gao/.qclaw-hermes/logs/profile-sync.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/gao/.qclaw-hermes/logs/profile-sync.log</string>
+</dict>
+</plist>

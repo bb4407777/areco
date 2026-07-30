@@ -11,3 +11,7 @@ config.json
 standcode/config/harnesses.json
 standcode/config/providers.json
 standcode/config/local.json
+
+# Hermes 收编目录防呆：真配置/真凭证永不入仓（仓里只放 *.example.*）
+standcode/caller/hermes/**/config.yaml
+standcode/caller/hermes/**/auth.json

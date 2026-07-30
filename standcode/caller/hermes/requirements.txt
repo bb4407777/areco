@@ -1,0 +1,125 @@
+# hermes-agent 0.19.0 钉版依赖 — 抄自 hermes_agent-0.19.0.dist-info/METADATA 的 Requires-Dist（2026-07-30 vendor）
+# 用法: pip install -r requirements.txt（核心依赖，不含 extras）
+
+openai==2.24.0
+certifi==2026.5.20
+python-dotenv==1.2.2
+fire==0.7.1
+httpx[socks]==0.28.1
+rich==14.3.3
+tenacity==9.1.4
+pyyaml==6.0.3
+ruamel.yaml==0.18.17
+requests==2.33.0
+jinja2==3.1.6
+pydantic==2.13.4
+prompt_toolkit==3.0.52
+croniter==6.0.0
+packaging==26.0
+Markdown==3.10.2
+PyJWT[crypto]==2.13.0
+urllib3<3,>=2.7.0
+cryptography==46.0.7
+tzdata==2025.3; sys_platform == "win32"
+psutil==7.2.2
+websockets==15.0.1
+pathspec==1.1.1
+fastapi<1,>=0.104.0
+uvicorn[standard]<1,>=0.24.0
+python-multipart<1,>=0.0.9
+ptyprocess<1,>=0.7.0; sys_platform != "win32"
+pywinpty<3,>=2.0.0; sys_platform == "win32"
+Pillow==12.2.0
+concurrent-log-handler==0.9.29; sys_platform == "win32"
+
+# --- extras（按需手动安装，格式: pip install '<依赖>'）---
+# anthropic==0.87.0; extra == "anthropic"
+# exa-py==2.10.2; extra == "exa"
+# firecrawl-py==4.17.0; extra == "firecrawl"
+# parallel-web==0.4.2; extra == "parallel-web"
+# fal-client==0.13.1; extra == "fal"
+# edge-tts==7.2.7; extra == "edge-tts"
+# modal==1.3.4; extra == "modal"
+# daytona==0.155.0; extra == "daytona"
+# hindsight-client==0.6.1; extra == "hindsight"
+# debugpy==1.8.20; extra == "dev"
+# pytest==9.0.2; extra == "dev"
+# pytest-asyncio==1.3.0; extra == "dev"
+# mcp==1.26.0; extra == "dev"
+# starlette==1.0.1; extra == "dev"
+# ty==0.0.21; extra == "dev"
+# ruff==0.15.10; extra == "dev"
+# setuptools==81.0.0; extra == "dev"
+# python-telegram-bot[webhooks]==22.6; extra == "messaging"
+# discord.py[voice]==2.7.1; extra == "messaging"
+# aiohttp==3.14.1; extra == "messaging"
+# brotlicffi==1.2.0.1; extra == "messaging"
+# slack-bolt==1.29.0; extra == "messaging"
+# slack-sdk==3.43.0; extra == "messaging"
+# qrcode==7.4.2; extra == "messaging"
+# slack-bolt==1.29.0; extra == "slack"
+# slack-sdk==3.43.0; extra == "slack"
+# aiohttp==3.14.1; extra == "slack"
+# mautrix[encryption]==0.21.0; extra == "matrix"
+# aiosqlite==0.22.1; extra == "matrix"
+# asyncpg==0.31.0; extra == "matrix"
+# aiohttp-socks==0.11.0; extra == "matrix"
+# aiohttp==3.14.1; extra == "matrix"
+# defusedxml==0.7.1; extra == "wecom"
+# simple-term-menu==1.6.6; extra == "cli"
+# elevenlabs==1.59.0; extra == "tts-premium"
+# faster-whisper==1.2.1; extra == "voice"
+# sounddevice==0.5.5; extra == "voice"
+# numpy==2.4.3; extra == "voice"
+# honcho-ai==2.2.0; extra == "honcho"
+# supermemory==3.50.0; extra == "supermemory"
+# mem0ai==2.0.10; extra == "mem0"
+# mcp==1.26.0; extra == "mcp"
+# starlette==1.0.1; extra == "mcp"
+# nemo-relay<1.0,>=0.5; extra == "nemo-relay"
+# aiohttp==3.14.1; extra == "homeassistant"
+# aiohttp==3.14.1; extra == "sms"
+# microsoft-teams-apps==2.0.13.4; extra == "teams"
+# aiohttp==3.14.1; extra == "teams"
+# mcp==1.26.0; extra == "computer-use"
+# starlette==1.0.1; extra == "computer-use"
+# agent-client-protocol==0.9.0; extra == "acp"
+# mistralai==2.4.8; extra == "mistral"
+# boto3==1.42.89; extra == "bedrock"
+# google-auth==2.55.1; extra == "vertex"
+# azure-identity==1.25.3; extra == "azure-identity"
+# python-telegram-bot[webhooks]==22.6; extra == "termux"
+# hermes-agent[cron]; extra == "termux"
+# hermes-agent[cli]; extra == "termux"
+# hermes-agent[pty]; extra == "termux"
+# hermes-agent[mcp]; extra == "termux"
+# hermes-agent[honcho]; extra == "termux"
+# hermes-agent[acp]; extra == "termux"
+# hermes-agent[termux]; extra == "termux-all"
+# hermes-agent[google]; extra == "termux-all"
+# hermes-agent[homeassistant]; extra == "termux-all"
+# hermes-agent[sms]; extra == "termux-all"
+# hermes-agent[web]; extra == "termux-all"
+# dingtalk-stream==0.24.3; extra == "dingtalk"
+# alibabacloud-dingtalk==2.2.42; extra == "dingtalk"
+# qrcode==7.4.2; extra == "dingtalk"
+# lark-oapi==1.6.8; extra == "feishu"
+# qrcode==7.4.2; extra == "feishu"
+# google-api-python-client==2.194.0; extra == "google"
+# google-auth-oauthlib==1.3.1; extra == "google"
+# google-auth-httplib2==0.3.1; extra == "google"
+# youtube-transcript-api==1.2.4; extra == "youtube"
+# fastapi==0.133.1; extra == "web"
+# uvicorn[standard]==0.41.0; extra == "web"
+# starlette==1.0.1; extra == "web"
+# python-multipart==0.0.27; extra == "web"
+# hermes-agent[cron]; extra == "all"
+# hermes-agent[cli]; extra == "all"
+# hermes-agent[pty]; extra == "all"
+# hermes-agent[mcp]; extra == "all"
+# hermes-agent[homeassistant]; extra == "all"
+# hermes-agent[sms]; extra == "all"
+# hermes-agent[acp]; extra == "all"
+# hermes-agent[google]; extra == "all"
+# hermes-agent[web]; extra == "all"
+# hermes-agent[youtube]; extra == "all"

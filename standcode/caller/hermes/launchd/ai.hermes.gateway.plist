@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>API_SERVER_KEY</key>
+		<string>hermes-local-key</string>
+		<key>API_SERVER_MODEL_NAME</key>
+		<string>k3</string>
+		<key>HERMES_HOME</key>
+		<string>/Users/gao/.qclaw-hermes</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/Users/gao/scripts:/Library/Frameworks/Python.framework/Versions/3.12/bin:/Users/gao/.npm-global/bin:/Users/gao/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+		<key>WEIXIN_ACCOUNT_ID</key>
+		<string>08db917f1d8e@im.bot</string>
+		<key>WEIXIN_TOKEN</key>
+		<string>08db917f1d8e@im.bot:060000d2faad9e8ea6e9c4e0acd87fb93c0bca</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>ai.hermes.gateway</string>
+	<key>LimitLoadToSessionType</key>
+	<array>
+		<string>Aqua</string>
+		<string>Background</string>
+	</array>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12</string>
+		<string>-m</string>
+		<string>hermes_cli.main</string>
+		<string>gateway</string>
+		<string>run</string>
+		<string>--replace</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gao/.qclaw-hermes/logs/gateway.error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gao/.qclaw-hermes/logs/gateway.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gao/.qclaw-hermes</string>
+</dict>
+</plist>
