@@ -35,16 +35,16 @@ standcode/caller/hermes/
 │       └── secretary-01/      # 同上
 └── launchd/                   # 6 个 launchd plist 存档（绝对路径保留现状值，按需改）
     ├── ai.hermes.gateway.plist
-    ├── ai.hermes.gateway-second.plist      # ⚠️ 见下「疑似重复」
+    ├── ai.hermes.gateway-second.plist      # 历史存档：连字符版 07-30 已删（launchd 早已 disabled）
     ├── ai.hermes.gateway.second.plist      # ⚠️ 见下「疑似重复」
     ├── ai.hermes.gateway.secretary.plist
     ├── ai.hermes.profile-sync.plist
     └── ai.hermes.qoder-shim.plist
 ```
 
-## ⚠️ gateway-second 与 gateway.second 疑似重复
+## gateway-second 与 gateway.second 重复（已定性）
 
-`launchd/` 里 `ai.hermes.gateway-second.plist` 与 `ai.hermes.gateway.second.plist` 是两个 Label 不同、但都指向同一 profile（`HERMES_HOME=<HOME>/.qclaw-hermes/profiles/second`）的 plist：前者带 `--profile second` 参数与 Throttle/ExitTimeOut 调优，后者带 `API_SERVER_*` 环境变量。疑似历史遗留重复，**本次只存档、不清理**，去留待所有者定夺；复原时请勿两个同时 load。
+`launchd/` 里 `ai.hermes.gateway-second.plist` 与 `ai.hermes.gateway.second.plist` 是两个 Label 不同、但都指向同一 profile（`HERMES_HOME=<HOME>/.qclaw-hermes/profiles/second`）的 plist：前者带 `--profile second` 参数与 Throttle/ExitTimeOut 调优，后者带 `API_SERVER_*` 环境变量。2026-07-30 已定性：**现役 = 点号版 `ai.hermes.gateway.second`**（launchd 装载中）；连字符版 `ai.hermes.gateway-second` 早已被显式 disabled、当日其 plist 已从 LaunchAgents 删除，此处仅存档。复原时只用点号版。
 
 ## 排除清单（运行时状态不进仓）及理由
 
