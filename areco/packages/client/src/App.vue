@@ -132,6 +132,8 @@ function forceUpdate() {
   border: 0;
   background: none;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .nav-link.active {
   color: var(--text);
@@ -177,5 +179,28 @@ function forceUpdate() {
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
+/* 小屏（iPhone SE3 375px 等）：导航栏压成一行，tab 不竖排不裁切 */
+@media (max-width: 520px) {
+  .app-header {
+    padding: 8px 10px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  }
+  .brand {
+    font-size: 13px;
+    gap: 6px;
+  }
+  .nav {
+    gap: 2px;
+    overflow-x: auto;
+  }
+  .nav-link {
+    padding: 5px 7px;
+    font-size: 12.5px;
+  }
+  .theme-btn {
+    padding: 5px 5px;
+  }
 }
 </style>
