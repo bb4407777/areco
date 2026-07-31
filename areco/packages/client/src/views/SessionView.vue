@@ -143,7 +143,7 @@ function onMenu(key: string) {
         {{ statusTagText(session) }}
       </n-tag>
       <span class="spacer" />
-      <ViewModeSwitch v-if="session && chatCapable(session, store.templates)" mode="terminal" @switch="switchMode" />
+      <ViewModeSwitch mode="terminal" @switch="switchMode" />
       <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
         <n-button quaternary size="small">操作 ▾</n-button>
       </n-dropdown>
