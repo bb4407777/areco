@@ -7,6 +7,10 @@ config.json
 *.log
 .DS_Store
 
+# CodeGraph 本地可重建索引（数据库体积大，不入仓）
+.codegraph/
+**/.codegraph/
+
 # StandCode 本机私有配置（真身含凭证/本机路径，仓里只放 *.example.json）
 standcode/config/harnesses.json
 standcode/config/providers.json
