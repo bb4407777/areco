@@ -2,7 +2,7 @@
 // 座舱页：终端 + 单行 prompt + 触屏键条 + 会话动词。pty 活在服务端，本页只是"接上驾驶杆"。
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDropdown, NTag, useDialog, useMessage } from 'naive-ui'
+import { NButton, NDropdown, NTag, useMessage } from 'naive-ui'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 import { EXIT_REASON_TEXT, chatCapable, statusTagText, trafficColor } from '../utils/format'
@@ -18,7 +18,6 @@ const router = useRouter()
 const store = useSessionsStore()
 const ui = useUiStore()
 const message = useMessage()
-const dialog = useDialog()
 const { openRename } = useRenameDialog()
 
 const sessionId = computed(() => String(route.params.id))
@@ -112,16 +111,9 @@ function onMenu(key: string) {
   else if (key === 'font-dec') ui.setFontSize(ui.fontSize <= 11 ? 18 : ui.fontSize - 1)
   else if (key === 'theme') ui.toggleTheme()
   else if (key === 'remove') {
-    dialog.warning({
-      title: '删除会话',
-      content: `删除「${session.value?.name}」？${isLive.value ? '会话运行中，将先终止进程。' : ''}`,
-      positiveText: '删除',
-      negativeText: '取消',
-      onPositiveClick: () =>
-        run(async () => {
-          await store.remove(id)
-          router.replace('/')
-        }),
+    void run(async () => {
+      await store.remove(id)
+      router.replace('/')
     })
   } else if (key.startsWith('handoff:')) {
     void run(async () => {
