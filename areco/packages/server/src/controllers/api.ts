@@ -38,6 +38,38 @@ const execFileAsync = promisify(execFile)
 
 const log = createLogger('api')
 
+// ── fileOpen 安全件（对齐 skill-server 8020 POST /open 实证做法，2026-07-31）──
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
+
+/** 同 skill-server _local_browser_request：阻断外站对 loopback 的 CSRF/DNS-rebinding */
+function isLocalBrowserRequest(ctx: Context): boolean {
+  const host = (ctx.get('host') || '').split(':')[0].toLowerCase().replace(/\.$/, '')
+  if (!LOOPBACK_HOSTS.has(host)) return false
+  const fetchSite = (ctx.get('sec-fetch-site') || '').toLowerCase()
+  if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) return false
+  for (const name of ['origin', 'referer']) {
+    const value = ctx.get(name)
+    if (!value) continue
+    try {
+      const originHost = (new URL(value).hostname || '').toLowerCase().replace(/\.$/, '')
+      if (!LOOPBACK_HOSTS.has(originHost)) return false
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+/** 路径作为 argv 传入，不拼接 AppleScript 源码，阻断引号/换行注入 */
+const FINDER_OPEN_SCRIPT = `on run argv
+set targetPath to item 1 of argv
+set targetFile to POSIX file targetPath
+tell application "Finder"
+  activate
+  open targetFile
+end tell
+end run`
+
 // StandCode caller.py 集成（任务管理 API）：
 //   - 任务状态目录与 caller.py 的 STANDCODE_TASKS_DIR 同口径（默认 ~/.standcode/tasks）
 //   - caller 脚本默认读仓内 standcode/caller/caller.py（2026-07-26 subtree 并入后同仓自证），可用 STANDCODE_CALLER 覆盖
@@ -163,8 +195,11 @@ export class ApiControllers {
     })
 
   /** GET /api/standcode/defaults：StandCode 角色默认模板（设置页编辑面；
-   *  StandCode caller.py 启动时读它覆盖 registry.json 默认）。 */
-  getStandcodeDefaults = (ctx: Context) => ok(ctx, this.config.standcode ?? {})
+   *  StandCode caller.py 启动时读它覆盖 registry.json 默认）。
+   *  _caps = 服务端能力横幅（caller 据此选通道）：sendFrom = rooms.send 收 from/humanRelay/to
+   *  （P1-5 REST 快路）。旧服务端无此键 → caller 回落 SQLite 直写；PUT 白名单不含 _caps，
+   *  不会被写回 config.json。 */
+  getStandcodeDefaults = (ctx: Context) => ok(ctx, { ...(this.config.standcode ?? {}), _caps: { sendFrom: true } })
 
   /** 设置页模板编辑器用的只读目录：harness/model 名称与已验证推理档位，不含任何 provider env。 */
   getStandcodeCatalog = (ctx: Context) => ok(ctx, standCodeCatalog())
@@ -187,7 +222,7 @@ export class ApiControllers {
   updateStandcodeDefaults = (ctx: Context) =>
     guard(ctx, () => {
       const body = (ctx.request.body ?? {}) as Partial<StandCodeConfig>
-      const keys = ['caller', 'thinker', 'worker', 'fastWorker'] as const
+      const keys = ['caller', 'thinker', 'worker', 'fastWorker', 'heavyWorker'] as const
       const provided = keys.filter((k) => body[k] !== undefined)
       if (!provided.length) throw new Error(`未提供可更新字段（${keys.join('/')}）`)
       const sc: StandCodeConfig = { ...(this.config.standcode ?? {}) }
@@ -944,11 +979,17 @@ export class ApiControllers {
     })
 
   /**
-   * 桌面端「文件」栏点击 → 系统默认 App 打开（macOS `open`）。
-   * 复用 FileService.resolve 白名单 realpath 边界，与 meta/raw 同一安全口径；
+   * 桌面端「文件」栏点击 → 系统默认 App 打开。
+   * 对齐 skill-server(8020) POST /open 常驻服务实证做法（2026-07-31 高律师指点）：
+   *  - 复用 FileService.resolve 白名单 realpath 边界，与 meta/raw 同一安全口径；
+   *  - loopback/来源闸：Sec-Fetch-Site + Origin/Referer 只接受 127.0.0.1/localhost，
+   *    阻断外站对 loopback 的 CSRF/DNS-rebinding（同 skill-server _local_browser_request）；
+   *  - osascript 唤起 Finder activate+open（路径走 argv 不拼脚本源码），
+   *    launchd 常驻环境实证可用且把窗口带到前台。
    * 仅桌面浏览器触发（手机端前端仍走内部预览，不会调到这里）。
    */
   fileOpen = async (ctx: Context) => {
+    if (!isLocalBrowserRequest(ctx)) return fail(ctx, 403, 'forbidden', 'forbidden origin')
     const body = (ctx.request.body ?? {}) as { path?: unknown }
     const p = typeof body.path === 'string' ? body.path.trim() : ''
     if (!p) return fail(ctx, 400, 'bad_request', 'path 必填')
@@ -961,7 +1002,7 @@ export class ApiControllers {
       return fail(ctx, status, code, message)
     }
     try {
-      await execFileAsync('open', [real], { timeout: 10000 })
+      await execFileAsync('osascript', ['-e', FINDER_OPEN_SCRIPT, '--', real], { timeout: 10000 })
       ok(ctx, { opened: real })
     } catch (err) {
       fail(ctx, 500, 'open_failed', err instanceof Error ? err.message : String(err))
