@@ -19,6 +19,7 @@ import ThinkingStream from '../components/ThinkingStream.vue'
 import TypingIndicator from '../components/TypingIndicator.vue'
 import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
+import { useSpawnWorker, HANDOFF_ROLES } from '../composables/useSpawnWorker'
 
 const POLL_MS = 2500
 
@@ -28,6 +29,7 @@ const store = useSessionsStore()
 const ui = useUiStore()
 const message = useMessage()
 const { openRename } = useRenameDialog()
+const { isRoleMode, handoffRole } = useSpawnWorker()
 
 const sessionId = computed(() => String(route.params.id))
 const session = computed(() => store.byId(sessionId.value))
@@ -37,12 +39,15 @@ const isLive = computed(() => !!session.value && ['running', 'spawning', 'stoppi
 // 「操作 ▾」与终端页同款（去掉仅终端相关的字号项）；座舱页不显示全局顶栏，主题入口也在这里
 const resumable = computed(() => !!session.value && chatCapable(session.value, store.templates))
 
-// 换 agent 接手候选：全部启用的非 shell 模板
+// 换 agent 接手候选：角色模式给四档角色（worker/thinker/快速/重活，HANDOFF_ROLES 单源）；
+// 模板模式列全部启用的非 shell 模板（与侧栏/看板卡片同口径）
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 const handoffChildren = computed(() =>
-  store.templates
-    .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
-    .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` }))
+  isRoleMode.value
+    ? HANDOFF_ROLES.map((r) => ({ label: r.label, key: `handoff-role:${r.role}` }))
+    : store.templates
+        .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
+        .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` })),
 )
 
 const menuOptions = computed(() => {
@@ -91,7 +96,10 @@ function onMenu(key: string) {
   else if (key === 'unarchive') void run(() => store.unarchive(id))
   // 删除成功后 session 消失，「会话被删除→回看板」watch 自动导航
   else if (key === 'remove') void run(() => store.remove(id))
-  else if (key.startsWith('handoff:')) {
+  else if (key.startsWith('handoff-role:')) {
+    const hit = HANDOFF_ROLES.find((r) => key === `handoff-role:${r.role}`)
+    if (hit) void handoffRole(id, hit.role, hit.label)
+  } else if (key.startsWith('handoff:')) {
     void run(async () => {
       const next = await store.handoff(id, key.slice(8))
       message.success('已交接给新会话')

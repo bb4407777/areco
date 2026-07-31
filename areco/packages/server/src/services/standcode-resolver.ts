@@ -270,13 +270,15 @@ const STAND_REGISTRY_PATH =
 interface StandRegistry {
   default_worker?: string
   default_thinker?: string
+  default_fast_worker?: string
+  default_heavy_worker?: string
 }
 
 /**
  * 角色（worker/thinker/fastWorker/heavyWorker）→ 模板解析，新建会话「角色模式」
  * 与看板/侧栏「用 X 接手」共用的唯一解析链：
  *   1. 设置页（config.json 的 standcode 段，source=settings）
- *   2. standcode/stand/registry.json 的 default_worker/default_thinker（source=registry）
+ *   2. standcode/stand/registry.json 的 default_worker/thinker/fast_worker/heavy_worker（source=registry）
  *   3. 第一个启用中的模板兜底（source=fallback）
  * 每步校验模板存在且 enabled，否则继续下落；一层都没有（无任何启用模板）→ 抛错，
  * 与 resolveStandCode 同款显式失败语义，不静默。
@@ -300,9 +302,14 @@ export function resolveRoleTemplate(
   let registryId: string | undefined
   try {
     const registry = JSON.parse(fs.readFileSync(STAND_REGISTRY_PATH, 'utf-8')) as StandRegistry
-    // registry 只有 default_worker/default_thinker 两键：fastWorker/heavyWorker 是 worker
-    // 的车道细分，registry 层回落 default_worker（设置页未配时至少能落到 worker 锚）。
-    registryId = role === 'thinker' ? registry.default_thinker : registry.default_worker
+    // registry 四键齐全：按角色取对应 default；缺键则 registryId=undefined，继续下落兜底。
+    const REGISTRY_DEFAULT_KEY: Record<StandCodeRole, keyof StandRegistry> = {
+      worker: 'default_worker',
+      thinker: 'default_thinker',
+      fastWorker: 'default_fast_worker',
+      heavyWorker: 'default_heavy_worker',
+    }
+    registryId = registry[REGISTRY_DEFAULT_KEY[role]]
   } catch {
     /* registry 读不到 = 该层无映射，继续下落兜底 */
   }

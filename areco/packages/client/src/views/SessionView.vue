@@ -11,6 +11,7 @@ import PromptBar from '../components/PromptBar.vue'
 import MobileKeyBar from '../components/MobileKeyBar.vue'
 import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
+import { useSpawnWorker, HANDOFF_ROLES } from '../composables/useSpawnWorker'
 import type { SessionViewMode } from '../stores/ui'
 
 const route = useRoute()
@@ -19,6 +20,7 @@ const store = useSessionsStore()
 const ui = useUiStore()
 const message = useMessage()
 const { openRename } = useRenameDialog()
+const { isRoleMode, handoffRole } = useSpawnWorker()
 
 const sessionId = computed(() => String(route.params.id))
 const session = computed(() => store.byId(sessionId.value))
@@ -41,12 +43,15 @@ watch(
 // 可原生恢复对话的会话：重启默认续上对话
 const resumable = computed(() => !!session.value && chatCapable(session.value, store.templates))
 
-// 换 agent 接手候选：全部启用的非 shell 模板（对话写成交接档案，新 agent 读档续干）
+// 换 agent 接手候选：角色模式给四档角色（worker/thinker/快速/重活，HANDOFF_ROLES 单源）；
+// 模板模式列全部启用的非 shell 模板（与侧栏/看板卡片同口径）
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 const handoffChildren = computed(() =>
-  store.templates
-    .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
-    .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` }))
+  isRoleMode.value
+    ? HANDOFF_ROLES.map((r) => ({ label: r.label, key: `handoff-role:${r.role}` }))
+    : store.templates
+        .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
+        .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` })),
 )
 
 const menuOptions = computed(() => {
@@ -115,6 +120,9 @@ function onMenu(key: string) {
       await store.remove(id)
       router.replace('/')
     })
+  } else if (key.startsWith('handoff-role:')) {
+    const hit = HANDOFF_ROLES.find((r) => key === `handoff-role:${r.role}`)
+    if (hit) void handoffRole(id, hit.role, hit.label)
   } else if (key.startsWith('handoff:')) {
     void run(async () => {
       const next = await store.handoff(id, key.slice(8))
