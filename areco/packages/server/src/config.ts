@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { StandCodeConfig, Template } from '../../shared/protocol'
+import type { StandCodeConfig, Template, UiPrefs } from '../../shared/protocol'
 import { createLogger } from './logger'
 
 const log = createLogger('config')
@@ -41,6 +41,9 @@ export interface AppConfig {
   /** StandCode 角色默认模板（设置页编辑，GET/PUT /api/standcode/defaults）。缺省 = 未配置，
    *  消费方（StandCode caller.py）回落其 registry.json。 */
   standcode?: StandCodeConfig
+  /** 对话模式显示开关 + 新建会话模式（设置页编辑，GET/PUT /api/ui/prefs）。服务端为 SoT，
+   *  浏览器 localStorage 仅作缓存；缺省 = 未显式设置，客户端回落本地默认 */
+  ui?: UiPrefs
 }
 
 const HOME = process.env.HOME || '/'
@@ -163,16 +166,28 @@ export function loadConfig(): AppConfig {
     ...(Array.isArray(raw.modelWhitelist)
       ? { modelWhitelist: raw.modelWhitelist.map(String).filter((s) => s.trim()) }
       : { modelWhitelist: [] }),
-    // standcode 同 claudeHome 口径：白名单拷贝必须带上（只收四个角色键、只留非空字符串），
+    // standcode 同 claudeHome 口径：白名单拷贝必须带上（只收五个角色键、只留非空字符串），
     // 漏掉 = 重启剥字段 + 下次保存回写永久丢失
     ...(() => {
       const rawSc = (raw.standcode ?? {}) as Partial<StandCodeConfig>
       const sc: StandCodeConfig = {}
-      for (const k of ['caller', 'thinker', 'worker', 'fastWorker'] as const) {
+      for (const k of ['caller', 'thinker', 'worker', 'fastWorker', 'heavyWorker'] as const) {
         const v = rawSc[k]
         if (typeof v === 'string' && v.trim()) sc[k] = v.trim()
       }
       return Object.keys(sc).length ? { standcode: sc } : {}
+    })(),
+    // ui 同 standcode 口径：白名单拷贝只收三个显示开关（布尔）+ spawnMode（role/template），
+    // 漏掉 = 重启剥字段 + 下次保存回写永久丢失
+    ...(() => {
+      const rawUi = (raw.ui ?? {}) as Partial<UiPrefs>
+      const ui: UiPrefs = {}
+      for (const k of ['showThinking', 'showToolUse', 'showToolResult'] as const) {
+        const v = rawUi[k]
+        if (typeof v === 'boolean') ui[k] = v
+      }
+      if (rawUi.spawnMode === 'role' || rawUi.spawnMode === 'template') ui.spawnMode = rawUi.spawnMode
+      return Object.keys(ui).length ? { ui } : {}
     })(),
   }
   if (!fs.existsSync(CONFIG_PATH)) saveConfig(config)
