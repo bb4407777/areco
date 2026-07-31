@@ -14,7 +14,7 @@ import SessionCard from '../components/SessionCard.vue'
 import SpawnDialog from '../components/SpawnDialog.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
 import { useExitedSessionCleanup } from '../composables/useExitedSessionCleanup'
-import { useSpawnWorker } from '../composables/useSpawnWorker'
+import { useSpawnWorker, HANDOFF_ROLES } from '../composables/useSpawnWorker'
 
 const store = useSessionsStore()
 const roomsStore = useRoomsStore()
@@ -24,7 +24,13 @@ const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
 const { cleanupSupported, cleanableCount, cleaning, cleanupExited } = useExitedSessionCleanup()
-const { isRoleMode, spawnWorker, handoffWorker, workerBusy } = useSpawnWorker()
+const { isRoleMode, spawnWorker, handoffRole, workerBusy } = useSpawnWorker()
+
+/** SessionCard 只抛 role 键：在这里查 HANDOFF_ROLES 拿展示名再交接（label 用于成功提示） */
+function handoffRoleByKey(id: string, role: string) {
+  const hit = HANDOFF_ROLES.find((r) => r.role === role)
+  if (hit) void handoffRole(id, hit.role, hit.label)
+}
 
 const showSpawn = ref(false)
 const showArchived = ref(false)
@@ -169,7 +175,7 @@ function handoff(id: string, templateId: string) {
             @archive="archive(e.session.id)"
             @remove="confirmRemove(e.session.id, e.session.name)"
             @handoff="(templateId) => handoff(e.session.id, templateId)"
-            @handoff-worker="handoffWorker(e.session.id)"
+            @handoff-role="(role) => handoffRoleByKey(e.session.id, role)"
           />
         </TransitionGroup>
       </section>
@@ -190,7 +196,7 @@ function handoff(id: string, templateId: string) {
           @archive="archive(session.id)"
           @remove="confirmRemove(session.id, session.name)"
           @handoff="(templateId) => handoff(session.id, templateId)"
-          @handoff-worker="handoffWorker(session.id)"
+          @handoff-role="(role) => handoffRoleByKey(session.id, role)"
         />
       </TransitionGroup>
 
@@ -215,7 +221,7 @@ function handoff(id: string, templateId: string) {
             @archive="archive(session.id)"
             @remove="confirmRemove(session.id, session.name)"
             @handoff="(templateId) => handoff(session.id, templateId)"
-            @handoff-worker="handoffWorker(session.id)"
+            @handoff-role="(role) => handoffRoleByKey(session.id, role)"
           />
         </TransitionGroup>
       </section>
@@ -245,7 +251,7 @@ function handoff(id: string, templateId: string) {
             @unarchive="unarchive(session.id)"
             @remove="confirmRemove(session.id, session.name)"
             @handoff="(templateId) => handoff(session.id, templateId)"
-            @handoff-worker="handoffWorker(session.id)"
+            @handoff-role="(role) => handoffRoleByKey(session.id, role)"
           />
         </TransitionGroup>
       </section>

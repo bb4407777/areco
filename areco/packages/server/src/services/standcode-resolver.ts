@@ -1,4 +1,4 @@
-import type { RoleResolved, StandCodeCatalog, StandCodeConfig, Template } from '../../../shared/protocol'
+import type { RoleResolved, StandCodeCatalog, StandCodeConfig, StandCodeRole, Template } from '../../../shared/protocol'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ROOT_DIR } from '../config'
@@ -273,7 +273,8 @@ interface StandRegistry {
 }
 
 /**
- * 角色（worker/thinker）→ 模板解析，新建会话「角色模式」的唯一解析链：
+ * 角色（worker/thinker/fastWorker/heavyWorker）→ 模板解析，新建会话「角色模式」
+ * 与看板/侧栏「用 X 接手」共用的唯一解析链：
  *   1. 设置页（config.json 的 standcode 段，source=settings）
  *   2. standcode/stand/registry.json 的 default_worker/default_thinker（source=registry）
  *   3. 第一个启用中的模板兜底（source=fallback）
@@ -281,7 +282,7 @@ interface StandRegistry {
  * 与 resolveStandCode 同款显式失败语义，不静默。
  */
 export function resolveRoleTemplate(
-  role: 'worker' | 'thinker',
+  role: StandCodeRole,
   config: StandCodeConfig | undefined,
   templates: Template[],
 ): RoleResolved {
@@ -299,7 +300,9 @@ export function resolveRoleTemplate(
   let registryId: string | undefined
   try {
     const registry = JSON.parse(fs.readFileSync(STAND_REGISTRY_PATH, 'utf-8')) as StandRegistry
-    registryId = role === 'worker' ? registry.default_worker : registry.default_thinker
+    // registry 只有 default_worker/default_thinker 两键：fastWorker/heavyWorker 是 worker
+    // 的车道细分，registry 层回落 default_worker（设置页未配时至少能落到 worker 锚）。
+    registryId = role === 'thinker' ? registry.default_thinker : registry.default_worker
   } catch {
     /* registry 读不到 = 该层无映射，继续下落兜底 */
   }

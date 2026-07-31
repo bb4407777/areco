@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { ServerMsg, SessionCleanupResult, SessionSummary, Template } from '../../../shared/protocol'
+import type { ServerMsg, SessionCleanupResult, SessionSummary, StandCodeRole, Template } from '../../../shared/protocol'
 import { isExitedSessionCleanupCandidate } from '../../../shared/session-cleanup'
 import { api } from '../api'
 
@@ -75,7 +75,7 @@ export const useSessionsStore = defineStore('sessions', {
     },
     /** 换 agent 接手：本会话对话写成交接档案，templateId 模板拉起新会话读档续干（活会话先停）。
      *  target 传 { role } 时由服务端按角色解析模板（role 优先于 templateId，同 spawn） */
-    async handoff(id: string, target: string | { role: 'worker' | 'thinker' }) {
+    async handoff(id: string, target: string | { role: StandCodeRole }) {
       return api.post<SessionSummary>(`/api/sessions/${id}/handoff`, typeof target === 'string' ? { templateId: target } : target)
     },
     async rename(id: string, name: string) {

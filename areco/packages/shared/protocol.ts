@@ -66,6 +66,9 @@ export interface StandCodeConfig {
   thinker?: string
   worker?: string
   fastWorker?: string
+  /** 重活车道锚（法律/代码重活 Worker）。2026-07-30 高律师定案：车道锚 SoT 统一迁到
+   *  本段（areco 设置页），caller.py 每次 go 运行时读取，回落链 API→config.json→常量。 */
+  heavyWorker?: string
 }
 
 /**
@@ -82,11 +85,15 @@ export interface UiPrefs {
   spawnMode?: 'role' | 'template'
 }
 
+/** StandCode 角色键：worker/thinker 是新建会话角色模式的两项；fastWorker/heavyWorker
+ *  仅用于「接手」（handoff）——把现有会话交给快速/重活车道的 Worker 续干。 */
+export type StandCodeRole = 'worker' | 'thinker' | 'fastWorker' | 'heavyWorker'
+
 /** StandCode 角色 → 模板的解析结果（GET /api/standcode/roles、role spawn 共用）。
  *  source：settings = 设置页 standcode 段；registry = standcode/stand/registry.json 回落；
  *  fallback = 前两层都无有效映射，兜底取第一个启用中的模板。 */
 export interface RoleResolved {
-  role: 'worker' | 'thinker'
+  role: StandCodeRole
   templateId: string
   templateName: string
   source: 'settings' | 'registry' | 'fallback'

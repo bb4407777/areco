@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { Context } from 'koa'
-import type { RoleResolved, ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StatsSummary, Template, TranscriptMessage, TranscriptPage, UiPrefs } from '../../../shared/protocol'
+import type { RoleResolved, ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StandCodeRole, StatsSummary, Template, TranscriptMessage, TranscriptPage, UiPrefs } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
@@ -766,12 +766,14 @@ export class ApiControllers {
   sessionHandoff = (ctx: Context) =>
     guard(ctx, () => {
       const session = this.manager.get(ctx.params.id)
-      const body = (ctx.request.body ?? {}) as { templateId?: string; role?: 'worker' | 'thinker'; name?: string }
+      const body = (ctx.request.body ?? {}) as { templateId?: string; role?: StandCodeRole; name?: string }
       let templateId = body.templateId
-      // 角色模式：role 优先于 templateId（同 spawnSession）——角色是用户意图，模板只是实现层
+      // 角色模式：role 优先于 templateId（同 spawnSession）——角色是用户意图，模板只是实现层。
+      // handoff 比 spawn 多两档：fastWorker（快速）/heavyWorker（重活），把会话交给对应车道的 Worker。
+      const HANDOFF_ROLES: StandCodeRole[] = ['worker', 'thinker', 'fastWorker', 'heavyWorker']
       if (body.role !== undefined) {
-        if (body.role !== 'worker' && body.role !== 'thinker') {
-          throw new Error(`role 须为 worker 或 thinker（收到: ${String(body.role)}）`)
+        if (!HANDOFF_ROLES.includes(body.role)) {
+          throw new Error(`role 须为 ${HANDOFF_ROLES.join('/')}（收到: ${String(body.role)}）`)
         }
         const resolved = resolveRoleTemplate(body.role, this.config.standcode, this.templates.list())
         if (templateId && templateId !== resolved.templateId) {
