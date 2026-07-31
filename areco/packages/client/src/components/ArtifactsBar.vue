@@ -117,7 +117,27 @@ function toggle() {
   if (open.value && !scanned.value) void scan()
 }
 
-// 点击 chip：桌面端直接系统打开，手机端内部预览；open 接口失败（如服务端未升级）回退预览
+// 点击 chip：桌面端直接系统打开，手机端内部预览。
+// 桌面端两级系统打开（2026-07-31 高律师指点 8020 现成服务后加第二级）：
+//  ① POST /api/files/open（areco 原生，8790 重启升级后生效）
+//  ② 8790 未重启（404）时回退 skill-server 8020 的 GET /open?path=（常驻、已在用，
+//     其白名单 = ~/Desktop、~/skills、~/Code —— areco 产物与案件文件均在其中）；
+//     跨域只能 no-cors 盲发（响应读不到），故前端先自查路径在 8020 白名单前缀内才发，
+//     且仅当本页就跑在 127.0.0.1/localhost（局域网访问时 127.0.0.1 指错机器）。
+//  ③ 两级都不可用（8020 也挂了 / 路径不在其白名单）→ 回退 areco 内部预览。
+const SKILL_SERVER_OPEN = 'http://127.0.0.1:8020/open?path='
+const SKILL_SERVER_ROOTS = ['/Users/gao/Desktop/', '/Users/gao/skills/', '/Users/gao/Code/']
+
+function openViaSkillServer(path: string): boolean {
+  const host = window.location.hostname
+  if (host !== '127.0.0.1' && host !== 'localhost') return false
+  if (!SKILL_SERVER_ROOTS.some((r) => path.startsWith(r))) return false
+  // no-cors：GET 是 simple request 免预检；8020 校验 Sec-Fetch-Site=same-site 会放行。
+  // 响应不透明读不到结果，但白名单已在前端自查过，发出即视为成功。
+  void fetch(SKILL_SERVER_OPEN + encodeURIComponent(path), { mode: 'no-cors' }).catch(() => {})
+  return true
+}
+
 async function onChipClick(path: string) {
   if (!ui.isDesktop) {
     emit('preview', path)
@@ -126,7 +146,7 @@ async function onChipClick(path: string) {
   try {
     await api.post('/api/files/open', { path })
   } catch {
-    emit('preview', path)
+    if (!openViaSkillServer(path)) emit('preview', path)
   }
 }
 </script>
