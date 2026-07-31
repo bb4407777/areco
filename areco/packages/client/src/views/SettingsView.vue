@@ -56,6 +56,8 @@ const STANDCODE_ROLES = [
   { key: 'thinker', label: 'Thinker' },
   { key: 'worker', label: 'Worker' },
   { key: 'fastWorker', label: '快速 Worker' },
+  // 重活车道锚（2026-07-30 高律师定案）：车道锚 SoT = 本设置页，caller.py 运行时读取
+  { key: 'heavyWorker', label: '重活 Worker' },
 ] as const
 const standcodeSaved = ref<StandCodeConfig>({})
 const standcodeInput = ref<StandCodeConfig>({})
@@ -82,19 +84,8 @@ async function saveStandcode() {
 }
 
 // 新建会话模式：角色（Worker/Thinker，默认）｜模板（旧形式）。服务端 SoT（ui.spawnMode，GET/PUT /api/ui/prefs）
-const spawnMode = ref<'role' | 'template'>('role')
-const savingSpawnMode = ref(false)
-async function setSpawnMode(v: 'role' | 'template') {
-  spawnMode.value = v
-  savingSpawnMode.value = true
-  try {
-    await api.put<UiPrefs>('/api/ui/prefs', { spawnMode: v })
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  } finally {
-    savingSpawnMode.value = false
-  }
-}
+// 单一事实源 = ui store：startup 时 syncFromServer() 拉服务端覆盖本地缓存；这里切换直接走 ui.setSpawnMode（写回服务端）。
+// 角色模式下侧栏/看板的「＋ 新建会话」会变成「＋ worker」并直接拉起 Worker、不弹选择/不二次确认（见 useSpawnWorker）。
 const showEdit = ref(false)
 const editing = ref<Template>(emptyTemplate())
 const isCreate = ref(false)
@@ -176,7 +167,8 @@ onMounted(async () => {
   }
   try {
     const prefs = await api.get<UiPrefs>('/api/ui/prefs')
-    spawnMode.value = prefs.spawnMode === 'template' ? 'template' : 'role'
+    // 与服务端同步 spawnMode（startup 也会 syncFromServer，这里再保险拉一次，确保设置页打开即准）
+    if (prefs.spawnMode === 'template' || prefs.spawnMode === 'role') ui.spawnMode = prefs.spawnMode
   } catch {
     // 同上：旧服务端无 /api/ui/prefs 时保持本地默认（role）
   }
@@ -478,37 +470,6 @@ function clearLog() {
     </n-card>
 
     <n-card size="small" class="block">
-      <template #header>Agent 模板</template>
-      <template #header-extra>
-        <n-button size="tiny" type="primary" @click="openCreate">＋ 新建</n-button>
-      </template>
-      <div ref="templateListEl" class="template-list">
-        <div
-          v-for="template in displayTemplates"
-          :key="template.id"
-          class="template-row"
-          :class="{ dragging: dragId === template.id }"
-        >
-          <span class="drag-handle" title="拖动排序" @pointerdown="dragStart($event, template)">⠿</span>
-          <span class="dot" :style="{ background: dotColor(template) }" />
-          <div class="template-main">
-            <div class="template-name">
-              {{ template.name }}
-              <n-tag v-if="!template.enabled" size="small" :bordered="false" class="off-tag">停用</n-tag>
-              <n-tag v-if="template.autoStart" size="small" :bordered="false" type="info">自启</n-tag>
-            </div>
-            <div class="template-cmd mono">
-              <template v-if="template.harness">⚙ {{ template.harness }}{{ template.model ? ` · ${template.model}` : '' }}{{ template.preset ? ` · ${template.preset}` : '' }}{{ template.reasoningEffort ? ` · think:${template.reasoningEffort}` : '' }}</template>
-              <template v-else>{{ template.command }} {{ template.args.join(' ') }}</template>
-            </div>
-          </div>
-          <n-button size="tiny" quaternary @click="openEdit(template)">编辑</n-button>
-          <n-button size="tiny" quaternary type="error" @click="confirmRemove(template)">删</n-button>
-        </div>
-      </div>
-    </n-card>
-
-    <n-card size="small" class="block">
       <template #header>StandCode 默认角色</template>
       <template #header-extra>
         <n-button
@@ -545,15 +506,14 @@ function clearLog() {
           </div>
         </div>
         <n-select
-          :value="spawnMode"
+          :value="ui.spawnMode"
           :options="[
             { label: '角色（Worker/Thinker）', value: 'role' },
             { label: '模板（旧形式）', value: 'template' },
           ]"
           size="small"
           style="max-width: 220px"
-          :loading="savingSpawnMode"
-          @update:value="setSpawnMode"
+          @update:value="ui.setSpawnMode"
         />
       </div>
     </n-card>
@@ -587,6 +547,37 @@ function clearLog() {
           <div class="pref-hint">默认关闭，勾选后才展示工具返回结果。保存在服务端，跨浏览器/设备生效</div>
         </div>
         <n-switch :value="ui.showToolResult" @update:value="ui.setShowToolResult" />
+      </div>
+    </n-card>
+
+    <n-card size="small" class="block">
+      <template #header>Agent 模板</template>
+      <template #header-extra>
+        <n-button size="tiny" type="primary" @click="openCreate">＋ 新建</n-button>
+      </template>
+      <div ref="templateListEl" class="template-list">
+        <div
+          v-for="template in displayTemplates"
+          :key="template.id"
+          class="template-row"
+          :class="{ dragging: dragId === template.id }"
+        >
+          <span class="drag-handle" title="拖动排序" @pointerdown="dragStart($event, template)">⠿</span>
+          <span class="dot" :style="{ background: dotColor(template) }" />
+          <div class="template-main">
+            <div class="template-name">
+              {{ template.name }}
+              <n-tag v-if="!template.enabled" size="small" :bordered="false" class="off-tag">停用</n-tag>
+              <n-tag v-if="template.autoStart" size="small" :bordered="false" type="info">自启</n-tag>
+            </div>
+            <div class="template-cmd mono">
+              <template v-if="template.harness">⚙ {{ template.harness }}{{ template.model ? ` · ${template.model}` : '' }}{{ template.preset ? ` · ${template.preset}` : '' }}{{ template.reasoningEffort ? ` · think:${template.reasoningEffort}` : '' }}</template>
+              <template v-else>{{ template.command }} {{ template.args.join(' ') }}</template>
+            </div>
+          </div>
+          <n-button size="tiny" quaternary @click="openEdit(template)">编辑</n-button>
+          <n-button size="tiny" quaternary type="error" @click="confirmRemove(template)">删</n-button>
+        </div>
       </div>
     </n-card>
 

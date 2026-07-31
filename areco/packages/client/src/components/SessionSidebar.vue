@@ -10,6 +10,7 @@ import { useExitedSessionCleanup } from '../composables/useExitedSessionCleanup'
 import type { SessionSummary } from '../../../shared/protocol'
 import { chatCapable, sessionEntryPath, statusTagText, templateColor, templateLabel, trafficColor } from '../utils/format'
 import { groupSessionsByRoom } from '../utils/sessionGroups'
+import { useSpawnWorker } from '../composables/useSpawnWorker'
 
 const store = useSessionsStore()
 const roomsStore = useRoomsStore()
@@ -20,6 +21,7 @@ const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
 const { cleanupSupported, cleanableCount, cleaning, cleanupExited } = useExitedSessionCleanup()
+const { isRoleMode, spawnWorker, handoffWorker, workerBusy } = useSpawnWorker()
 
 const emit = defineEmits<{ new: [] }>()
 
@@ -65,12 +67,14 @@ function dotColor(s: SessionSummary): string {
   return trafficColor(s.trafficState, s.status)
 }
 
-// 换 agent 接手候选：全部启用的非 shell 模板（与看板卡片/终端页同口径）
+// 换 agent 接手候选：角色模式只给「用 worker 接手」单项；模板模式列全部启用的非 shell 模板（与看板卡片同口径）
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 const handoffChildren = computed(() =>
-  store.templates
-    .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
-    .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` })),
+  isRoleMode.value
+    ? [{ label: '用 worker 接手', key: 'handoff-worker' }]
+    : store.templates
+        .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
+        .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` })),
 )
 
 // 侧栏项操作菜单（对齐手机端 SessionCard）：rename/stop/kill/restart/resume/handoff/pin/archive/unarchive/remove
@@ -128,6 +132,7 @@ function onMenu(key: string, s: SessionSummary) {
   else if (key === 'pin' || key === 'unpin') void run(() => store.pin(id, key === 'pin'))
   else if (key === 'unarchive') void run(() => store.unarchive(id))
   else if (key === 'remove') confirmRemove(id, s.name)
+  else if (key === 'handoff-worker') void handoffWorker(id)
   else if (key.startsWith('handoff:')) {
     void run(async () => {
       const next = await store.handoff(id, key.slice(8))
@@ -152,7 +157,12 @@ function onMenu(key: string, s: SessionSummary) {
           :title="cleanupSupported ? '删除全部未归档且已退出的会话' : '重启 8790 后可用'"
           @click="cleanupExited"
         >一键清理</n-button>
-        <n-button size="tiny" type="primary" @click="emit('new')">＋ 新建</n-button>
+        <n-button
+          size="tiny"
+          type="primary"
+          :loading="workerBusy"
+          @click="isRoleMode ? spawnWorker() : emit('new')"
+        >{{ isRoleMode ? '＋ worker' : '＋ 新建' }}</n-button>
       </div>
     </div>
     <div class="sidebar-list">

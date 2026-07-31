@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import { NButton, NDropdown, NTag } from 'naive-ui'
 import type { SessionSummary } from '../../../shared/protocol'
 import { useSessionsStore } from '../stores/sessions'
+import { useUiStore } from '../stores/ui'
 import { EXIT_REASON_TEXT, chatCapable, fmtTime, fmtUptime, shortPath, statusTagText, templateColor, templateLabel, trafficColor } from '../utils/format'
 
 const props = defineProps<{ session: SessionSummary; now: number }>()
@@ -19,6 +20,7 @@ const emit = defineEmits<{
   unarchive: []
   remove: []
   handoff: [templateId: string]
+  handoffWorker: []
 }>()
 
 const isLive = computed(() => ['running', 'spawning', 'stopping'].includes(props.session.status))
@@ -35,18 +37,23 @@ const subtitle = computed(() => {
 })
 
 const store = useSessionsStore()
+const ui = useUiStore()
+// 角色模式（设置页「新建会话模式 = 角色」）：接手只给「用 worker 接手」单项
+const isRoleMode = computed(() => ui.spawnMode !== 'template')
 // 可原生恢复对话的会话（claude 系/codex/codebuddy/reasonix）：重启默认续上对话
 const resumable = computed(() => chatCapable(props.session, store.templates))
 
 // 会话名已改为首条消息，agent 身份从名称里消失——底部显示模板名补上（模板已删则退回命令名）
 const templateName = computed(() => templateLabel(props.session, store.templates))
 
-// 换 agent 接手候选：全部启用的非 shell 模板（对话写成交接档案，新 agent 读档续干）
+// 换 agent 接手候选：角色模式只给「用 worker 接手」单项；模板模式列全部启用的非 shell 模板
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 const handoffChildren = computed(() =>
-  store.templates
-    .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
-    .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` }))
+  isRoleMode.value
+    ? [{ label: '用 worker 接手', key: 'handoff-worker' }]
+    : store.templates
+        .filter((t) => t.enabled && !SHELLS.has(t.command.split('/').pop() ?? ''))
+        .map((t) => ({ label: `用 ${t.name} 接手`, key: `handoff:${t.id}` })),
 )
 
 const lightColor = computed(() =>
@@ -88,6 +95,7 @@ function onMenu(key: string) {
   else if (key === 'archive') emit('archive')
   else if (key === 'unarchive') emit('unarchive')
   else if (key === 'remove') emit('remove')
+  else if (key === 'handoff-worker') emit('handoffWorker')
   else if (key.startsWith('handoff:')) emit('handoff', key.slice(8))
 }
 </script>

@@ -14,6 +14,7 @@ import SessionCard from '../components/SessionCard.vue'
 import SpawnDialog from '../components/SpawnDialog.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
 import { useExitedSessionCleanup } from '../composables/useExitedSessionCleanup'
+import { useSpawnWorker } from '../composables/useSpawnWorker'
 
 const store = useSessionsStore()
 const roomsStore = useRoomsStore()
@@ -23,6 +24,7 @@ const message = useMessage()
 const dialog = useDialog()
 const { openRename } = useRenameDialog()
 const { cleanupSupported, cleanableCount, cleaning, cleanupExited } = useExitedSessionCleanup()
+const { isRoleMode, spawnWorker, handoffWorker, workerBusy } = useSpawnWorker()
 
 const showSpawn = ref(false)
 const showArchived = ref(false)
@@ -118,7 +120,7 @@ function handoff(id: string, templateId: string) {
   <div v-if="ui.isDesktop" class="desktop-welcome">
     <n-empty v-if="!store.sessions.length" description="还没有会话">
       <template #extra>
-        <n-button type="primary" size="small" @click="showSpawn = true">新建会话</n-button>
+        <n-button type="primary" size="small" :loading="workerBusy" @click="isRoleMode ? spawnWorker() : (showSpawn = true)">{{ isRoleMode ? '＋ worker' : '新建会话' }}</n-button>
       </template>
     </n-empty>
     <div v-else class="select-hint">← 从左侧选择一个会话</div>
@@ -138,13 +140,13 @@ function handoff(id: string, templateId: string) {
           :title="cleanupSupported ? '删除全部未归档且已退出的会话' : '重启 8790 后可用'"
           @click="cleanupExited"
         >一键清理</n-button>
-        <n-button type="primary" size="small" @click="showSpawn = true">＋ 新建会话</n-button>
+        <n-button type="primary" size="small" :loading="workerBusy" @click="isRoleMode ? spawnWorker() : (showSpawn = true)">{{ isRoleMode ? '＋ worker' : '＋ 新建会话' }}</n-button>
       </div>
     </div>
 
     <n-empty v-if="store.ready && !store.sessions.length" description="还没有会话" class="empty">
       <template #extra>
-        <n-button type="primary" @click="showSpawn = true">启动第一个 agent</n-button>
+        <n-button type="primary" :loading="workerBusy" @click="isRoleMode ? spawnWorker() : (showSpawn = true)">{{ isRoleMode ? '＋ worker' : '启动第一个 agent' }}</n-button>
       </template>
     </n-empty>
 
@@ -167,6 +169,7 @@ function handoff(id: string, templateId: string) {
             @archive="archive(e.session.id)"
             @remove="confirmRemove(e.session.id, e.session.name)"
             @handoff="(templateId) => handoff(e.session.id, templateId)"
+            @handoff-worker="handoffWorker(e.session.id)"
           />
         </TransitionGroup>
       </section>
@@ -187,6 +190,7 @@ function handoff(id: string, templateId: string) {
           @archive="archive(session.id)"
           @remove="confirmRemove(session.id, session.name)"
           @handoff="(templateId) => handoff(session.id, templateId)"
+          @handoff-worker="handoffWorker(session.id)"
         />
       </TransitionGroup>
 
@@ -211,6 +215,7 @@ function handoff(id: string, templateId: string) {
             @archive="archive(session.id)"
             @remove="confirmRemove(session.id, session.name)"
             @handoff="(templateId) => handoff(session.id, templateId)"
+            @handoff-worker="handoffWorker(session.id)"
           />
         </TransitionGroup>
       </section>
@@ -240,6 +245,7 @@ function handoff(id: string, templateId: string) {
             @unarchive="unarchive(session.id)"
             @remove="confirmRemove(session.id, session.name)"
             @handoff="(templateId) => handoff(session.id, templateId)"
+            @handoff-worker="handoffWorker(session.id)"
           />
         </TransitionGroup>
       </section>

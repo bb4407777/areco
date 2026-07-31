@@ -731,9 +731,21 @@ export class ApiControllers {
   sessionHandoff = (ctx: Context) =>
     guard(ctx, () => {
       const session = this.manager.get(ctx.params.id)
-      const body = (ctx.request.body ?? {}) as { templateId?: string; name?: string }
-      if (!body.templateId) throw new Error('templateId 不能为空')
-      const template = this.templates.get(body.templateId)
+      const body = (ctx.request.body ?? {}) as { templateId?: string; role?: 'worker' | 'thinker'; name?: string }
+      let templateId = body.templateId
+      // 角色模式：role 优先于 templateId（同 spawnSession）——角色是用户意图，模板只是实现层
+      if (body.role !== undefined) {
+        if (body.role !== 'worker' && body.role !== 'thinker') {
+          throw new Error(`role 须为 worker 或 thinker（收到: ${String(body.role)}）`)
+        }
+        const resolved = resolveRoleTemplate(body.role, this.config.standcode, this.templates.list())
+        if (templateId && templateId !== resolved.templateId) {
+          log.info(`handoff 同时给了 templateId=${templateId} 与 role=${body.role}，按 role 解析为 ${resolved.templateId}（role 优先）`)
+        }
+        templateId = resolved.templateId
+      }
+      if (!templateId) throw new Error('templateId 不能为空')
+      const template = this.templates.get(templateId)
       if (!template || !template.enabled) throw new Error('模板不存在或已停用')
       if (['zsh', 'bash', 'sh', 'fish'].includes(path.basename(template.command))) {
         throw new Error('shell 模板无法接续对话')
