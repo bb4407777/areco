@@ -59,6 +59,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.get('/files/meta', c.fileMeta)
   router.get('/files/raw', c.fileRaw)
   router.post('/files/upload', c.fileUpload)
+  router.post('/files/open', c.fileOpen)
   router.post('/files/locate-dir', c.fileLocateDir)
   router.post('/files/locate-files', c.fileLocateFiles)
 

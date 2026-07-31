@@ -1,16 +1,20 @@
 <script setup lang="ts">
-// 成果栏：汇总整个对话里提到的文件产物成 chip 列表，免翻记录找文件。
+// 文件栏（原成果栏）：汇总整个对话里提到的文件产物成 chip 列表，免翻记录找文件。
 // 纯前端实现：展开时沿 transcript 分页接口把全程翻一遍（只提取路径不渲染消息），
 // 按「最后一次提及」去重排序，再逐个打 /api/files/meta 过滤掉不存在的（含历史假路径）。
+// 点击行为分端（2026-07-31 高律师定）：桌面端调 /api/files/open 用系统默认 App 直接打开，
+// 手机端保持 areco 内部预览；桌面端 open 失败时回退内部预览。
 import { ref, watch } from 'vue'
 import { NSpin } from 'naive-ui'
 import type { FileMeta, TranscriptPage } from '../../../shared/protocol'
 import { api } from '../api'
+import { useUiStore } from '../stores/ui'
 import { extractFileLinks, iconFor, type FileLink } from '../utils/filelinks'
 import { fmtBytes } from '../utils/format'
 
 const props = defineProps<{ sessionId: string; agentLabel?: string }>()
 const emit = defineEmits<{ preview: [path: string] }>()
+const ui = useUiStore()
 
 interface Artifact extends FileLink {
   size: number
@@ -112,12 +116,25 @@ function toggle() {
   open.value = !open.value
   if (open.value && !scanned.value) void scan()
 }
+
+// 点击 chip：桌面端直接系统打开，手机端内部预览；open 接口失败（如服务端未升级）回退预览
+async function onChipClick(path: string) {
+  if (!ui.isDesktop) {
+    emit('preview', path)
+    return
+  }
+  try {
+    await api.post('/api/files/open', { path })
+  } catch {
+    emit('preview', path)
+  }
+}
 </script>
 
 <template>
   <div class="artifacts">
     <button class="bar-toggle" type="button" @click="toggle">
-      <span>📦 成果</span>
+      <span>📦 文件</span>
       <span v-if="scanned" class="count">{{ items.length }}</span>
       <span class="caret">{{ open ? '▾' : '▸' }}</span>
     </button>
@@ -131,7 +148,7 @@ function toggle() {
           type="button"
           class="chip"
           :title="`${it.path}\n产出 Agent：${agentLabel || '当前 Agent'}`"
-          @click="emit('preview', it.path)"
+          @click="onChipClick(it.path)"
         >
           <span class="fi">{{ iconFor(it.ext) }}</span>
           <span class="fn">{{ it.name }}</span>

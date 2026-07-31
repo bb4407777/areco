@@ -931,6 +931,31 @@ export class ApiControllers {
       ok(ctx, this.files.meta(p))
     })
 
+  /**
+   * 桌面端「文件」栏点击 → 系统默认 App 打开（macOS `open`）。
+   * 复用 FileService.resolve 白名单 realpath 边界，与 meta/raw 同一安全口径；
+   * 仅桌面浏览器触发（手机端前端仍走内部预览，不会调到这里）。
+   */
+  fileOpen = async (ctx: Context) => {
+    const body = (ctx.request.body ?? {}) as { path?: unknown }
+    const p = typeof body.path === 'string' ? body.path.trim() : ''
+    if (!p) return fail(ctx, 400, 'bad_request', 'path 必填')
+    let real: string
+    try {
+      real = this.files.resolve(p)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const { status, code } = statusFor(message)
+      return fail(ctx, status, code, message)
+    }
+    try {
+      await execFileAsync('open', [real], { timeout: 10000 })
+      ok(ctx, { opened: real })
+    } catch (err) {
+      fail(ctx, 500, 'open_failed', err instanceof Error ? err.message : String(err))
+    }
+  }
+
   /** 原始文件流：图片/pdf/html/文本/视频直传（视频支持 Range）；as=pdf 时办公文档现转 */
   fileRaw = async (ctx: Context) => {
     const p = typeof ctx.query.path === 'string' ? ctx.query.path : ''
