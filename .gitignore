@@ -19,3 +19,10 @@ standcode/config/local.json
 # Hermes 收编目录防呆：真配置/真凭证永不入仓（仓里只放 *.example.*）
 standcode/caller/hermes/**/config.yaml
 standcode/caller/hermes/**/auth.json
+
+# worktree 里以 symlink 形式存在的共享运行态（symlink 对 git 是文件不是目录，
+# 上面的目录型 pattern（data/、/areco/bin/、node_modules/）匹配不到，需文件型补一条）
+/areco/data
+/areco/bin
+/areco/node_modules
+/standcode/data
