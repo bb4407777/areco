@@ -10,8 +10,10 @@ import { extractFileLinks, iconFor, type FileLink } from '../utils/filelinks'
 import { fmtFullTime } from '../utils/format'
 import { isTaskNotification, parseTaskNotification } from '../utils/notify'
 import { useUiStore } from '../stores/ui'
+import { useMessage } from 'naive-ui'
+import { wsClient } from '../ws'
 
-const props = defineProps<{ message: TranscriptMessage; agentLabel?: string }>()
+const props = defineProps<{ message: TranscriptMessage; agentLabel?: string; sessionId?: string; interactive?: boolean }>()
 const emit = defineEmits<{ preview: [path: string] }>()
 const ui = useUiStore()
 
@@ -51,11 +53,77 @@ async function copyReply() {
 const visibleParts = computed(() =>
   parts.value.filter((p) => {
     if (p.kind === 'thinking') return ui.showThinking
-    if (p.kind === 'tool_use') return ui.showToolUse
+    if (p.kind === 'tool_use') {
+      // AskUserQuestion 等多选询问单独渲染为可点击选项卡片，不在工具折叠里重复显示
+      if (isAskName(p.name) && !showRawAsk.value) return false
+      return ui.showToolUse
+    }
     if (p.kind === 'tool_result') return ui.showToolResult
     return true
   }),
 )
+
+// AskUserQuestion / request_user_input 等多选询问：解析成可点击选项卡片。
+// 修桥接 WorkBuddy 会话在 areco 看不到选项按钮、只能去桌面端点的问题——这里直接渲染并回传答案。
+const ASK_NAMES = ['askuserquestion', 'ask_user_question', 'request_user_input', 'requestuserinput']
+function isAskName(name: unknown): boolean {
+  const n = String(name ?? '').toLowerCase()
+  return ASK_NAMES.some((x) => n.includes(x))
+}
+const askUserBlocks = computed(() => {
+  type Opt = { label: string; description?: string }
+  const blocks: { question: string; header?: string; multiSelect: boolean; options: Opt[] }[] = []
+  for (const p of parts.value) {
+    if (p.kind !== 'tool_use' || !isAskName(p.name)) continue
+    try {
+      const parsed = JSON.parse(p.input) as { questions?: unknown[] }
+      const questions = Array.isArray(parsed?.questions) ? parsed.questions : []
+      for (const q of questions) {
+        const qo = q as { question?: string; header?: string; multiSelect?: boolean; options?: unknown[] }
+        if (!qo || !Array.isArray(qo.options)) continue
+        blocks.push({
+          question: String(qo.question ?? ''),
+          header: qo.header ? String(qo.header) : undefined,
+          multiSelect: Boolean(qo.multiSelect),
+          options: qo.options.map((o) => {
+            const oo = o as { label?: string; description?: string }
+            return { label: String(oo?.label ?? ''), description: oo?.description ? String(oo.description) : undefined }
+          }),
+        })
+      }
+    } catch {
+      /* 解析失败：交给 showRawAsk 兜底，仍按原始 tool_use 折叠显示 */
+    }
+  }
+  return blocks
+})
+// 存在解析失败的 AskUserQuestion 原始块时，不在 visibleParts 排除，避免整块丢失
+const showRawAsk = computed(() => {
+  const raw = parts.value.filter((p) => p.kind === 'tool_use' && isAskName(p.name)).length
+  return raw > askUserBlocks.value.length
+})
+
+// 选项点击 → 经 sendline 回传答案给会话（桥接会话即转发到 WorkBuddy）
+const toast = useMessage()
+const selected = ref<Record<number, string[]>>({})
+function toggleOption(blockIdx: number, label: string) {
+  const cur = selected.value[blockIdx] ?? []
+  const next = cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label]
+  selected.value = { ...selected.value, [blockIdx]: next }
+}
+function sendAnswer(text: string) {
+  if (!props.sessionId || !text.trim()) return
+  if (!wsClient.send({ type: 'sendline', sessionId: props.sessionId, text })) {
+    toast.warning('连接已断开，正在重连——文字已保留，稍后再试')
+    wsClient.reconnectNow()
+  }
+}
+function submitMulti(blockIdx: number) {
+  const chosen = selected.value[blockIdx]
+  if (!chosen || !chosen.length) return
+  sendAnswer(chosen.join('；'))
+  selected.value = { ...selected.value, [blockIdx]: [] }
+}
 
 // notice 段若是任务通知：折叠块呈现（<summary> 做标题、<result> 做正文），免得整墙 XML 糊在流里
 const notifs = computed(() => visibleParts.value.map((p) => (p.kind === 'notice' ? parseTaskNotification(p.text) : null)))
@@ -137,6 +205,45 @@ function render(text: string): string {
             <pre>{{ part.text }}</pre>
           </details>
         </template>
+        <!-- WorkBuddy AskUserQuestion 等多选询问：渲染为可点击选项卡片（桥接会话在 areco 也能直接选） -->
+        <div v-for="(block, bi) in askUserBlocks" :key="'ask' + bi" class="ask-block">
+          <div v-if="block.header" class="ask-header">{{ block.header }}</div>
+          <div class="ask-q">{{ block.question }}</div>
+          <div class="ask-opts" :class="{ off: !interactive }">
+            <template v-if="block.multiSelect">
+              <label v-for="(opt, oi) in block.options" :key="oi" class="ask-opt multi">
+                <input
+                  type="checkbox"
+                  :disabled="!interactive"
+                  :checked="(selected[bi] || []).includes(opt.label)"
+                  @change="toggleOption(bi, opt.label)"
+                />
+                <span class="ask-opt-label">{{ opt.label }}</span>
+                <span v-if="opt.description" class="ask-opt-desc">{{ opt.description }}</span>
+              </label>
+              <button
+                type="button"
+                class="ask-send"
+                :disabled="!interactive || !(selected[bi] && selected[bi].length)"
+                @click="submitMulti(bi)"
+              >确定发送</button>
+            </template>
+            <button
+              v-else
+              v-for="(opt, oi) in block.options"
+              :key="oi"
+              type="button"
+              class="ask-opt"
+              :disabled="!interactive"
+              :title="interactive ? '点击发送该选项' : '会话未运行，选项仅作记录'"
+              @click="sendAnswer(opt.label)"
+            >
+              <span class="ask-opt-label">{{ opt.label }}</span>
+              <span v-if="opt.description" class="ask-opt-desc">{{ opt.description }}</span>
+            </button>
+          </div>
+          <div v-if="!interactive" class="ask-hint">（会话未运行，选项仅作记录）</div>
+        </div>
         <div v-if="fileLinks.length" class="files">
           <button
             v-for="link in fileLinks"
@@ -343,5 +450,96 @@ function render(text: string): string {
   font-size: 10.5px;
   color: var(--faint);
   text-align: right;
+}
+.ask-block {
+  margin: 6px 0;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--ask-bg, var(--bubble-ai-bg));
+}
+.ask-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+.ask-q {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  line-height: 1.45;
+}
+.ask-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ask-opts.off {
+  opacity: 0.6;
+}
+.ask-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 1px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    transform 140ms var(--ease-out),
+    border-color 140ms;
+  touch-action: manipulation;
+}
+.ask-opt:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.ask-opt:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.ask-opt:disabled {
+  cursor: default;
+}
+.ask-opt.multi {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ask-opt.multi input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.ask-opt-label {
+  font-weight: 600;
+}
+.ask-opt-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.ask-send {
+  align-self: flex-end;
+  margin-top: 2px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.ask-send:disabled {
+  opacity: 0.4;
+}
+.ask-hint {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 4px;
 }
 </style>

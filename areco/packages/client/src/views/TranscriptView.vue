@@ -3,7 +3,7 @@
 // 增量轮询 2.5s 追新（仅页面可见时），底部 PromptBar 可直接续问。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDropdown, NSpin, NTag, useDialog, useMessage } from 'naive-ui'
+import { NButton, NDropdown, NSpin, NTag, useMessage } from 'naive-ui'
 import type { ScreenTailPayload, TranscriptMessage, TranscriptPage } from '../../../shared/protocol'
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
@@ -27,7 +27,6 @@ const router = useRouter()
 const store = useSessionsStore()
 const ui = useUiStore()
 const message = useMessage()
-const dialog = useDialog()
 const { openRename } = useRenameDialog()
 
 const sessionId = computed(() => String(route.params.id))
@@ -90,16 +89,9 @@ function onMenu(key: string) {
   else if (key === 'theme') ui.toggleTheme()
   else if (key === 'archive') void run(() => store.archive(id))
   else if (key === 'unarchive') void run(() => store.unarchive(id))
-  else if (key === 'remove') {
-    dialog.warning({
-      title: '删除会话',
-      content: `确定删除「${session.value?.name}」？记录将移除，无法恢复。`,
-      positiveText: '删除',
-      negativeText: '取消',
-      // 删除成功后 session 消失，「会话被删除→回看板」watch 自动导航
-      onPositiveClick: () => run(() => store.remove(id)),
-    })
-  } else if (key.startsWith('handoff:')) {
+  // 删除成功后 session 消失，「会话被删除→回看板」watch 自动导航
+  else if (key === 'remove') void run(() => store.remove(id))
+  else if (key.startsWith('handoff:')) {
     void run(async () => {
       const next = await store.handoff(id, key.slice(8))
       message.success('已交接给新会话')
@@ -187,6 +179,17 @@ watch(showScreen, (open) => {
 // Claude 系 AskUserQuestion 的选项等在终端里，transcript 尾消息可检出 → 面板条亮标提醒
 const awaitingChoice = computed(() => {
   return session.value?.trafficState === 'needs-user'
+})
+// 仅最新一条 AskUserQuestion 的选项可点击（避免误点历史已答问题）；workbuddy 桥接会话不标 needs-user，
+// 故用「会话在运行 + 是最后一条询问」判定（ChatMessage 内渲染可点选项卡片）
+const lastAskMessageIndex = computed(() => {
+  const list = messages.value
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].parts.some((p) => p.kind === 'tool_use' && String(p.name).toLowerCase().includes('askuserquestion'))) {
+      return i
+    }
+  }
+  return -1
 })
 // agent 正在干活：对话流尾部挂「正在输入中…」动效（对话模式没有终端滚屏的活感）
 const working = computed(() => session.value?.status === 'running' && session.value?.trafficState === 'working')
@@ -371,6 +374,8 @@ onBeforeUnmount(() => {
             :key="firstIndex + i"
             :message="msg"
             :agent-label="artifactAgent"
+            :session-id="sessionId"
+            :interactive="isLive && i === lastAskMessageIndex"
             @preview="previewPath = $event"
           />
           <div v-if="messages.length" class="stream-tail" />
