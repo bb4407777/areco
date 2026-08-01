@@ -246,7 +246,7 @@ LEGAL_CASE_KEYWORDS = (
 # 背景：GLM-5.2（智谱套餐）额度打满，重活车道（法律/代码词 → claude-glm52）瘫痪。
 # ① 重活车道锚（HEAVY_LANE_STAND）：2026-07-29 GLM 额度满期间临时改道 kimi-k3；
 #    GLM 恢复后把常量改回 "claude-glm52" 并撤 registry 停新单标记即恢复。
-HEAVY_LANE_STAND = "claude-glm52"  # 2026-07-30 GLM额度恢复，重活车道改回正常锚 claude-glm52
+HEAVY_LANE_STAND = "qclaw-flash"  # 2026-08-01 高律师令：claude CLI 已卸载（~/.npm-global 整目录丢失），claude 系车道全灭，重活锚改 qclaw-flash（QClaw openclaw DeepSeek-v4-Flash）
 # ② Stand 输出扫描：poll/harvest 链对 Stand 回复做大小写不敏感子串匹配，
 #    命中即 a) 该 stand 标停新单（写 STAND_STOP_PATH）b) 涉及车道按备胎表改道
 #    c) cc-send 微信告警高律师 d) 事件追加 StandCode SKILL.md 台账 + 审计日志。
