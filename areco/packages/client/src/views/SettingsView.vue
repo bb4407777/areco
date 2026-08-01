@@ -51,13 +51,12 @@ const savingMaxSessions = ref(false)
 
 // —— StandCode 默认角色：areco 是编辑面与 SoT，StandCode caller.py 启动时读
 // GET /api/standcode/defaults 覆盖 registry.json；角色留空 = 回落 registry.json
+// 2026-08-01 高律师定：角色统一为 Caller/Thinker/Worker 三个，快速/重活 Worker 退役，
+// 原重活 Worker 功能并入 Thinker（Thinker 默认锚 kimi-k3）
 const STANDCODE_ROLES = [
   { key: 'caller', label: 'Caller' },
   { key: 'thinker', label: 'Thinker' },
   { key: 'worker', label: 'Worker' },
-  { key: 'fastWorker', label: '快速 Worker' },
-  // 重活车道锚（2026-07-30 高律师定案）：车道锚 SoT = 本设置页，caller.py 运行时读取
-  { key: 'heavyWorker', label: '重活 Worker' },
 ] as const
 const standcodeSaved = ref<StandCodeConfig>({})
 const standcodeInput = ref<StandCodeConfig>({})
@@ -65,9 +64,6 @@ const standcodeCatalog = ref<StandCodeCatalog | null>(null)
 const savingStandcode = ref(false)
 const standcodeOptions = computed(() =>
   store.templates.filter((t) => t.enabled).map((t) => ({ label: `${t.name}（${t.id}）`, value: t.id }))
-)
-const standcodeDirty = computed(
-  () => JSON.stringify(standcodeInput.value) !== JSON.stringify(standcodeSaved.value)
 )
 async function saveStandcode() {
   savingStandcode.value = true
@@ -83,9 +79,7 @@ async function saveStandcode() {
   }
 }
 
-// 新建会话模式：角色（Worker/Thinker，默认）｜模板（旧形式）。服务端 SoT（ui.spawnMode，GET/PUT /api/ui/prefs）
-// 单一事实源 = ui store：startup 时 syncFromServer() 拉服务端覆盖本地缓存；这里切换直接走 ui.setSpawnMode（写回服务端）。
-// 角色模式下侧栏/看板的「＋ 新建会话」会变成「＋ worker」并直接拉起 Worker、不弹选择/不二次确认（见 useSpawnWorker）。
+// 新建会话模式已于 2026-08-01 取消（高律师定）：固定模板模式，设置页不再提供切换。
 const showEdit = ref(false)
 const editing = ref<Template>(emptyTemplate())
 const isCreate = ref(false)
@@ -155,7 +149,9 @@ onMounted(async () => {
     system.value = await api.get<SystemInfo>('/api/system')
     maxSessionsInput.value = system.value.maxSessions
     stats.value = await api.get<StatsSummary>('/api/stats')
-    standcodeSaved.value = await api.get<StandCodeConfig>('/api/standcode/defaults')
+    const raw = await api.get<StandCodeConfig>('/api/standcode/defaults')
+    const pick = (o: StandCodeConfig) => Object.fromEntries(STANDCODE_ROLES.map((r) => [r.key, o[r.key]]).filter(([, v]) => v)) as StandCodeConfig
+    standcodeSaved.value = pick(raw)
     standcodeInput.value = { ...standcodeSaved.value }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
@@ -471,16 +467,7 @@ function clearLog() {
 
     <n-card size="small" class="block">
       <template #header>StandCode 默认角色</template>
-      <template #header-extra>
-        <n-button
-          size="tiny"
-          secondary
-          type="primary"
-          :loading="savingStandcode"
-          :disabled="!standcodeDirty"
-          @click="saveStandcode"
-        >保存</n-button>
-      </template>
+
       <div v-for="role in STANDCODE_ROLES" :key="role.key" class="pref-row">
         <div>
           <div class="pref-label">{{ role.label }}</div>
@@ -493,28 +480,12 @@ function clearLog() {
           size="small"
           placeholder="留空 = 回落 registry.json"
           style="max-width: 320px"
+          :loading="savingStandcode"
+          @update:value="saveStandcode"
         />
       </div>
       <div class="log-tip" style="margin-top: 8px">
         StandCode caller.py 派发时优先用这里的角色默认；角色留空 = 回落 StandCode stand/registry.json 的对应默认。
-      </div>
-      <div class="pref-row" style="margin-top: 8px">
-        <div>
-          <div class="pref-label">新建会话模式</div>
-          <div class="pref-hint">
-            角色 = 新建会话只选 Worker/Thinker（默认，模板按上面映射自动解析）；模板 = 旧模板下拉形式。保存在服务端，跨浏览器/设备生效
-          </div>
-        </div>
-        <n-select
-          :value="ui.spawnMode"
-          :options="[
-            { label: '角色（Worker/Thinker）', value: 'role' },
-            { label: '模板（旧形式）', value: 'template' },
-          ]"
-          size="small"
-          style="max-width: 220px"
-          @update:value="ui.setSpawnMode"
-        />
       </div>
     </n-card>
 

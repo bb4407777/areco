@@ -13,11 +13,10 @@ import { sessionEntryPath } from '../utils/format'
 
 /** 接手角色四档（与服务端 HANDOFF_ROLES 同序）：侧栏/手机端角色模式菜单共用，避免两处漂移。
  *  模块级导出——SessionCard 等不发请求的组件只取常量，不必起整个 composable。 */
+// 2026-08-01 高律师定：快速/重活 worker 退役（重活并入 thinker），接手只剩两档
 export const HANDOFF_ROLES: { role: StandCodeRole; label: string }[] = [
   { role: 'worker', label: '用 worker 接手' },
   { role: 'thinker', label: '用 thinker 接手' },
-  { role: 'fastWorker', label: '用快速 worker 接手' },
-  { role: 'heavyWorker', label: '用重活 worker 接手' },
 ]
 
 export function useSpawnWorker() {

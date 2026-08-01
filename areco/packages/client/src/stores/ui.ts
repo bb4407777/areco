@@ -28,7 +28,7 @@ interface UiPrefs {
   spawnMode: 'role' | 'template'
 }
 
-const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false, spawnMode: 'role' }
+const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false, spawnMode: 'template' }
 
 function load(): UiPrefs {
   try {
@@ -80,14 +80,6 @@ export const useUiStore = defineStore('ui', {
     pushShowPrefs(prefs: Partial<Record<'showThinking' | 'showToolUse' | 'showToolResult', boolean | null>>) {
       putUiPrefs(prefs).catch(() => { /* 静默：旧版服务端无此端点/网络不可达时行为与纯 localStorage 一致 */ })
     },
-    /** 新建会话模式（role=只选 Worker/Thinker / template=旧模板下拉）：服务端 SoT，跨设备生效。
-     *  本地立即可见（侧栏/看板按钮即时切到 +worker），并 fire-and-forget 写回服务端 */
-    setSpawnMode(v: 'role' | 'template') {
-      if (this.spawnMode === v) return
-      this.spawnMode = v
-      this.persist()
-      putUiPrefs({ spawnMode: v }).catch(() => { /* 静默：旧版服务端无此端点时本地缓存仍有效 */ })
-    },
     /** 启动时与服务端同步显示开关：服务端有显式值的键覆盖本地并 persist；
      *  服务端无任何显式值而本地有显式选择（≠ 默认）→ 把本地三键 PUT 上去做种子。
      *  全部网络失败静默 catch（8790 旧版无此端点时行为与纯 localStorage 一致，不影响启动） */
@@ -102,11 +94,7 @@ export const useUiStore = defineStore('ui', {
         } else if (keys.some((k) => this[k] !== DEFAULT_PREFS[k])) {
           this.pushShowPrefs({ showThinking: this.showThinking, showToolUse: this.showToolUse, showToolResult: this.showToolResult })
         }
-        // 新建会话模式：服务端显式设了 role/template 才覆盖本地缓存（缺省回落 'role'）
-        if (remote.spawnMode === 'role' || remote.spawnMode === 'template') {
-          this.spawnMode = remote.spawnMode
-          this.persist()
-        }
+        // 2026-08-01 高律师定：新建会话模式已取消（固定模板），服务端残留 spawnMode 键不再应用
       } catch { /* 静默：见上 */ }
     },
     /** 应用主题到文档（CSS 变量作用域 + iOS 状态栏色） */
