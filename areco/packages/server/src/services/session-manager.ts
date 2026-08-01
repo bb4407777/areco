@@ -194,7 +194,8 @@ export class SessionManager extends EventEmitter {
       name?: string
       resumeClaudeSessionId?: string
       extraArgs?: string[]
-      /** 原生 WorkBuddy 历史恢复 ID；官方 harness 走 --resume，桥接模板由调用方继续用 extraArgs。 */
+      /** 原生历史恢复 ID（workbuddy/kimi 等）：启动前钉死 agentSessionId 并复用重复绑定守卫。
+       *  官方 workbuddy harness 由 buildSpawnSpec 注入 --resume；kimi 等的恢复 flag 仍由调用方经 extraArgs 传。 */
       resumeAgentSessionId?: string
       agentBindingPrompt?: string
       /** 项目内 spawn：绑定 room 归属（删项目级联删专属会话用） */
@@ -248,7 +249,10 @@ export class SessionManager extends EventEmitter {
     const nativeWorkbuddyId = template.harness === 'workbuddy'
       ? resumeAgentId || crypto.randomUUID()
       : null
-    if (nativeWorkbuddyId) session.bindAgentSession(nativeWorkbuddyId)
+    // 非 workbuddy 的原生恢复（kimi -S 经 extraArgs）续写的是旧会话文件，birth 远在本卡
+    // 启动之前，时间窗认亲永远排除它——恢复 id 必须启动前钉死，locate 走 exactAgentFile。
+    const presetAgentId = nativeWorkbuddyId ?? resumeAgentId
+    if (presetAgentId) session.bindAgentSession(presetAgentId)
     this.wire(session)
     this.sessions.set(session.id, session)
     if (opts.agentBindingPrompt) session.setAgentBindingPrompt(opts.agentBindingPrompt)
@@ -315,6 +319,9 @@ export class SessionManager extends EventEmitter {
         const file = locateAgentFile(session, kind)
         const sid = session.agentSessionId || (file ? codexSessionIdOf(file) : '')
         if (sid) {
+          // sid 来自定位文件时回写绑定：恢复后 startedAt 换新 epoch，时间窗认亲会把
+          // 旧文件排除在外，不钉死 id 的卡片重启后就永远定位不到 transcript。
+          session.bindAgentSession(sid)
           extraArgs = ['resume', sid]
           didResume = true
         }
@@ -331,6 +338,8 @@ export class SessionManager extends EventEmitter {
         const file = locateAgentFile(session, kind)
         const sid = session.agentSessionId || (file ? kimiSessionIdOf(file) : '')
         if (sid) {
+          // 同 codex：-S 续写的是旧 wire 文件，新 epoch 的时间窗认不上它，必须钉死 id
+          session.bindAgentSession(sid)
           extraArgs = ['-S', sid]
           didResume = true
         }

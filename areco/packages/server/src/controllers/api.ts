@@ -647,7 +647,14 @@ export class ApiControllers {
         const body = (ctx.request.body ?? {}) as { templateId?: string; name?: string }
         const template = body.templateId ? this.templates.get(body.templateId) : this.templateByCommand('kimi')
         if (!template) throw new Error('没有可用的 kimi 模板')
-        ok(ctx, this.manager.spawn(template.id, { cwd, name: body.name, extraArgs: ['-S', id] }))
+        // resumeAgentSessionId 必传：-S 续写的旧 wire 文件 birth 在本卡启动前，时间窗认亲
+        // 永远排除它，不钉死 id 卡片就永远定位不到 transcript——对话模式一直空白。
+        ok(ctx, this.manager.spawn(template.id, {
+          cwd,
+          name: body.name,
+          extraArgs: ['-S', id],
+          resumeAgentSessionId: id,
+        }))
         return
       }
       // codex / workbuddy（chatlog 层）：原生 resume——codex `resume <uuid>`，codebuddy `--resume <uuid>`；
@@ -670,11 +677,16 @@ export class ApiControllers {
           : template.harness === 'workbuddy'
             ? undefined
             : ['--resume', rawId]
+        // codex 也预置原生 id：resume 用同一 session id 回放历史写新 rollout，钉死后 locate
+        // 走 exactAgentFile（配合同 id 多文件取最新）。workbuddy 桥接模板仍由 PTY 输出直绑。
         ok(ctx, this.manager.spawn(template.id, {
           cwd: cwd || undefined,
           name: body.name,
           extraArgs,
-          resumeAgentSessionId: source === 'workbuddy' && template.harness === 'workbuddy' ? rawId : undefined,
+          resumeAgentSessionId:
+            source === 'codex' || (source === 'workbuddy' && template.harness === 'workbuddy')
+              ? rawId
+              : undefined,
         }))
         return
       }

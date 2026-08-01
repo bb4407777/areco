@@ -586,7 +586,14 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
   if (hit) {
     const st = statSafe(hit.path)
     const cachedId = nativeSessionId(hit.path, kind)
-    if (st && st.size > 0 && (!cachedId || !gate?.(cachedId))) return hit.path
+    // codex 恢复把活文件轮换成新 rollout：运行中若缓存的还是本 epoch 之前出生的文件，
+    // 视为陈旧重扫，等新 rollout 落盘后接管（正常会话的文件生于 epoch 附近，不受影响）。
+    const preEpochStale =
+      kind === 'codex' &&
+      session.isRunning &&
+      st !== null &&
+      (st.birthtimeMs || st.mtimeMs) < (session.startedAt ?? session.createdAt) - BIRTH_SLACK_MS
+    if (st && st.size > 0 && !preEpochStale && (!cachedId || !gate?.(cachedId))) return hit.path
     locateCache.delete(session.id)
   }
   const startedAt = session.startedAt ?? session.createdAt
@@ -613,6 +620,13 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
           .filter((name) => name.endsWith('.jsonl'))
           .map((name) => path.join(root, name))
           .filter((file) => codexSessionIdOf(file) === session.agentSessionId)
+        // codex resume 用同一 session id 回放历史写新 rollout：同 id 多文件时最新那份才是
+        // 活文件（旧文件在恢复那刻冻结），排最前让 uniqueAgentFiles/exactAgentFile 都取它。
+        files.sort((a, b) => {
+          const bs = statSafe(b)
+          const as = statSafe(a)
+          return (bs ? bs.birthtimeMs || bs.mtimeMs : 0) - (as ? as.birthtimeMs || as.mtimeMs : 0)
+        })
       } catch {
         files = []
       }
