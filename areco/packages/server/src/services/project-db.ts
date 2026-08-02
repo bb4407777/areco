@@ -123,24 +123,41 @@ function seedProjectSequences(db: DatabaseSync): void {
   }
 }
 
-// ── kind 路由：data/rooms.json 的房间 kind（mtime 缓存），查无兜底 task ──
+// ── kind 路由：data/rooms.json 的房间 kind（mtime 缓存 + 2s stat TTL），查无兜底 task ──
+// tick 每秒对每个活跃房间 history() 一次，路由若每次 statSync 就是每秒几十次冗余
+// syscall——mtime 缓存判「要不要重读」，TTL 判「要不要重 stat」。建房落盘 → 首条消息
+// 之间远超 2s，感知延迟无实害。
+const ROOMS_STAT_TTL_MS = 2000
 let roomsKindCache: { mtimeMs: number; kinds: Map<string, DbKind> } | null = null
+let roomsStatAtMs = 0
+let roomsWarnAtMs = 0
 
 export function dbKindForTeam(team: string): DbKind {
   try {
-    const st = fs.statSync(ROOMS_JSON)
-    if (!roomsKindCache || roomsKindCache.mtimeMs !== st.mtimeMs) {
-      const arr = JSON.parse(fs.readFileSync(ROOMS_JSON, 'utf8'))
-      const kinds = new Map<string, DbKind>()
-      if (Array.isArray(arr))
-        for (const r of arr)
-          if (r && typeof r === 'object' && r.team)
-            kinds.set(String(r.team), r.kind === 'project' ? 'project' : 'task')
-      roomsKindCache = { mtimeMs: st.mtimeMs, kinds }
+    const now = Date.now()
+    if (!roomsKindCache || now - roomsStatAtMs >= ROOMS_STAT_TTL_MS) {
+      roomsStatAtMs = now
+      const st = fs.statSync(ROOMS_JSON)
+      if (!roomsKindCache || roomsKindCache.mtimeMs !== st.mtimeMs) {
+        const arr = JSON.parse(fs.readFileSync(ROOMS_JSON, 'utf8'))
+        const kinds = new Map<string, DbKind>()
+        if (Array.isArray(arr))
+          for (const r of arr)
+            if (r && typeof r === 'object' && r.team)
+              kinds.set(String(r.team), r.kind === 'project' ? 'project' : 'task')
+        roomsKindCache = { mtimeMs: st.mtimeMs, kinds }
+      }
     }
     return roomsKindCache.kinds.get(team) ?? 'task'
-  } catch {
-    return 'task' // rooms.json 缺失/损坏：兜底任务库（与旧单库行为一致）
+  } catch (err) {
+    // rooms.json 缺失/损坏：兜底任务库（与旧单库行为一致）。损坏时项目房消息会
+    // 错落任务库——不能全静默，节流告警（60s 一次）留可观测线索。
+    const now = Date.now()
+    if (now - roomsWarnAtMs > 60_000) {
+      roomsWarnAtMs = now
+      console.warn(`[project-db] rooms.json 不可读，kind 路由兜底 tasks.db：${err instanceof Error ? err.message : err}`)
+    }
+    return 'task'
   }
 }
 
@@ -148,22 +165,39 @@ function openFor(team: string): DatabaseSync {
   return open(dbKindForTeam(team))
 }
 
+/** 库文件存在性（单调缓存：打开过/见过即永真——库只增建不删除，false 才重查盘） */
+const dbFileSeen: Record<DbKind, boolean> = { task: false, project: false }
+function dbFileExists(kind: DbKind): boolean {
+  if (dbFileSeen[kind] || sharedDbs[kind]) return (dbFileSeen[kind] = true)
+  if (fs.existsSync(DB_PATHS[kind])) return (dbFileSeen[kind] = true)
+  return false
+}
+
 /** 已落盘的库集合（存在才 open，只读路径不误建空库），task 在前保持顺查稳定序 */
 function existingDbs(): DatabaseSync[] {
   const out: DatabaseSync[] = []
-  for (const kind of ['task', 'project'] as DbKind[]) if (fs.existsSync(DB_PATHS[kind])) out.push(open(kind))
+  for (const kind of ['task', 'project'] as DbKind[]) if (dbFileExists(kind)) out.push(open(kind))
   return out
+}
+
+/** 按 id 定库的候选序（利用 seed 错位免探测）：
+ *  id ≥ SEED → 只可能在 projects.db（seed 硬保证，O(1) 直路由）；
+ *  id < SEED → 大概率 tasks.db（任务消息量大），miss 回退 projects.db
+ *  （迁移保留原 id 的存量项目数据，随时间自然淡出热路径）。 */
+function dbsForId(id: number): DatabaseSync[] {
+  if (id >= PROJECT_ID_SEED) return dbFileExists('project') ? [open('project')] : []
+  return existingDbs()
 }
 
 /** 含指定消息 id 的库（两库 id 永不相撞，最多命中一个） */
 function dbWithMessage(id: number): DatabaseSync | null {
-  for (const db of existingDbs()) if (db.prepare('SELECT 1 FROM messages WHERE id = ?').get(id)) return db
+  for (const db of dbsForId(id)) if (db.prepare('SELECT 1 FROM messages WHERE id = ?').get(id)) return db
   return null
 }
 
 /** 含指定 dispatch id 的库 */
 function dbWithDispatch(id: number): DatabaseSync | null {
-  for (const db of existingDbs()) if (db.prepare('SELECT 1 FROM dispatch WHERE id = ?').get(id)) return db
+  for (const db of dbsForId(id)) if (db.prepare('SELECT 1 FROM dispatch WHERE id = ?').get(id)) return db
   return null
 }
 
@@ -263,7 +297,7 @@ export function send(
 /** 消息流：按 team 拉最近 limit 条，升序返回 */
 export function history(team: string, limit = 100): ProjectMessageRow[] {
   const kind = dbKindForTeam(team)
-  if (!fs.existsSync(DB_PATHS[kind])) return []
+  if (!dbFileExists(kind)) return []
   const db = open(kind)
   try {
     const rows = db.prepare('SELECT * FROM messages WHERE team=? ORDER BY id DESC LIMIT ?').all(team, limit)
@@ -279,8 +313,8 @@ export function history(team: string, limit = 100): ProjectMessageRow[] {
  */
 export function correctMessageSender(id: number, newFrom: string): void {
   if (!newFrom.trim()) throw new Error('newFrom 不能为空')
-  // id 两库无撞：逐库 UPDATE，命中即止（no-op UPDATE 零伤害）
-  for (const db of existingDbs()) {
+  // id 两库无撞：按 seed 范围直路由（≥SEED 单库 O(1)），命中即止
+  for (const db of dbsForId(id)) {
     const res = db.prepare('UPDATE messages SET from_agent = ? WHERE id = ?').run(newFrom, id)
     if (Number(res.changes) > 0) return
   }
@@ -440,7 +474,7 @@ export function dispatchById(id: number): DispatchRow | null {
 /** 房间的 dispatch 列表（按 id 倒序，新的在前），各自带 deliveries（成员顺序） */
 export function listDispatches(team: string, limit = 50): DispatchWithDeliveries[] {
   const kind = dbKindForTeam(team)
-  if (!fs.existsSync(DB_PATHS[kind])) return []
+  if (!dbFileExists(kind)) return []
   const db = open(kind)
   try {
     const rows = db.prepare('SELECT * FROM dispatch WHERE team = ? ORDER BY id DESC LIMIT ?').all(team, limit)
@@ -481,7 +515,7 @@ export function updateDelivery(
     vals.push(patch.correlationId)
   }
   if (!sets.length) return
-  for (const db of existingDbs()) {
+  for (const db of dbsForId(id)) {
     const res = db
       .prepare(`UPDATE delivery SET ${sets.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`)
       .run(...vals, id)
@@ -518,7 +552,7 @@ export function setDispatchState(
     vals.push(patch.cancelReason)
   }
   if (!sets.length) return
-  for (const db of existingDbs()) {
+  for (const db of dbsForId(id)) {
     const res = db
       .prepare(`UPDATE dispatch SET ${sets.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`)
       .run(...vals, id)
@@ -529,7 +563,7 @@ export function setDispatchState(
 /** 房间内全部 active 的 serial dispatch（按 id 升序）；串行推进/超时扫描用 */
 export function activeSerialDispatches(team: string): DispatchRow[] {
   const kind = dbKindForTeam(team)
-  if (!fs.existsSync(DB_PATHS[kind])) return []
+  if (!dbFileExists(kind)) return []
   const db = open(kind)
   try {
     const rows = db
