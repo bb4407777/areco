@@ -75,7 +75,7 @@ python3 caller/caller.py run --wait "回复两个字：成功"
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `ARECO_BASE` | `http://127.0.0.1:8790` | areco 服务地址 |
-| `ARECO_ROOT` | `~/Code/StandCode/areco` | areco 底座根（直写 tasks.db 用） |
+| `ARECO_ROOT` | `~/Code/StandCode/areco` | areco 底座根（直写 projects.db 用） |
 | `CC_SEND_BIN` | `cc-send`（或 config/local.json） | 微信代发脚本 |
 | `WECHAT_TARGET` | 空（或 config/local.json） | 微信目标会话；空 = 跳过代发 |
 | `STANDCODE_TASKS_DIR` | `~/.standcode/tasks` | 任务状态目录 |
@@ -85,7 +85,7 @@ python3 caller/caller.py run --wait "回复两个字：成功"
 姊妹项目：areco 是通用会话底座（PTY 会话/房间/消息/看板/模板），StandCode 是其上的编排语义层。集成面：
 
 - **REST**：建房、加 Stand（`/api/rooms`）；任务面板（`/api/tasks`）
-- **tasks.db**：房间消息直写（带 `human_relay` 转述闸）
+- **projects.db**：房间消息直写（带 `human_relay` 转述闸）
 - **模板引用**：`stand/registry.json` 的角色默认直接填 areco 现有模板 id；模板若带 harness/model/preset 字段，spawn 时 areco 侧 `standcode-resolver` 读本仓 `config/` 字典现场解析
 - **看板**：Stand 即 areco 会话，活动任务自动置顶
 

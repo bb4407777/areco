@@ -177,7 +177,7 @@ from caller import Caller
 
 caller = Caller(
     base_url="http://127.0.0.1:8790",  # areco 服务地址
-    projects_db="$ARECO_ROOT/data/tasks.db",  # SQLite 消息库
+    projects_db="$ARECO_ROOT/data/projects.db",  # SQLite 消息库
     registry_path="stand/registry.json",  # Stand 注册表
 )
 ```
@@ -510,7 +510,7 @@ msg = caller.aggregate_results([
 
 ## 消息协议
 
-### 消息表结构（areco `tasks.db`，REST 与 SQLite 同源）
+### 消息表结构（areco `projects.db`，REST 与 SQLite 同源）
 
 ```sql
 CREATE TABLE messages (

@@ -73,7 +73,7 @@ standcode/caller/caller.py
   ├─ dispatch                       选模板、建房/复用会话、投递任务
   │    │
   │    ▼
-  │  areco REST + tasks.db
+  │  areco REST + projects.db
   │    ├─ standcode-resolver.ts     解析角色、harness、model、preset
   │    ├─ rooms/controllers/routes  建项目房与成员
   │    └─ session-manager/session   拉起并承载真实 CLI 会话

@@ -23,7 +23,7 @@ flowchart TB
     subgraph 底座层["底座层 areco/（127.0.0.1:8790）"]
         API["packages/server<br/>controllers/api.ts（STANDCODE_CALLER）"]
         Resolver["services/standcode-resolver.ts<br/>standcodeRoot() 解析角色/harness/model"]
-        Rooms["services/rooms.ts + tasks.db<br/>项目房间/成员/消息"]
+        Rooms["services/rooms.ts + projects.db<br/>项目房间/成员/消息"]
         SM["services/session-manager.ts<br/>拉起/承载真实 CLI 会话（PTY）"]
         WS["ws/gateway.ts<br/>attach/detach/resize"]
         Board["packages/client（Vue 3）<br/>网页看板"]
