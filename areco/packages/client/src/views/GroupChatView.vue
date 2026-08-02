@@ -472,6 +472,70 @@ function toggleGroup(id: string) {
   expandedGroups.value = s
 }
 
+// ---- 派生组前缀树（2026-07-30 高律师定：同路径前缀合并为一级节点，下面再展开）----
+// 行模型：node=路径节点（/Users/gao/Desktop 一级 → 已归档 二级…）；entries=派生组栏位
+// （组名即节点路径，栏位直挂节点下，不再单列组头）；group=人工分组（含全部操作按钮）。
+type CatRow =
+  | { kind: 'node'; key: string; label: string; depth: number; count: number; open: boolean }
+  | { kind: 'entries'; g: ProjectCatalogGroup; depth: number }
+  | { kind: 'group'; g: ProjectCatalogGroup; depth: number }
+
+interface CatTreeNode {
+  key: string
+  label: string
+  own?: ProjectCatalogGroup
+  children: Map<string, CatTreeNode>
+}
+
+const nodeOpen = (key: string) => !!nameFilter.value.trim() || expandedGroups.value.has(key)
+
+/** 层级灰度：一级节点最深，逐级变浅（不缩进也能分清父子层） */
+const NODE_COLORS = ['var(--text)', 'var(--muted)', 'var(--faint)']
+const nodeColor = (depth: number) => NODE_COLORS[Math.min(depth, NODE_COLORS.length - 1)]
+
+const catalogRows = computed<CatRow[]>(() => {
+  const roots = new Map<string, CatTreeNode>()
+  const nodeFor = (map: Map<string, CatTreeNode>, key: string, label: string): CatTreeNode => {
+    let n = map.get(key)
+    if (!n) {
+      n = { key, label, children: new Map() }
+      map.set(key, n)
+    }
+    return n
+  }
+  for (const g of filteredCatalog.value) {
+    if (!g.derived) continue
+    const base = g.base ?? g.label
+    const root = nodeFor(roots, base, base)
+    if (g.label === base) {
+      root.own = g // 组名 == 基底本身（如 /Users/gao/skills）：栏位直挂根节点
+      continue
+    }
+    let cur = root
+    let prefix = base
+    const segs = g.label.slice(base.length + 1).split('/')
+    segs.forEach((seg, i) => {
+      prefix = `${prefix}/${seg}`
+      cur = nodeFor(cur.children, prefix, seg)
+      if (i === segs.length - 1) cur.own = g
+    })
+  }
+  const countOf = (n: CatTreeNode): number =>
+    (n.own?.entries.length ?? 0) + [...n.children.values()].reduce((s, c) => s + countOf(c), 0)
+  const rows: CatRow[] = []
+  const walk = (n: CatTreeNode, depth: number) => {
+    const count = countOf(n)
+    if (!count) return // 搜索过滤后的空子树不渲染
+    rows.push({ kind: 'node', key: n.key, label: n.label, depth, count, open: nodeOpen(n.key) })
+    if (!nodeOpen(n.key)) return
+    if (n.own) rows.push({ kind: 'entries', g: n.own, depth: depth + 1 })
+    for (const c of [...n.children.values()].sort((a, b) => a.label.localeCompare(b.label, 'zh-Hans-CN'))) walk(c, depth + 1)
+  }
+  for (const r of [...roots.values()].sort((a, b) => a.key.localeCompare(b.key))) walk(r, 0)
+  for (const g of filteredCatalog.value) if (!g.derived) rows.push({ kind: 'group', g, depth: 0 })
+  return rows
+})
+
 function entryDot(e: ProjectCatalogEntry): string {
   const r = e.roomId ? rooms.byId(e.roomId) : undefined
   return r ? roomDotColor(r) : 'var(--border-strong)'
@@ -510,7 +574,7 @@ const dlgTitle = computed(() =>
   dlg.value?.mode === 'rename'
     ? `重命名分组「${dlg.value.group?.label}」`
     : dlg.value?.mode === 'add'
-      ? `入组：加文件夹到「${dlg.value.group?.label}」`
+      ? `加入分组：把项目加入到「${dlg.value.group?.label}」项目分组`
       : '新建分组'
 )
 const dlgPlaceholder = computed(() =>
@@ -540,6 +604,19 @@ async function submitDlg() {
 async function removeFromGroup(g: ProjectCatalogGroup, e: ProjectCatalogEntry) {
   try {
     await api.post(`/api/projects/groups/${g.id}/members/remove`, { path: e.path })
+    await loadCatalog()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** 删除分组：只删目录册归属，文件夹与已开的房间都不动 */
+async function deleteGroup(g: ProjectCatalogGroup) {
+  try {
+    await api.post(`/api/projects/groups/${g.id}/delete`, {})
+    const s = new Set(expandedGroups.value)
+    s.delete(g.id)
+    expandedGroups.value = s
     await loadCatalog()
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
@@ -620,7 +697,7 @@ onMounted(async () => {
     <!-- 项目栏：桌面常驻侧栏，手机为浮层 -->
     <aside class="rooms" :class="{ overlay: ui.isMobile, open: !ui.isMobile || mobileRoomsOpen }">
       <div class="rooms-head">
-        <span class="rooms-title">当前{{ kindLabel }}</span>
+        <span class="rooms-title">{{ kindLabel }}列表</span>
         <button
           class="icon-btn"
           :title="kind === 'project' ? '新建项目分组' : '新建任务'"
@@ -632,20 +709,20 @@ onMounted(async () => {
         <!-- 项目 tab = 目录册：分组标题 → 每文件夹一栏，点开才按需开房；任务 tab 保持原房间列表 -->
         <template v-if="kind === 'project'">
           <div v-if="!catalogSupported" class="cat-hint">目录册需 8790 重启后生效（前端已就绪）</div>
-          <div v-else-if="catalogLoaded && !catalogConfigured" class="cat-hint">还没有分组：点下方「＋ 新建分组」建一个，再用 ＋ 入组加文件夹</div>
-          <template v-for="g in filteredCatalog" :key="g.id">
-            <div class="cat-head">
-              <button class="cat-toggle" @click="toggleGroup(g.id)">
-                <span class="cat-caret">{{ groupOpen(g) ? '▾' : '▸' }}</span>
-                <span class="cat-label">{{ g.label }}</span>
-                <span class="cat-count">{{ g.entries.length }}</span>
+          <div v-else-if="catalogLoaded && !catalogConfigured" class="cat-hint">还没有分组：点下方「＋ 新建分组」建一个，再展开分组点第一行「＋ 入组」加文件夹</div>
+          <template v-for="row in catalogRows" :key="row.kind === 'node' ? `n:${row.key}` : `${row.kind}:${row.g.id}`">
+            <!-- 路径节点：同前缀合并的一级/二级，计数含全部后代栏位（不缩进，灰度分层） -->
+            <div v-if="row.kind === 'node'" class="cat-head" :style="{ color: nodeColor(row.depth) }">
+              <button class="cat-toggle" @click="toggleGroup(row.key)">
+                <span class="cat-caret">{{ row.open ? '▾' : '▸' }}</span>
+                <span class="cat-label">{{ row.label }}</span>
+                <span class="cat-count">{{ row.count }}</span>
               </button>
-              <button class="cat-op" title="重命名分组" @click="openDlg('rename', g)">✎</button>
-              <button class="cat-op" :title="`入组：把文件夹加进「${g.label}」`" @click="openDlg('add', g)">＋</button>
             </div>
-            <template v-if="groupOpen(g)">
+            <!-- 派生组栏位：组名 = 节点路径，栏位直挂节点下（只读，无出组/入组） -->
+            <template v-else-if="row.kind === 'entries'">
               <div
-                v-for="e in g.entries"
+                v-for="e in row.g.entries"
                 :key="e.path"
                 class="room-item cat-entry"
                 :class="{ active: !!e.roomId && e.roomId === activeId }"
@@ -655,12 +732,42 @@ onMounted(async () => {
                   <span class="room-name">{{ e.name }}</span>
                   <span v-if="e.roomId && rooms.unread(e.roomId)" class="badge">{{ rooms.unread(e.roomId) }}</span>
                 </button>
-                <NPopconfirm @positive-click="removeFromGroup(g, e)">
-                  <template #trigger><button class="chip-x" title="出组（不删文件夹，不删已开的房间）">×</button></template>
-                  把「{{ e.name }}」移出分组「{{ g.label }}」？
+              </div>
+            </template>
+            <!-- 人工分组：完整操作（改名/删除/入组/出组） -->
+            <template v-else>
+              <div class="cat-head">
+                <button class="cat-toggle" @click="toggleGroup(row.g.id)">
+                  <span class="cat-caret">{{ groupOpen(row.g) ? '▾' : '▸' }}</span>
+                  <span class="cat-label">{{ row.g.label }}</span>
+                  <span class="cat-count">{{ row.g.entries.length }}</span>
+                </button>
+                <button class="cat-op" title="重命名分组" @click="openDlg('rename', row.g)">✎</button>
+                <NPopconfirm @positive-click="deleteGroup(row.g)">
+                  <template #trigger><button class="cat-op" title="删除分组（不删文件夹，不删已开的房间）">🗑</button></template>
+                  删除分组「{{ row.g.label }}」？只删分组归属，不动文件夹与已开的房间。
                 </NPopconfirm>
               </div>
-              <div v-if="!g.entries.length" class="cat-empty">空组：点 ＋ 入组</div>
+              <template v-if="groupOpen(row.g)">
+                <button class="cat-add-row" :title="`入组：把文件夹加进「${row.g.label}」`" @click="openDlg('add', row.g)">＋ 入组</button>
+                <div
+                  v-for="e in row.g.entries"
+                  :key="e.path"
+                  class="room-item cat-entry"
+                  :class="{ active: !!e.roomId && e.roomId === activeId }"
+                >
+                  <button class="cat-open" :disabled="openingPath === e.path" :title="e.path" @click="openEntry(e)">
+                    <span class="room-dot" :style="{ background: entryDot(e) }" />
+                    <span class="room-name">{{ e.name }}</span>
+                    <span v-if="e.roomId && rooms.unread(e.roomId)" class="badge">{{ rooms.unread(e.roomId) }}</span>
+                  </button>
+                  <NPopconfirm @positive-click="removeFromGroup(row.g, e)">
+                    <template #trigger><button class="chip-x" title="出组（不删文件夹，不删已开的房间）">×</button></template>
+                    把「{{ e.name }}」移出分组「{{ row.g.label }}」？
+                  </NPopconfirm>
+                </div>
+                <div v-if="!row.g.entries.length" class="cat-empty">空组：点上方 ＋ 入组</div>
+              </template>
             </template>
           </template>
           <button v-if="catalogSupported" class="archive-toggle" @click="openDlg('newgroup')">
@@ -786,11 +893,12 @@ onMounted(async () => {
             :title="rooms.archiveSupported ? `归档${kindLabel}` : '重启 8790 后可归档'"
             @click="archiveRoom"
           >归档{{ kindLabel }}</NButton>
-          <NPopconfirm @positive-click="removeRoom">
+          <NButton v-if="kind === 'task'" size="tiny" secondary type="error" @click="removeRoom">删除任务</NButton>
+          <NPopconfirm v-else @positive-click="removeRoom">
             <template #trigger>
-              <NButton size="tiny" secondary type="error">删除{{ kindLabel }}</NButton>
+              <NButton size="tiny" secondary type="error">删除项目</NButton>
             </template>
-            确定删除{{ kindLabel }}「{{ room.name }}」？{{ kindLabel }}及其内部会话将一并删除（多房共享的会话保留），此操作不可恢复。
+            确定删除项目「{{ room.name }}」？项目及其内部会话将一并删除（多房共享的会话保留），此操作不可恢复。
           </NPopconfirm>
         </header>
 
@@ -1043,6 +1151,24 @@ onMounted(async () => {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+/* 组内第一行的「＋ 入组」：与组内栏位同缩进，低调可点 */
+.cat-add-row {
+  display: block;
+  width: calc(100% - 10px);
+  margin: 0 5px;
+  padding: 6px 0 6px 17px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.cat-add-row:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 .cat-head {
   display: flex;

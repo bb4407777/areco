@@ -3,7 +3,7 @@
 // 桌面端在 SessionLayout 侧边栏已显示会话列表，本页仅在内容区显示欢迎/空状态
 import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
-import { NButton, NEmpty, useDialog, useMessage } from 'naive-ui'
+import { NButton, NEmpty, useMessage } from 'naive-ui'
 import type { SessionSummary } from '../../../shared/protocol'
 import { useSessionsStore } from '../stores/sessions'
 import { useRoomsStore } from '../stores/rooms'
@@ -21,7 +21,6 @@ const roomsStore = useRoomsStore()
 const ui = useUiStore()
 const router = useRouter()
 const message = useMessage()
-const dialog = useDialog()
 const { openRename } = useRenameDialog()
 const { cleanupSupported, cleanableCount, cleaning, cleanupExited } = useExitedSessionCleanup()
 const { isRoleMode, spawnWorker, handoffRole, workerBusy } = useSpawnWorker()
@@ -100,16 +99,8 @@ function unarchive(id: string) {
   })
 }
 
-function confirmRemove(id: string, name: string) {
-  const s = store.byId(id)
-  const running = !!s && ['running', 'spawning', 'stopping'].includes(s.status)
-  dialog.warning({
-    title: '删除会话',
-    content: `删除「${name}」？卡片与终端快照将永久清除（agent 对话日志不受影响，仍可在「历史」页查看）。${running ? '会话运行中，将先终止进程。' : ''}只想移出看板可改用「归档」。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    onPositiveClick: () => run(() => store.remove(id)),
-  })
+function remove(id: string) {
+  void run(() => store.remove(id))
 }
 
 function handoff(id: string, templateId: string) {
@@ -173,7 +164,7 @@ function handoff(id: string, templateId: string) {
             @rename="openRename(e.session.id, e.session.name)"
             @pin="(pinned) => run(() => store.pin(e.session.id, pinned))"
             @archive="archive(e.session.id)"
-            @remove="confirmRemove(e.session.id, e.session.name)"
+            @remove="remove(e.session.id)"
             @handoff="(templateId) => handoff(e.session.id, templateId)"
             @handoff-role="(role) => handoffRoleByKey(e.session.id, role)"
           />
@@ -194,7 +185,7 @@ function handoff(id: string, templateId: string) {
           @rename="openRename(session.id, session.name)"
           @pin="(pinned) => run(() => store.pin(session.id, pinned))"
           @archive="archive(session.id)"
-          @remove="confirmRemove(session.id, session.name)"
+          @remove="remove(session.id)"
           @handoff="(templateId) => handoff(session.id, templateId)"
           @handoff-role="(role) => handoffRoleByKey(session.id, role)"
         />
@@ -219,7 +210,7 @@ function handoff(id: string, templateId: string) {
             @rename="openRename(session.id, session.name)"
             @pin="(pinned) => run(() => store.pin(session.id, pinned))"
             @archive="archive(session.id)"
-            @remove="confirmRemove(session.id, session.name)"
+            @remove="remove(session.id)"
             @handoff="(templateId) => handoff(session.id, templateId)"
             @handoff-role="(role) => handoffRoleByKey(session.id, role)"
           />
@@ -249,7 +240,7 @@ function handoff(id: string, templateId: string) {
             @rename="openRename(session.id, session.name)"
             @pin="(pinned) => run(() => store.pin(session.id, pinned))"
             @unarchive="unarchive(session.id)"
-            @remove="confirmRemove(session.id, session.name)"
+            @remove="remove(session.id)"
             @handoff="(templateId) => handoff(session.id, templateId)"
             @handoff-role="(role) => handoffRoleByKey(session.id, role)"
           />

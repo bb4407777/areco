@@ -22,6 +22,7 @@ rooms.loadReadState()
 const ui = useUiStore(pinia)
 ui.applyTheme() // mount 前先定主题，防闪白/闪黑
 ui.watchViewport()
+ui.syncFromServer() // 显示开关服务端为 SoT：拉取覆盖本地缓存；失败静默回落 localStorage
 startFrontendUpdateWatcher({
   hasUnsavedWork: () => {
     if (Object.values(ui.drafts).some((text) => text.trim())) return true

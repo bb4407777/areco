@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDropdown, useDialog, useMessage } from 'naive-ui'
+import { NButton, NDropdown, useMessage } from 'naive-ui'
 import { useSessionsStore } from '../stores/sessions'
 import { useRoomsStore } from '../stores/rooms'
 import { useUiStore } from '../stores/ui'
@@ -18,7 +18,6 @@ const ui = useUiStore()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const dialog = useDialog()
 const { openRename } = useRenameDialog()
 const { cleanupSupported, cleanableCount, cleaning, cleanupExited } = useExitedSessionCleanup()
 const { isRoleMode, spawnWorker, handoffRole, workerBusy } = useSpawnWorker()
@@ -112,16 +111,6 @@ async function run(action: () => Promise<unknown>) {
   }
 }
 
-function confirmRemove(id: string, name: string) {
-  dialog.warning({
-    title: '删除会话',
-    content: `确定删除「${name}」？记录将移除，无法恢复。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    onPositiveClick: () => run(() => store.remove(id)),
-  })
-}
-
 function onMenu(key: string, s: SessionSummary) {
   const id = s.id
   if (key === 'rename') openRename(id, s.name)
@@ -132,7 +121,7 @@ function onMenu(key: string, s: SessionSummary) {
   else if (key === 'archive') void run(() => store.archive(id))
   else if (key === 'pin' || key === 'unpin') void run(() => store.pin(id, key === 'pin'))
   else if (key === 'unarchive') void run(() => store.unarchive(id))
-  else if (key === 'remove') confirmRemove(id, s.name)
+  else if (key === 'remove') void run(() => store.remove(id))
   else if (key.startsWith('handoff-role:')) {
     const hit = HANDOFF_ROLES.find((r) => key === `handoff-role:${r.role}`)
     if (hit) void handoffRole(id, hit.role, hit.label)
