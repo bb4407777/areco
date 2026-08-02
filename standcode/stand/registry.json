@@ -1,17 +1,19 @@
 {
   "version": "2",
-  "_note_default_thinker": "07-28 高律师设置页选定 flash（workbuddy-deepseek=DeepSeek-v4-flash）为默认 Thinker",
+  "_note_default_thinker": "08-01 高律师定:caller(Hermes/K3)+thinker 统一 K3 做分配管理思考,worker 统一 DeepSeek-v4-flash 落地执行;快速/重活 Worker 退役,重活并入 thinker",
   "_note_rename": "2026-07-29 高律师令：非 workbuddy 系模板 id 改 harness-模型 格式（Kimi 施工）：claude→claude-glm52 / c5→claude-fable5 / cfm→claude-opus5 / kimi→kimi-k3 / agnes→claude-agnes25flash / qoder→qoder-qwen38 / codex→codex-gpt56。workbuddy 系 id 同日经高律师纠正保留原名（workbuddy / workbuddy-deepseek / workbuddy-deepseek-pro / workbuddy-gpt56-remote）——本意只是设置页显示名写清 harness+模型，不动底层 id。name 字段统一「Harness 模型」格式。",
-  "default_thinker": "workbuddy-deepseek",
-  "default_worker": "workbuddy",
-  "default_heavy_worker": "qclaw-flash",
-  "default_fast_worker": "workbuddy",
+  "default_thinker": "kimi-k3",
+  "default_worker": "qclaw-flash",
+  "default_heavy_worker": "kimi-k3",
+  "default_fast_worker": "qclaw-flash",
+  "_note_anchor_sot": "2026-07-30 高律师定案：车道锚 SoT 已迁 areco 设置页（areco config.json standcode.heavyWorker/fastWorker，GET/PUT /api/standcode/defaults），caller.py 每次 go 运行时读取（API→config.json→文件内常量）。本文件 default_heavy_worker/default_fast_worker 只是镜像 + areco 全挂时的兜底，改锚请去 areco 设置页，勿改这里。",
+  "_note_fast_lane": "2026-07-30 高律师令：积分够用选 qclaw，fast 改锚 qclaw-flash（harness=openclaw）。workbuddy-deepseek 留备胎（别删）。",
   "task_type_defaults": {
-    "think": "workbuddy-deepseek-pro",
-    "plan": "workbuddy-deepseek-pro",
+    "think": "kimi-k3",
+    "plan": "kimi-k3",
     "execute": "qclaw-flash",
     "work": "qclaw-flash",
-    "fast": "workbuddy"
+    "fast": "qclaw-flash"
   },
   "templates": [
     {
@@ -31,7 +33,12 @@
     },
     {
       "id": "workbuddy-deepseek",
-      "name": "WorkBuddy DeepSeek Flash",
+      "name": "WorkBuddy DeepSeek-v4-Flash",
+      "role": "worker"
+    },
+    {
+      "id": "qclaw-flash",
+      "name": "QClaw openclaw DeepSeek-v4-Flash",
       "role": "worker"
     },
     {
@@ -41,18 +48,26 @@
     },
     {
       "id": "kimi-k3",
-      "name": "Kimi K3",
+      "name": "Kimi Code K3",
       "role": "worker"
     },
     {
       "id": "claude-agnes25flash",
-      "name": "Claude Code Agnes2.5Flash",
+      "name": "Claude Code Agnes 2.5 Flash",
       "role": "worker"
     },
     {
       "id": "claude-fable5",
       "name": "Claude Code Fable5",
       "role": "thinker"
+    },
+    {
+      "id": "qclaw-pro",
+      "name": "QClaw openclaw DeepSeek-v4-Pro",
+      "role": "thinker"
     }
-  ]
+  ],
+  "_note_align_20260730": "2026-07-30 Kimi 治理：default_worker/thinker 对齐设置页现值（worker=workbuddy-deepseek、thinker=workbuddy-deepseek-pro，均为设置页录入面最新状态）；fast 经高律师确认为 qclaw-flash（设置页 fastWorker 同步改锚），两层自此一致。",
+  "_note_heavy": "2026-07-30 晚 GLM 额度恢复，重活锚 kimi-k3 → claude-glm52（kimi-k3 留备胎）。SoT=areco 设置页。",
+  "_note_align2_20260730": "2026-07-30 二轮对齐：设置页已改锚 qclaw 车道（worker=qclaw-flash、thinker=qclaw-pro、heavyWorker=kimi-k3），registry 回落层同步对齐；task_type work/execute 仍 claude-glm52 未动（heavy 临时改道锚在 heavyWorker，GLM 恢复后按 07-29 令统一回撤）。"
 }

@@ -7,6 +7,8 @@
     "且只读 preset.timeout 一个字段；system 与 thinking 在任何分支下都从未被读取。",
     "而本机 config/harnesses.json 里根本没有 openclaw（只有 reasonix / zcode / workbuddy），",
     "12 个 areco 模板里设了 harness/model/preset 的也是 0 个 —— 所以连 timeout 也是死的。",
+    "（2026-07-30 更新：harnesses.json 已补齐 openclaw/claude/kimi/codex/qoder/hermes，15 个 areco 模板",
+    "  已有 13 个 harness-first 接线；但 preset 生效面没变——仍只有 openclaw 的 timeout 会被读取。）",
     "",
     "角色约束的**真实**落点是 caller.py 的三个模板（走 dispatch 的 request 正文，实际生效）：",
     "  PLAN_TEMPLATE   两段式的 Thinker 段：六段结构化计划",

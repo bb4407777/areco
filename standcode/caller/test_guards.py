@@ -401,7 +401,7 @@ def _gate_caller(messages_fn, session_info_fn):
     c.get_messages = messages_fn
     c._session_info = session_info_fn
     c.sent = []
-    c.send_message = lambda sid, to, body: c.sent.append((sid, to, body))
+    c.send_message = lambda sid, to, body, **kw: c.sent.append((sid, to, body))  # **kw 兼容 room_id（P1-5 REST 快路）
     return c
 
 

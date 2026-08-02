@@ -148,7 +148,7 @@ check("无 transcript → None（不硬编）",
 # ── dispatch 集成：复用路不建房不 spawn，route_reason 落结果与审计 ────
 c = _caller([_sess()], [_room()], ctx=1000)
 c._assert_template_exists = lambda tid: None
-c.send_message = lambda team, stand, req: 42
+c.send_message = lambda team, stand, req, **kw: 42  # **kw 兼容 room_id（P1-5 REST 快路）
 d = c.dispatch("把 caller.py 的注释改一下", template_id="claude-fable5", mode="worker")
 check("dispatch 复用路：route_reason 写明命中缓存",
       d.get("route_reason", "").startswith("复用旧会话(命中缓存"), d.get("route_reason", ""))
@@ -163,7 +163,7 @@ made = {}
 c2.create_room = lambda name: made.setdefault("room", {"id": "room-new", "team": "team-new",
                                                        "name": name})
 c2.add_stand = lambda rid, tid, cwd=None: {"name": "Worker-c5-new", "sessionId": "sess-new"}
-c2.send_message = lambda team, stand, req: 7
+c2.send_message = lambda team, stand, req, **kw: 7  # **kw 兼容 room_id（P1-5 REST 快路）
 import caller as _C_mod  # BOOT_WAIT 置零，离线测试别真睡
 _orig_boot = _C_mod.BOOT_WAIT_SEC
 _C_mod.BOOT_WAIT_SEC = 0

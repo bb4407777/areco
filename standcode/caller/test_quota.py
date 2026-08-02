@@ -70,16 +70,22 @@ def test_429_boundary() -> None:
 
 
 def test_heavy_lane_reroute() -> None:
-    print("\n[重活改道] HEAVY_LANE_STAND 常量 + registry 停新单标记")
-    check(C.HEAVY_LANE_STAND == "kimi-k3", "HEAVY_LANE_STAND = kimi-k3")
+    print("\n[重活锚] areco 设置页 SoT（2026-07-30 定案）+ registry 停新单标记")
+    check(C.HEAVY_LANE_STAND == "kimi-k3", "HEAVY_LANE_STAND fallback 常量 = kimi-k3")
     c = C.Caller()
     check(c.default_heavy_worker_id == "kimi-k3",
           f"重活锚加载后 = kimi-k3（实际 {c.default_heavy_worker_id}）")
-    check("claude-glm52" in c._stopped_stands(), "registry 静态停新单标记生效")
+    check(c.lane_anchor_sources.get("heavy", "").startswith("kimi-k3@"),
+          f"锚来源横幅已记录（实际 {c.lane_anchor_sources}）")
+    # 静态停新单标记机制用假 registry 验证（真 registry 的 claude-glm52 标记
+    # 2026-07-30 GLM 额度恢复后已撤，不能再拿真文件当测试数据）
+    c2 = C.Caller.__new__(C.Caller)
+    c2.registry = {"templates": [{"id": "test-stand-x", "status": "停新单"}]}
+    check("test-stand-x" in c2._stopped_stands(), "registry 静态停新单标记机制生效")
     r = C.Caller.route_mode("帮我起草案件起诉状文书")
     check(r["mode"] == "worker", "法律重活词仍路由 worker 模式")
-    check("kimi-k3" in r["reason"] and "改道" in r["reason"],
-          "route_reason 写明改道 kimi-k3")
+    check("kimi-k3@" in r["reason"],
+          "route_reason 写明锚与来源（kimi-k3@来源）")
 
 
 def test_handle_quota_hit() -> None:

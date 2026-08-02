@@ -129,12 +129,13 @@ SWEEP_IDLE_MIN = _conf_float("STANDCODE_SWEEP_IDLE_MIN", "sweep_idle_min", 30)
 MSG_READ_FAIL_LIMIT = int(_conf_float("STANDCODE_MSG_READ_FAIL_LIMIT", None, 10))
 
 # ── 派发/轮询节奏（2026-07-26 提速）────────────────────────────────
-# BOOT_WAIT_SEC：add_stand 返回 → send_message 之间的等待。历史值 3s 是「等 TUI boot」
-# 的保险，但消息走 SQLite 落库、由 areco room-relay 2s tick 投递，注入前还有
-# onceQuiet（输出安静 1.2s）挡竞态——Stand 没 ready 消息也不会丢，3s 纯属重复保险。
+# BOOT_WAIT_SEC：add_stand 返回 → send_message 之间的等待。历史值 3s→1s→0（2026-07-30
+# P1-5 删除）：消息落库后由 areco room-relay tick 投递，注入前还有 MIN_BOOT 下限（8s/4s）
+# + onceQuiet（输出安静 1.2s）双重挡竞态——Stand 没 ready 消息也不会丢，盲等纯属重复保险
+# （诊断样本 A 实测每单白付 1.0s）。留 env/config 旋钮应急：出竞态回填秒数即可，不用改码。
 # MERGE_WAIT_SEC：poll 收到首条 Stand 回复后的合并窗（等可能的连发增量）。
 # POLL_INTERVAL_SEC：轮询间隔；读的是本地 SQLite，0.5s 的成本可忽略。
-BOOT_WAIT_SEC = _conf_float("STANDCODE_BOOT_WAIT", "boot_wait_sec", 1.0)
+BOOT_WAIT_SEC = _conf_float("STANDCODE_BOOT_WAIT", "boot_wait_sec", 0.0)
 MERGE_WAIT_SEC = _conf_float("STANDCODE_MERGE_WAIT", "merge_wait_sec", 1.5)
 POLL_INTERVAL_SEC = _conf_float("STANDCODE_POLL_INTERVAL", "poll_interval_sec", 0.5)
 # 红绿灯三常量（2026-07-26 poll 接入 areco trafficState）：
@@ -236,7 +237,7 @@ SESSION_REUSE_CONTEXT_LIMIT = int(_conf_float(
 FRESH_CONTEXT_MARKERS = ("干净上下文", "[fresh]", "[clean-context]")
 ARENA_KEYWORDS = ("擂台", "基准测试", "benchmark", "对战")
 LEGAL_CASE_KEYWORDS = (
-    # 与 FAST_BLOCK_KEYWORDS 法律组同词（案件/文书/法条…）——那边管路由车道，
+    # 与 HEAVY_LAW_KEYWORDS 同源（案件/文书/法条…）——那边管路由车道，
     # 这边管会话隔离；词表分开常量化，免得一边改词另一边跟着飘。
     "案件", "文书", "法条", "核查", "立案", "保全", "证据", "判决",
     "起诉", "答辩", "上诉", "调解",
@@ -244,16 +245,108 @@ LEGAL_CASE_KEYWORDS = (
 
 # ── 额度/限流检测与车道改道（2026-07-29 高律师令，GLM-5.2 额度打满事件）─────────
 # 背景：GLM-5.2（智谱套餐）额度打满，重活车道（法律/代码词 → claude-glm52）瘫痪。
-# ① 重活车道锚（HEAVY_LANE_STAND）：2026-07-29 GLM 额度满期间临时改道 kimi-k3；
-#    GLM 恢复后把常量改回 "claude-glm52" 并撤 registry 停新单标记即恢复。
-HEAVY_LANE_STAND = "qclaw-flash"  # 2026-08-01 高律师令：claude CLI 已卸载（~/.npm-global 整目录丢失），claude 系车道全灭，重活锚改 qclaw-flash（QClaw openclaw DeepSeek-v4-Flash）
+# ① 重活车道锚 / ③ fast 车道锚：2026-07-30 高律师定案——**真锚已迁 areco 设置页**
+#    （config.json standcode 段 heavyWorker/fastWorker，GET/PUT /api/standcode/defaults），
+#    每次 go 运行时读取（resolve_lane_anchors：HTTP API → areco config.json 直读 →
+#    文件内常量 fallback）。下面两个常量不再是真锚，只是三级回落的兜底；
+#    高律师改锚去 areco 设置页，不要再改这里。
+#    备查历史：原重活锚 claude-glm52（GLM-5.2 重活主力）；备胎 kimi-k3
+#    （2026-07-29 GLM 额度满 / GLM stand 连续失联期间保底，07-30 转正为真锚）；
+#    qclaw-dsv4flash 模板因 protocol 不兼容已删除；fast 备胎 workbuddy-deepseek。
+HEAVY_LANE_STAND = "kimi-k3"  # fallback（真锚在 areco 设置页）；2026-07-30 GLM 恢复后 stand 仍 session_exited 失联，切回 kimi-k3 保底  # fallback 常量（真锚在 areco 设置页）；2026-07-30 晚 GLM 恢复回切，kimi-k3 备胎      # fallback 常量：真锚在 areco 设置页 standcode.heavyWorker
+FAST_LANE_STAND = "qclaw-flash"   # fallback 常量：真锚在 areco 设置页 standcode.fastWorker
 # ② Stand 输出扫描：poll/harvest 链对 Stand 回复做大小写不敏感子串匹配，
 #    命中即 a) 该 stand 标停新单（写 STAND_STOP_PATH）b) 涉及车道按备胎表改道
 #    c) cc-send 微信告警高律师 d) 事件追加 StandCode SKILL.md 台账 + 审计日志。
 QUOTA_SIGNAL_WORDS = ("429", "rate limit", "quota", "余额不足", "insufficient", "额度")
 # 车道备胎映射：stand 停新单后其涉及车道的改道目标（stand id → 备胎 stand id）。
 # 轻活备胎 workbuddy-deepseek（07-30 由 codebuddy-ds-flash 回退 workbuddy 系原名，registry 已注册），接入后补录。
-LANE_FALLBACK_MAP = {"claude-glm52": "kimi-k3"}
+LANE_FALLBACK_MAP = {"claude-glm52": "kimi-k3", "workbuddy-deepseek": "qclaw-flash"}
+
+
+# 车道锚运行时解析（2026-07-30 高律师定案：SoT = areco 设置页 standcode 段）。
+# 每次 go 都是新进程、加载注册表时调一次 → 等价于「每次 go 从 areco 读锚」。
+# 进程级 memo（2026-07-30 P2-9）：一次 go 进程内分诊/路由/锚解析/双 Caller 实例化
+# 曾各读一遍（实测 5 次 HTTP），进程活不过一次派发，读一次就够；跨进程仍是每次新读。
+_STANDCODE_CONF_MEMO: tuple[dict, str] | None = None
+
+
+def _areco_standcode_conf() -> tuple[dict, str]:
+    """读 areco standcode 段。返回 (配置dict, 来源)：来源 ∈ areco-api / areco-config / ''。
+
+    ① 优先 HTTP API（:8790 GET /api/standcode/defaults，设置页保存即时生效）；
+    ② areco 不可达 / 旧版无端点 → 直读 areco config.json（服务端运行期不回读文件，
+       直读拿到的是「下次重启生效」的落盘值，仍优于文件内常量）；
+    ③ 都失败返回 ({}, '')，调用方回落常量并横幅警告（失败结果不 memo，下次调用重试）。
+    """
+    global _STANDCODE_CONF_MEMO
+    if _STANDCODE_CONF_MEMO is not None:
+        return _STANDCODE_CONF_MEMO
+    try:
+        resp = requests.get(f"{ARECO_BASE}/api/standcode/defaults", timeout=2)
+        if resp.status_code == 200:
+            data = resp.json().get("data")
+            if isinstance(data, dict):
+                _STANDCODE_CONF_MEMO = (data, "areco-api")
+                return _STANDCODE_CONF_MEMO
+    except Exception:
+        pass
+    try:
+        cfg = json.loads((Path(ARECO_ROOT) / "config.json").read_text(encoding="utf-8"))
+        sc = cfg.get("standcode")
+        if isinstance(sc, dict):
+            _STANDCODE_CONF_MEMO = (sc, "areco-config")
+            return _STANDCODE_CONF_MEMO
+    except Exception:
+        pass
+    return {}, ""
+
+
+def _areco_send_from_supported() -> bool:
+    """服务端 rooms.send 是否收 from/humanRelay/to（P1-5 REST 快路的能力探测）。
+
+    判据 = defaults 响应的 _caps.sendFrom（仅 areco-api 来源可信：config.json 直读
+    说明服务端不可达或旧版，能力横幅无从谈起）。False → send_message 回落 SQLite 直写。
+    """
+    conf, source = _areco_standcode_conf()
+    if source != "areco-api":
+        return False
+    caps = conf.get("_caps")
+    return bool(isinstance(caps, dict) and caps.get("sendFrom"))
+
+
+def resolve_lane_anchors() -> dict:
+    """解析 heavy/fast 两车道锚。返回 {"heavy": (stand_id, source), "fast": (stand_id, source)}，
+    source ∈ areco-api / areco-config / 常量fallback（横幅口径随 go 头行 JSON 输出）。
+
+    逐车道独立回落：API 拿到了 fastWorker 但没 heavyWorker（旧版服务端无此键）时，
+    heavy 车道仍可按同一来源链继续尝试 config.json → 常量，不搞一刀切。
+    """
+    conf, conf_source = _areco_standcode_conf()
+    out: dict[str, tuple[str, str]] = {}
+    for lane, key, const in (("heavy", "heavyWorker", HEAVY_LANE_STAND),
+                             ("fast", "fastWorker", FAST_LANE_STAND)):
+        value = str(conf.get(key) or "").strip()
+        if value:
+            out[lane] = (value, conf_source)
+            continue
+        # API 缺该键（旧版服务端未带 heavyWorker）：再试 config.json 直读
+        if conf_source == "areco-api":
+            try:
+                cfg = json.loads((Path(ARECO_ROOT) / "config.json").read_text(encoding="utf-8"))
+                value = str((cfg.get("standcode") or {}).get(key) or "").strip()
+                if value:
+                    out[lane] = (value, "areco-config")
+                    continue
+            except Exception:
+                pass
+        out[lane] = (const, "常量fallback")
+        logger.warning(
+            "车道锚 %s 从 areco 读不到（来源链：%s），回落文件内常量 %s"
+            "——真锚在 areco 设置页 standcode.%s，请到设置页配置",
+            lane, conf_source or "areco 不可达且 config.json 不可读", const, key,
+        )
+    return out
 # 停新单运行期状态文件：registry 模板静态标记（"status": "停新单"）之外的
 # 自动命中落点；Caller 加载时两路并集生效（_stopped_stands）。
 STAND_STOP_PATH = Path(
@@ -423,7 +516,7 @@ DIRECT_KEYWORDS = (
 #   think    — → Thinker：交付物是「判断」（结论/取舍/评估）；+plan_only 则只出结构化计划
 #   plan     — → Thinker → Worker 两段式：多步有依赖，且交付物是「东西」
 #   fanout   — → Worker × N 并行：N 个互不依赖的子任务
-#   fast     — → 快速 Worker（hy3）：单步轻量任务
+#   fast     — → 快速 Worker（锚 = areco 设置页 standcode.fastWorker，运行时解析）：单步轻量任务
 MODES = ("operator", "worker", "think", "plan", "fanout", "fast")
 DISPATCH_MODES = ("worker", "think", "plan", "fanout", "fast")  # run 能派的（operator 不派发）
 
@@ -450,35 +543,25 @@ PLAN_ONLY_KEYWORDS = (
 )
 
 #  fast 车道（2026-07-27）：明确轻量动词 → 快速 Worker（hy3），省掉 claude 重车的冷启动税。
-#  保守优先——误判大的进 hy3 比误判小的进 claude 贵得多，所以词表只收「明确轻量」，
-#  且有 FAST_BLOCK 重量信号一票否决。
+#  2026-07-30 路由重构后本词表不再参与判定（默认车道已是 fast），只留作 signals 观测。
 FAST_KEYWORDS = (
     # 2026-07-27 原轻量动词：查/看/找/翻译/总结/提取…单步轻量任务
     "查一下", "查下", "查看", "看一下", "看下", "找找", "找一下",
     "翻译", "总结", "摘要", "提取", "转成", "改成", "格式化", "确认一下",
-    # 2026-07-29 高律师定：搜索/抓取/摘要类轻活也走快速 Worker（hy3=会员3）。
-    # 「去取回信息」的单步任务（搜一搜、抓公众号、找资料、调研一下）hy3 足够，
-    # 省掉 claude 重车冷启动税。重活词（案件/文书/法条/核查…）见 FAST_BLOCK 一票否决。
+    # 2026-07-29 高律师定：搜索/抓取/摘要类轻活也走快速 Worker。
+    # 「去取回信息」的单步任务（搜一搜、抓公众号、找资料、调研一下）轻车足够，
+    # 省掉重车冷启动税。法律重活词（案件/法院/法条…）见 HEAVY_LAW_KEYWORDS 一票升级。
     "搜", "搜索", "查文章", "抓取", "总结这篇",
     "公众号", "链接", "http", "url", "URL", "找资料", "调研",
 )
-FAST_BLOCK_KEYWORDS = (
-    # 2026-07-27 原重量信号：开发/运维类重活
-    "批量", "全量", "重构", "部署", "迁移", "调试", "修复", "改代码", "实现", "开发",
-    # 2026-07-29 高律师定：法律重活词一票否决——含案件/文书/法条/核查等仍走主 Worker（claude），
-    # 不让新加的搜索/抓取关键词把法律活误配进 hy3（误判大的进 hy3 比误判小的进 claude 贵得多）。
-    "案件", "文书", "法条", "核查", "立案", "保全", "证据", "判决",
-    "起诉", "答辩", "上诉", "调解",
-    # 产出并落盘类（调研/搜索 + 存档/写报告）超出「轻量单步」，仍走主 Worker。
-    "存到", "写到", "保存到", "存档", "落盘",
-)
-#  ⑤ Worker 路由反转（2026-07-29 高律师批）：默认车道从 claude 反转为 hy3，claude 只留
-#  给法律/代码重活白名单。法律词沿用 FAST_BLOCK_KEYWORDS（案件/文书/法条…语义从
-#  「否决 fast」变成「命中即主 Worker」，词表本身不动）；代码词为本次新增组。
-#  ASCII 词（python/bug/git/commit）在 route_mode 里按小写比对，防大小写漏配。
-CODE_KEYWORDS = (
-    "代码", "写脚本", "python", "改代码", "调试", "bug", "部署",
-    "git", "commit", "重构",
+#  重活车道触发词（2026-07-30 高律师令·路由逻辑重构）：只保留法律词。
+#  默认走 fast 快速 Worker，只有法律类任务才走重活主力 Worker——特殊情况=法律。
+#  原代码词组（CODE_KEYWORDS：代码/python/git/重构…）与「重量词」（批量/全量/迁移/
+#  重构/部署/修复…）及落盘类词（存到/写到/存档…）整组从触发器移除：写代码/跑脚本/
+#  git/python 一律默认 fast，flash 也能接。FAST_KEYWORDS 只留作 signals 观测。
+HEAVY_LAW_KEYWORDS = (
+    "案件", "法院", "文书", "法条", "合同", "核查", "立案", "保全",
+    "证据", "判决", "起诉", "答辩", "上诉", "调解",
 )
 
 
@@ -947,14 +1030,15 @@ def ensure_acceptance_block(request: str) -> tuple[str, dict]:
         acceptance["block_appended"] = False
         return req, acceptance
 
+    # 话术整洁（2026-07-30 P1P2 施工附加项）：闸停态下「验收闸已关停，不机检不打回」是
+    # 内部机制史，Worker 只需要行为指令——收敛为「完工按此交付，结果直报」；闸开警示不变
     lines = ["", f"——{ACCEPT_HEADER}（Caller 自动追加，完工按此交付"
-                 + ("，机检不过会被打回" if ACCEPTANCE_GATE_ENABLED
-                    else "；验收闸已关停，不机检不打回，结果直报")
+                 + ("，机检不过会被打回" if ACCEPTANCE_GATE_ENABLED else "，结果直报")
                  + "）——"]
     crits = acceptance["criteria"]
     if acceptance["source"] != "explicit":
         lines.append("验收判据" + ("（能机检的会逐条真跑）：" if ACCEPTANCE_GATE_ENABLED
-                                  else "（闸停期间仅作交付约定，不机检）："))
+                                  else "（交付约定）："))
         if crits:
             for i, c in enumerate(crits, 1):
                 lines.append(f"{i}. {c['kind']}:{c['arg']}（文件存在且非空）")
@@ -1656,8 +1740,9 @@ class Caller:
         self.default_template_id: str = ""
         self.default_thinker_id: str = ""
         self.default_worker_id: str = ""
-        self.default_heavy_worker_id: str = ""  # ⑤ 重活车道锚（法律/代码词），不吃 areco 覆盖；加载层应用 HEAVY_LANE_STAND 改道
+        self.default_heavy_worker_id: str = ""  # ⑤ 重活车道锚（法律/代码词）；加载层由 resolve_lane_anchors 应用 areco 真锚
         self.default_caller_id: str = ""  # areco 设置页的 caller 默认（仅记录，caller 角色由入口 agent 自任）
+        self.lane_anchor_sources: dict = {}  # 车道锚来源（横幅口径）：{"heavy": "kimi-k3@areco-config", ...}
         self.template_names: dict[str, str] = {}
         self.roles: dict[str, str] = {}  # template_id → "thinker" | "worker"
         self._load_registry()
@@ -1718,9 +1803,9 @@ class Caller:
         self.default_thinker_id = data.get("default_thinker") or _FALLBACK_THINKER
         self.default_worker_id = data.get("default_worker") or _FALLBACK_WORKER
         # ⑤ 重活车道锚（2026-07-29 路由反转）：default_worker 反转为 hy3 后，法律/代码
-        # 重活的模板必须有独立锚点——它刻意不吃 areco 设置页覆盖（设置页只有
-        # worker/fastWorker 两个旋钮，语义都是「默认车道」），否则 areco 掉线或设置
-        # 变动时重活会静默滑进轻车。
+        # 重活的模板必须有独立锚点。2026-07-30 定案：真锚 = areco 设置页 standcode.heavyWorker
+        # （设置页直达旋钮），registry 这里的 default_heavy_worker 只是镜像 + areco 全挂时的
+        # 兜底来源——加载尾段 _apply_lane_reroutes 会用 resolve_lane_anchors 的解析值覆盖它。
         _exec_default = (data.get("task_type_defaults", {}) or {}).get("execute")
         if isinstance(_exec_default, dict):  # 旧嵌套写法 {"template_id": "..."}
             _exec_default = _exec_default.get("template_id")
@@ -1774,23 +1859,37 @@ class Caller:
         return stopped
 
     def _apply_lane_reroutes(self) -> None:
-        """车道改道（2026-07-29 GLM 额度打满事件，高律师令）。
+        """车道锚应用 + 停新单改道（2026-07-30 高律师定案：锚 SoT 迁 areco 设置页）。
 
-        ① 重活车道临时改道：重活锚强制 HEAVY_LANE_STAND（GLM 恢复后把常量改回
-           claude-glm52 即恢复）；registry/areco 侧取值不动，改道只发生在加载层。
-        ② 停新单改道：默认锚/task_map 命中停新单 stand 且备胎表 LANE_FALLBACK_MAP
+        ① 重活车道锚：resolve_lane_anchors() 运行时读 areco（API→config.json→常量），
+          强制到 default_heavy_worker_id；registry/areco 侧取值不动，只在加载层生效。
+        ② fast 车道锚：同链解析后强制 task_map["fast"]。
+          必须压住 _apply_areco_defaults 的旧版覆盖——本方法在其后调用。
+        ③ 停新单改道：默认锚/task_map 命中停新单 stand 且备胎表 LANE_FALLBACK_MAP
            有映射的，改道备胎；无映射只 warning（宁可报警也不静默滑错车）。
-        决策一律 logger.warning 留痕（派发结果的 route_reason 由 route_mode 写明）。
+        决策一律 logger.warning 留痕；锚来源记 self.lane_anchor_sources（横幅口径，
+        go 头行 JSON 输出；route_reason 由 route_mode 写明）。
         """
-        # ① 重活车道临时改道
-        if self.default_heavy_worker_id and self.default_heavy_worker_id != HEAVY_LANE_STAND:
+        anchors = resolve_lane_anchors()
+        heavy_stand, heavy_src = anchors["heavy"]
+        fast_stand, fast_src = anchors["fast"]
+        self.lane_anchor_sources = {"heavy": f"{heavy_stand}@{heavy_src}",
+                                    "fast": f"{fast_stand}@{fast_src}"}
+        # ① 重活车道锚（真锚 = areco 设置页 standcode.heavyWorker）
+        if self.default_heavy_worker_id and self.default_heavy_worker_id != heavy_stand:
             logger.warning(
-                "重活车道改道：%s → %s（HEAVY_LANE_STAND，2026-07-29 GLM额度满临时改道，"
-                "GLM恢复后改回 claude-glm52）",
-                self.default_heavy_worker_id, HEAVY_LANE_STAND,
+                "重活车道锚应用：%s → %s（来源 %s；SoT=areco 设置页，2026-07-30 高律师定案）",
+                self.default_heavy_worker_id, heavy_stand, heavy_src,
             )
-            self.default_heavy_worker_id = HEAVY_LANE_STAND
-        # ② 停新单 stand 涉及车道改道备胎
+            self.default_heavy_worker_id = heavy_stand
+        # ② fast 车道锚（真锚 = areco 设置页 standcode.fastWorker）
+        if self.task_map.get("fast") != fast_stand:
+            logger.warning(
+                "fast 车道锚应用：%s → %s（来源 %s；SoT=areco 设置页，2026-07-30 高律师定案）",
+                self.task_map.get("fast"), fast_stand, fast_src,
+            )
+            self.task_map["fast"] = fast_stand
+        # ③ 停新单 stand 涉及车道改道备胎
         stopped = self._stopped_stands()
         if not stopped:
             return
@@ -2339,8 +2438,9 @@ class Caller:
         body: str,
         from_: str = CALLER_NAME,
         human_relay: bool = True,
+        room_id: str = "",
     ) -> int:
-        """向房间发送消息（直写 SQLite）
+        """向房间发送消息（REST 快路优先，SQLite 直写兜底）
 
         team: 房间 team 名（如 "room-xxxx"）
         to:   收件人成员名
@@ -2350,8 +2450,27 @@ class Caller:
             意图，置 True 让 areco room-relay 把 Hermes 当人类发言（默认投全体 + 清零链深
             + 附 context 预览），Stand 才会当指令回应。前提：from（Hermes）需在 areco
             config.json 的 humanRelayAgents 白名单（生产已配 = ['Hermes']）。
+        room_id: 房间 id（可选）。给了且服务端具备 sendFrom 能力（defaults._caps，
+            2026-07-30 P1-5）→ 走 REST /rooms/{id}/send：postMessage 同步落库+投递，
+            省掉 SQLite 直写后等 relay tick 拾取的平均 0.5s，且拿到同步投递回执。
+            旧服务端（未重启无 _caps）/REST 失败 → 回落 SQLite 直写，行为与旧版全同。
         返回消息 ID
         """
+        if room_id and _areco_send_from_supported():
+            try:
+                data = self._api_post(f"/rooms/{room_id}/send", {
+                    "body": body, "from": from_, "humanRelay": human_relay, "to": to,
+                })
+                msg_id = int(data.get("id") or 0)
+                if msg_id > 0:
+                    logger.info(
+                        "发送消息(REST): id=%s room=%s from=%s to=%s human_relay=%s",
+                        msg_id, room_id, from_, to, human_relay,
+                    )
+                    return msg_id
+                logger.warning("REST 发消息返回异常 payload（%s），回落 SQLite 直写", data)
+            except Exception as e:
+                logger.warning("REST 发消息失败（room=%s: %s），回落 SQLite 直写", room_id, e)
         conn = self._db_connect()
         try:
             self._ensure_messages_table(conn)
@@ -2569,7 +2688,7 @@ class Caller:
             room_created = bool(reuse_stand.get("room_created", False))
             room = {"id": rid, "name": reuse_stand.get("room_name", ""), "team": team}
             try:
-                msg_id = self.send_message(team, stand_name, request)
+                msg_id = self.send_message(team, stand_name, request, room_id=rid)
             except Exception as e:
                 logger.error("复用派发失败（room=%s tid=%s）：%s", rid, tid, e)
                 template_mark_failure(tid, e)  # 健康闸：复用路发消息失败也计数
@@ -2654,11 +2773,13 @@ class Caller:
             stand_name = member["name"]
             stand_session_id = member.get("sessionId", "")
 
-            # 4. 等待片刻让 session 启动（投递链自带 2s tick + onceQuiet，见 BOOT_WAIT_SEC 注释）
-            time.sleep(BOOT_WAIT_SEC)
+            # 4. 启动等待已删（2026-07-30 P1-5）：投递链自带 MIN_BOOT + onceQuiet 挡竞态，
+            #    见 BOOT_WAIT_SEC 注释；默认 0 不睡，应急时 env/config 回填秒数
+            if BOOT_WAIT_SEC > 0:
+                time.sleep(BOOT_WAIT_SEC)
 
-            # 5. 向房间发送任务消息（直写 SQLite）
-            msg_id = self.send_message(team, stand_name, request)
+            # 5. 向房间发送任务消息（REST 快路优先，SQLite 直写兜底）
+            msg_id = self.send_message(team, stand_name, request, room_id=rid)
         except Exception as e:
             logger.error("派发中途失败（room=%s tid=%s）：%s", rid, tid, e)
             template_mark_failure(tid, e)  # 健康闸：建房/add_stand/发消息失败回滚路径计数
@@ -3112,7 +3233,8 @@ class Caller:
                             (m for m in self.get_messages(session_id, after_id=max(0, after_id - 1))
                              if m.get("id") == after_id), None)
                         if origin and origin.get("body"):
-                            self.send_message(session_id, stand_name or "all", origin["body"])
+                            self.send_message(session_id, stand_name or "all", origin["body"],
+                                              room_id=room_id or "")
                             logger.warning("Stand 空转（idle×%d，看板复核零产出），已重投任务消息: session=%s",
                                            idle_hits, session_id)
                             log_audit("poll_reinject", {
@@ -3597,7 +3719,8 @@ class Caller:
                 f"Gatekeeper 拒绝派发（BLOCKED）：{verdict.get('reason', '')}"
             )
         task_id = f"task-{uuid.uuid4().hex[:12]}"
-        msg_id = self.send_message(channel["team"], channel["member"], request)
+        msg_id = self.send_message(channel["team"], channel["member"], request,
+                                   room_id=channel.get("room_id") or "")
         result = {
             "task_id": task_id,
             "session_id": channel["team"],
@@ -3956,6 +4079,7 @@ class Caller:
                     dispatch_result["session_id"],
                     dispatch_result.get("stand_name", "") or "all",
                     rejection,
+                    room_id=dispatch_result.get("room_id") or "",
                 )
             except Exception as e:
                 # 打回发不出去（房间没了/库锁死）≠ 判据过了——如实标注并升级
@@ -4282,6 +4406,7 @@ class Caller:
                     plan_dispatch["session_id"],
                     plan_dispatch["stand_name"],
                     retry_body,
+                    room_id=plan_dispatch.get("room_id") or "",
                 )
                 retry_poll = self.poll_result(
                     room_id=plan_dispatch["room_id"],
@@ -4463,16 +4588,17 @@ class Caller:
             单步无依赖      worker              think
             多步有依赖      plan                think + plan_only
 
-        判定顺序（先到先得；⑤ Worker 路由反转 2026-07-29 高律师批）：
+        判定顺序（先到先得；2026-07-30 高律师令·路由逻辑重构）：
             1. 命中 PLAN_ONLY_KEYWORDS（「只要计划」「别动手」）→ think + plan_only
             2. 交付物 = 判断（命中 JUDGMENT 且未命中 ARTIFACT）→ think
                （多步则 plan_only=True——多步判断的自然产物就是结构化计划）
             3. 交付物 = 东西 且 多步有依赖 → plan（两段式）
-            4. 法律/代码重活词（法律=FAST_BLOCK_KEYWORDS，代码=CODE_KEYWORDS）→ worker
-               （主力 Worker claude/GLM-5.2，route_reason 写明命中词）
-            5. 其余一律 → fast（快速 Worker hy3）
-               反转说明：旧口径「轻活白名单进 hy3、默认 claude」，新口径「重活白名单进
-               claude、默认 hy3」——FAST_KEYWORDS 只留作 signals 观测，不再参与判定。
+            4. 法律重活词（HEAVY_LAW_KEYWORDS：案件/法院/合同/判决/法条…）→ worker
+               （主力 Worker，route_reason 写明命中词）。
+               2026-07-30 重构：代码词与「重量词」（批量/全量/重构/迁移…）整组移出
+               触发器——写代码/跑脚本/git/python 不再升重车，特殊情况=法律。
+            5. 其余一律 → fast（快速 Worker，锚随 areco 设置页 standcode.fastWorker）
+               FAST_KEYWORDS 只留作 signals 观测，不再参与判定。
 
         刻意不返回 fanout / operator：
             fanout 要求「N 个互不依赖的子任务」，关键词启发式判不出子任务边界——
@@ -4506,13 +4632,12 @@ class Caller:
         direct_kw = _hits(DIRECT_KEYWORDS)
         plan_only_kw = _hits(PLAN_ONLY_KEYWORDS)
         fast_kw = _hits(FAST_KEYWORDS)
-        heavy_law = _hits(FAST_BLOCK_KEYWORDS)
-        heavy_code = _hits(CODE_KEYWORDS)
+        heavy_law = _hits(HEAVY_LAW_KEYWORDS)
         signals = {
             "judgment": judgment, "artifact": artifact,
             "plan": plan_kw, "plan_strong": plan_strong, "plan_weak": plan_weak,
             "direct": direct_kw, "plan_only": plan_only_kw,
-            "fast": fast_kw, "fast_block": heavy_law, "heavy_code": heavy_code,
+            "fast": fast_kw, "heavy_law": heavy_law,
         }
 
         # 结构维度（2026-07-26 强弱分档，提速批件）：plan 两段式是最贵的模式，误入
@@ -4553,30 +4678,26 @@ class Caller:
                 "signals": signals,
             }
 
-        # 4) 法律/代码重活 → 主力 Worker（重活锚 default_heavy_worker）。⑤ 路由反转
-        #    （2026-07-29）：重活锚只留给重活白名单，route_reason 必须写明命中词
-        #    （冒烟/审计取证用）。2026-07-30 GLM 额度恢复，重活锚 HEAVY_LANE_STAND
-        #    已改回 claude-glm52，正常派发、不再提示改道。
-        if heavy_law or heavy_code:
-            # FAST_BLOCK 组=法律词+批量/落盘类重量词（任务口径统称「法律词组」），
-            # 标签用「法律/重量词」防止把「修复/批量」误读成法条类命中。
-            hit_desc = "、".join(
-                (["法律/重量词 " + "/".join(heavy_law)] if heavy_law else [])
-                + (["代码词 " + "/".join(heavy_code)] if heavy_code else [])
-            )
+        # 4) 法律重活 → 主力 Worker（重活锚）。2026-07-30 高律师令·路由逻辑重构：
+        #    重活锚只留给法律词（HEAVY_LAW_KEYWORDS），代码词/重量词不再触发；
+        #    route_reason 必须写明命中词（冒烟/审计取证用）。锚 SoT 在 areco 设置页，
+        #    reason 里显示的是运行时解析的真锚（含来源）。
+        if heavy_law:
+            heavy_stand, heavy_src = resolve_lane_anchors()["heavy"]
             return {
                 "mode": "worker", "plan_only": False,
                 "deliverable": "artifact", "structure": "single_step",
-                "reason": (f"命中重活词（{hit_desc}）→ 主力 Worker（{HEAVY_LANE_STAND}）"),
+                "reason": (f"命中法律重活词（{'/'.join(heavy_law)}）→ 主力 Worker（{heavy_stand}@{heavy_src}）"),
                 "signals": signals,
             }
 
-        # 5) 其余一律轻车。⑤ 路由反转：默认车道 = 快速 Worker（hy3），不再要求
-        #    FAST_KEYWORDS 白名单命中——误配代价小的方向反过来了。
+        # 5) 其余一律轻车（2026-07-30 路由重构：默认车道 = 快速 Worker，写代码/跑脚本
+        #    也走这条；锚随 areco 设置页 standcode.fastWorker，运行时解析）。
+        fast_stand, fast_src = resolve_lane_anchors()["fast"]
         return {
             "mode": "fast", "plan_only": False,
             "deliverable": "artifact", "structure": "single_step",
-            "reason": "无法律/代码重活词（路由反转 2026-07-29 默认轻车）→ 快速 Worker（hy3）",
+            "reason": f"默认轻车（未命中法律重活词）→ 快速 Worker（{fast_stand}@{fast_src}）",
             "signals": signals,
         }
 
@@ -5854,7 +5975,7 @@ def _run_by_mode(
     # ⑤ 路由反转（2026-07-29）：worker 模式 = 重活车道（法律/代码词才会路由到这），模板
     # 锚定 default_heavy_worker 而非 role 默认——default_worker 已反转为 hy3，走 role
     # 解析重活会滑进轻车。显式 --template 仍最高优先。
-    # （2026-07-29 GLM 额度满：加载层已把重活锚临时改道 HEAVY_LANE_STAND=kimi-k3）
+    # （2026-07-30 定案：重活锚 SoT = areco 设置页，加载层 resolve_lane_anchors 应用）
     res = caller.dispatch_and_relay(
         args.request,
         role=decision["role"],
@@ -5871,6 +5992,42 @@ def _run_by_mode(
     return {**res, "mode": mode}
 
 
+def _ps_lines_for(pids: list) -> dict[int, str] | None:
+    """一次 ps 拿一组 pid 的 `pid lstart command` 行（P2-9 批量化：原先每候选各 fork
+    一次 ps）。返回 {pid: 行}；不存在的 pid 无行（= 判死）。ps 本身跑不动返回 None，
+    调用方回落逐 pid 查（保守口径不变）。"""
+    valid: list[str] = []
+    for p in pids:
+        try:
+            n = int(p)
+        except (TypeError, ValueError):
+            continue
+        # macOS pid_max=99998；超范围 pid 会让 ps 整批报 "process id too large"
+        # 一个坏值毒化全部查询（实测）。超范围本就不可能是活进程，直接不带 = 判死。
+        if 0 < n <= 99999:
+            valid.append(str(n))
+    if not valid:
+        return {}
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=,lstart=,command=", "-p", ",".join(valid)],
+            capture_output=True, text=True, timeout=5,
+            env={**os.environ, "LC_ALL": "C"},  # 与 _waiter_alive 同款：锁 C locale
+        )
+    except Exception:
+        return None
+    lines: dict[int, str] = {}
+    for raw in (out.stdout or "").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            lines[int(raw.split(None, 1)[0])] = raw
+        except (ValueError, IndexError):
+            continue
+    return lines
+
+
 def _find_inflight_dup(request: str, window_sec: float = DUP_WINDOW_SEC) -> dict | None:
     """扫 TASKS_DIR 找「同一 request 的在途 running 任务」（2026-07-28 A2 重复派发闸）。
 
@@ -5878,6 +6035,7 @@ def _find_inflight_dup(request: str, window_sec: float = DUP_WINDOW_SEC) -> dict
     与本次相同；③ 等待者存活（B5 加固口径，pid 复用不算活）；④ 创建于 window 内
     （窗口外的 running 是陈旧 state，等待者早死 reconcile 还没扫到，不该拦新派发）。
     任一环节读不动都跳过该任务——宁放行不误拦，误拦 = 用户任务凭空消失。
+    P2-9：判活的 ps 批量化——先收齐候选再一次 ps -p pid1,pid2 查全表。
     """
     norm = _norm_request(request)
     if not norm:
@@ -5887,6 +6045,7 @@ def _find_inflight_dup(request: str, window_sec: float = DUP_WINDOW_SEC) -> dict
     except OSError:
         return None
     now = time.time()
+    candidates: list[tuple[Path, dict]] = []
     for p in files:
         try:
             st = json.loads(p.read_text())
@@ -5902,9 +6061,22 @@ def _find_inflight_dup(request: str, window_sec: float = DUP_WINDOW_SEC) -> dict
             continue
         if now - created > window_sec:
             continue
+        candidates.append((p, st))
+    if not candidates:
+        return None
+    ps_lines = _ps_lines_for([st.get("pid") for _, st in candidates])
+    for p, st in candidates:
+        if ps_lines is not None:
+            try:
+                line = ps_lines.get(int(st.get("pid") or 0), "")
+            except (TypeError, ValueError):
+                line = ""
+        else:
+            line = None  # ps 批量跑不动：回落 _waiter_alive 内部逐 pid 查
         if not _waiter_alive(st.get("pid"), task_id=st.get("task_id") or p.stem,
                              start_ts=st.get("start_ts"),
-                             request=(st.get("spec") or {}).get("request", "")):
+                             request=(st.get("spec") or {}).get("request", ""),
+                             ps_line=line):
             continue
         return {
             "task_id": st.get("task_id") or p.stem,
@@ -6084,7 +6256,8 @@ def _cmd_run(args) -> int:
             "channel": _current_channel(),  # 双通道:reconcile 补收时凭它回对通道
         }
         _write_state(task_id, state)
-        caller = Caller()
+        # P2-9：go 链已实例化过 Caller（读 areco 三级 + registry 双载），透传复用省一次
+        caller = getattr(args, "_caller", None) or Caller()
 
         # 派发面包屑（2026-07-26 reconcile 前置）：dispatch 一返回就把房间/Stand/消息
         # 水位线写进 state——等待者此后任何时刻死掉，reconcile 都能凭它去房间补收。
@@ -6205,7 +6378,7 @@ def _cmd_run(args) -> int:
         return 0 if status == "completed" else 1
 
     # ── 前台同步 ──
-    caller = Caller()
+    caller = getattr(args, "_caller", None) or Caller()  # P2-9：go 链透传复用
     fg_dry_run = bool(args.no_relay) or bool(args.dry_run)
     try:
         res = _run_by_mode(caller, decision, args, timeout, dry_run=fg_dry_run,
@@ -6329,8 +6502,8 @@ def _cmd_go(args) -> int:
     elif role == "thinker":
         selected_template = caller.default_thinker_id
     elif mode == "worker":
-        # ⑤ 路由反转：worker 模式=重活车道，锚 default_heavy_worker（加载层已应用
-        # HEAVY_LANE_STAND 改道，2026-07-29 GLM 额度满期间=kimi-k3），
+        # ⑤ 路由反转：worker 模式=重活车道，锚 default_heavy_worker（加载层已由
+        # resolve_lane_anchors 应用 areco 设置页真锚，2026-07-30 高律师定案），
         # 与 run 的实际派发口径一致（default_worker 已是 hy3）。
         selected_template = caller.default_heavy_worker_id
     else:
@@ -6339,6 +6512,9 @@ def _cmd_go(args) -> int:
         "cmd": "go", "mode": mode, "role": role, "template_id": selected_template,
         "plan_only": plan_only, "summary": summary,
         "route_reason": route_reason[:80],
+        # 车道锚来源横幅（2026-07-30 定案：真锚=areco 设置页；
+        # 形如 "kimi-k3@areco-config" / "qclaw-flash@areco-api" / "kimi-k3@常量fallback"）
+        "lane_anchor_source": caller.lane_anchor_sources or None,
         "recall": (args.recall or "").strip() or None,
     }, ensure_ascii=False), flush=True)
 
@@ -6358,6 +6534,7 @@ def _cmd_go(args) -> int:
         no_relay=False, dry_run=False, reuse_plan=bool(args.reuse_plan),
         force=bool(getattr(args, "force", False)),
         fresh=bool(getattr(args, "fresh", False)),
+        _caller=caller,  # P2-9：头行已实例化的 Caller 透传 _cmd_run，免二次三级读+registry 双载
     )
     return _cmd_run(ns)
 
@@ -6667,8 +6844,35 @@ def _reconcile_lock() -> bool:
         return False
 
 
+def _ps_c_escape(s: str) -> str:
+    """把字符串转成 BSD ps 在 LC_ALL=C 下 command 列的 vis 转义呈现形态。
+
+    C locale 下非 ASCII 字节被 ps 逐字节打成 M- 转义（UTF-8 中文即此形态，
+    如「调」= E8 B0 83 → "M-hM-0M^C"）。_waiter_alive 拿中文 req_key 直接匹配
+    cmdline 永不命中 → 活等待者被误判死、reconcile 抢跑定稿（2026-07-30 诊断 F1）。
+    匹配前先把 req_key 做同款转义即可命中；纯 ASCII 输入转义后原样不变（退化为旧匹配）。
+    """
+    out = []
+    for b in s.encode("utf-8", "replace"):
+        meta = b >= 0x80
+        c = b & 0x7F
+        if c == 0x20:
+            # vis(3) 特例：低 7 位是空格的字节一律走八进制（0xA0 → "\240"，如「你」的
+            # 第三字节 E4 BD A0）；裸空格 0x20 本身可见不转义。实测踩坑修正（2026-07-30）
+            out.append("\\240" if meta else " ")
+        elif c < 0x20:
+            out.append(("M^" if meta else "^") + chr(c + 0x40))
+        elif c == 0x7F:
+            out.append("M^?" if meta else "^?")
+        elif meta:
+            out.append("M-" + chr(c))
+        else:
+            out.append(chr(c))
+    return "".join(out)
+
+
 def _waiter_alive(pid, task_id: str = "", start_ts: float | None = None,
-                  request: str = "") -> bool:
+                  request: str = "", ps_line: str | None = None) -> bool:
     """等待者进程还活着吗（2026-07-28 B5 加固：pid 复用误判升级）。
 
     旧口径只看 ps 输出含 "caller.py"/"python"——pid 被任何一个常驻 python 复用即永久
@@ -6679,18 +6883,23 @@ def _waiter_alive(pid, task_id: str = "", start_ts: float | None = None,
     lstart 解析失败/取不到 → 视为死（新口径宁可误判死：启动时间都在手还判不了，
     说明进程已不是当初那个等待者）。旧 state 无 start_ts → 回落旧逻辑（查不动保守当活：
     误判死会双写 inbox，误判活只是晚一轮）。
+    ps_line（P2-9 批量化）：调用方已用 _ps_lines_for 批量查过时传对应行（无行传 ""），
+    本函数不再自己 fork ps；None = 未批量，自查。
     """
     if not pid:
         return False
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "pid=,lstart=,command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=5,
-            env={**os.environ, "LC_ALL": "C"},  # 锁 C locale，lstart 英文月份才解析得动
-        )
-    except Exception:
-        return True  # ps 本身跑不动：保守当活（旧口径同款兜底）
-    line = (out.stdout or "").strip()
+    if ps_line is None:
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "pid=,lstart=,command=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+                env={**os.environ, "LC_ALL": "C"},  # 锁 C locale，lstart 英文月份才解析得动
+            )
+        except Exception:
+            return True  # ps 本身跑不动：保守当活（旧口径同款兜底）
+        line = (out.stdout or "").strip()
+    else:
+        line = ps_line.strip()
     if not line:
         return False  # pid 无此进程：新旧口径都判死
     if not start_ts:
@@ -6706,11 +6915,22 @@ def _waiter_alive(pid, task_id: str = "", start_ts: float | None = None,
             return False  # pid 复用：启动时间对不上
     except Exception:
         return False  # 解析失败 → 视为死
-    if task_id and task_id in cmdline:
+    # cmdline 是 LC_ALL=C 下的 vis 转义形态：中文 task_id/req_key 须先做同款转义才
+    # 匹配得上（2026-07-30 诊断 F1：中文请求永不命中 → 活 waiter 误判死 → 抢跑定稿）。
+    # 纯 ASCII 转义后原样不变，行为与旧口径完全一致。
+    if task_id and _ps_c_escape(task_id) in cmdline:
         return True
     req_key = " ".join((request or "").split())[:40]
-    if req_key and req_key in cmdline:
-        return True
+    if req_key:
+        esc = _ps_c_escape(req_key)
+        if esc in cmdline:
+            return True
+        # 请求原文若含换行/制表（argv 里被 ps 打成 ^J/^I/\n），req_key 已把它们
+        # 折成空格——把 cmdline 侧同样归一后再试一次
+        norm = " ".join(cmdline.replace("^J", " ").replace("^I", " ")
+                        .replace("\\n", " ").replace("\\t", " ").split())
+        if esc in norm:
+            return True
     if not task_id and not req_key:
         return "caller.py" in cmdline or "python" in cmdline.lower()
     return False
