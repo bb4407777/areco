@@ -165,6 +165,14 @@ function openFor(team: string): DatabaseSync {
   return open(dbKindForTeam(team))
 }
 
+/** 测试钩子：清路由与存在性缓存（TTL 让毫秒级 rooms.json 切换不可见——生产语义，测试须显式冲掉；生产勿调） */
+export function _resetRoutingCachesForTest(): void {
+  roomsKindCache = null
+  roomsStatAtMs = 0
+  dbFileSeen.task = false
+  dbFileSeen.project = false
+}
+
 /** 库文件存在性（单调缓存：打开过/见过即永真——库只增建不删除，false 才重查盘） */
 const dbFileSeen: Record<DbKind, boolean> = { task: false, project: false }
 function dbFileExists(kind: DbKind): boolean {
@@ -191,13 +199,13 @@ function dbsForId(id: number): DatabaseSync[] {
 
 /** 含指定消息 id 的库（两库 id 永不相撞，最多命中一个） */
 function dbWithMessage(id: number): DatabaseSync | null {
-  for (const db of dbsForId(id)) if (db.prepare('SELECT 1 FROM messages WHERE id = ?').get(id)) return db
+  for (const db of dbsForId(id)) if (stmt(db, 'SELECT 1 FROM messages WHERE id = ?').get(id)) return db
   return null
 }
 
 /** 含指定 dispatch id 的库 */
 function dbWithDispatch(id: number): DatabaseSync | null {
-  for (const db of dbsForId(id)) if (db.prepare('SELECT 1 FROM dispatch WHERE id = ?').get(id)) return db
+  for (const db of dbsForId(id)) if (stmt(db, 'SELECT 1 FROM dispatch WHERE id = ?').get(id)) return db
   return null
 }
 
@@ -262,6 +270,20 @@ function migrateDispatch(db: DatabaseSync): void {
   for (const [col, sql] of Object.entries(add)) if (!cols.has(col)) db.exec(sql)
 }
 
+// ── prepared statement 缓存（2026-08-02 提速二轮）────────────────────
+// node:sqlite 的 db.prepare() 每次都重新编译 SQL；tick 每秒对每个活跃房间跑
+// history/historyAfter，编译成本纯属固定税。StatementSync 官方支持跨调用复用
+// （.get/.all/.run 可重复执行），按 (db, sql) 缓存；WeakMap 键随连接存亡，无泄漏。
+type StatementSyncT = ReturnType<DatabaseSync['prepare']>
+const stmtCache = new WeakMap<DatabaseSync, Map<string, StatementSyncT>>()
+function stmt(db: DatabaseSync, sql: string): StatementSyncT {
+  let m = stmtCache.get(db)
+  if (!m) stmtCache.set(db, (m = new Map()))
+  let s = m.get(sql)
+  if (!s) m.set(sql, (s = db.prepare(sql)))
+  return s
+}
+
 function rowToMessage(r: Record<string, unknown>): ProjectMessageRow {
   return {
     id: Number(r.id),
@@ -284,10 +306,9 @@ export function send(
   if (!team || !from || !to || !body.trim()) throw new Error('team/from/to/body 不能为空')
   const db = openFor(team)
   try {
-    const res = db
-      .prepare('INSERT INTO messages (team, from_agent, to_agent, body, human_relay) VALUES (?, ?, ?, ?, ?)')
-      .run(team, from, to, body, opts?.humanRelay ? 1 : 0)
-    const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(res.lastInsertRowid as number)
+    const res = stmt(db, 'INSERT INTO messages (team, from_agent, to_agent, body, human_relay) VALUES (?, ?, ?, ?, ?)').run(
+      team, from, to, body, opts?.humanRelay ? 1 : 0)
+    const row = stmt(db, 'SELECT * FROM messages WHERE id = ?').get(res.lastInsertRowid as number)
     return rowToMessage(row as Record<string, unknown>)
   } finally {
     /* P2-10 共享长连接：不逐调用关闭（见 open） */
@@ -299,12 +320,23 @@ export function history(team: string, limit = 100): ProjectMessageRow[] {
   const kind = dbKindForTeam(team)
   if (!dbFileExists(kind)) return []
   const db = open(kind)
-  try {
-    const rows = db.prepare('SELECT * FROM messages WHERE team=? ORDER BY id DESC LIMIT ?').all(team, limit)
-    return (rows as Record<string, unknown>[]).map(rowToMessage).reverse()
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  const rows = stmt(db, 'SELECT * FROM messages WHERE team=? ORDER BY id DESC LIMIT ?').all(team, limit)
+  return (rows as Record<string, unknown>[]).map(rowToMessage).reverse()
+}
+
+/** 增量消息流（tick 游标下推，2026-08-02 提速二轮）：id > afterId 的消息升序直查。
+ *  走 idx_team_history 索引且无需 reverse；平时新消息为零 → 每 tick 每房间零行返回，
+ *  取代「拉最近 50 条到 JS 层再按游标过滤、积压时指数放大重拉」的旧模式。 */
+export function historyAfter(team: string, afterId: number, limit = 6400): ProjectMessageRow[] {
+  const kind = dbKindForTeam(team)
+  if (!dbFileExists(kind)) return []
+  const db = open(kind)
+  const rows = stmt(db, 'SELECT * FROM messages WHERE team=? AND id>? ORDER BY id ASC LIMIT ?').all(
+    team,
+    afterId,
+    limit
+  )
+  return (rows as Record<string, unknown>[]).map(rowToMessage)
 }
 
 /**
@@ -579,6 +611,6 @@ export function activeSerialDispatches(team: string): DispatchRow[] {
 export function messageById(id: number): ProjectMessageRow | null {
   const db = dbWithMessage(id)
   if (!db) return null
-  const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id)
+  const row = stmt(db, 'SELECT * FROM messages WHERE id = ?').get(id)
   return row ? rowToMessage(row as Record<string, unknown>) : null
 }

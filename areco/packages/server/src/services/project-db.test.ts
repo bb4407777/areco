@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-pdb-'))
 process.env.ARECO_ROOT = root
@@ -46,7 +47,7 @@ test('correctMessageSender 改写 from_agent（冒名回执署名校正，2026-0
 })
 
 test('双库路由（2026-08-02 定名分库）：项目房落 projects.db，任务房落 tasks.db，id 永不撞', () => {
-  // rooms.json 声明 kind；写入后 mtime 变化触发缓存刷新
+  db._resetRoutingCachesForTest() // stat TTL 对毫秒级 rooms.json 切换不可见,测试显式冲缓存
   fs.writeFileSync(
     path.join(root, 'data', 'rooms.json'),
     JSON.stringify([
@@ -81,5 +82,33 @@ test('双库路由（2026-08-02 定名分库）：项目房落 projects.db，任
   db.updateDelivery(dels[0].id, { status: 'injected' })
   assert.equal(db.deliveriesOf(dispatch.id)[0].status, 'injected')
   // 收尾清掉 rooms.json，不影响其它用例的兜底行为
+  fs.rmSync(path.join(root, 'data', 'rooms.json'))
+})
+
+test('historyAfter 增量直查：仅返回 id>afterId 的升序消息（tick 游标下推）', () => {
+  const a = db.send('room-inc1', 'A', 'all', '第一条')
+  const b = db.send('room-inc1', 'B', 'all', '第二条')
+  const c = db.send('room-inc1', 'C', 'all', '第三条')
+  assert.deepEqual(db.historyAfter('room-inc1', a.id, 100).map((m) => m.body), ['第二条', '第三条'])
+  assert.deepEqual(db.historyAfter('room-inc1', c.id, 100), [])
+  assert.deepEqual(db.historyAfter('room-inc1', 0, 2).map((m) => m.body), ['第一条', '第二条'])
+  assert.equal(db.historyAfter('room-inc1', a.id, 100)[0].id, b.id)
+})
+
+test('存量低 id 项目消息可回退命中（dbsForId 范围路由的 miss 回退，迁移保留原 id 场景）', () => {
+  db._resetRoutingCachesForTest()
+  fs.writeFileSync(
+    path.join(root, 'data', 'rooms.json'),
+    JSON.stringify([{ id: 'lp', team: 'room-legacy-proj', kind: 'project', name: '存量项目房' }])
+  )
+  // 迁移保留原 id：项目库里手工放一条低 id（< 10_000_000）消息，模拟拆库迁移的存量行
+  const pdbPath = path.join(root, 'data', 'projects.db')
+  const raw = new DatabaseSync(pdbPath)
+  raw.exec("INSERT INTO messages (id, team, from_agent, to_agent, body) VALUES (4321, 'room-legacy-proj', 'Old', 'all', '迁移存量项目消息')")
+  raw.close()
+  // 按 id 查询：4321 < SEED，先查任务库 miss，必须回退项目库命中
+  assert.equal(db.messageById(4321)?.body, '迁移存量项目消息')
+  // 按 team 的 history 走 kind 路由直达项目库
+  assert.ok(db.history('room-legacy-proj', 10).some((m) => m.id === 4321))
   fs.rmSync(path.join(root, 'data', 'rooms.json'))
 })

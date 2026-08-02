@@ -358,18 +358,18 @@ export class RoomRelay {
       if (room.archivedAt !== null) continue
       let msgs: projectDb.ProjectMessageRow[]
       try {
-        msgs = projectDb.history(room.team, 50)
-        // 窗口溢出兜底：一个轮询周期新增超 50 条时，尾批盖不住游标，窗口外消息会被静默跳过。
-        // history 无分页参数，逐步放大 limit 直到窗口含游标（或库内已无更早消息），
-        // 保证 id>cursor 的消息不丢；上限 6400 防异常刷库时一次性全量拉出。
-        const cursor = this.cursors.get(room.id)
-        let limit = 50
-        while (cursor !== undefined && msgs.length === limit && msgs[0].id > cursor && limit < 6400) {
-          limit *= 2
-          msgs = projectDb.history(room.team, limit)
-        }
-        if (msgs.length === limit && msgs[0] && cursor !== undefined && msgs[0].id > cursor) {
-          log.warn(`轮询 ${room.team} 积压超过 ${limit} 条，最早 ${msgs[0].id - cursor - 1} 条已超出窗口跳过`)
+        const knownCursor = this.cursors.get(room.id)
+        if (knownCursor !== undefined) {
+          // 游标下推（2026-08-02 提速二轮）：id>cursor 增量直查——平时无新消息即零行返回，
+          // 取代「每 tick 拉最近 50 条到 JS 层过滤、积压时指数放大重拉」的旧模式。
+          // LIMIT 6400 防异常刷库一次性全量拉出；打满即警告（后续 tick 凭推进后的游标续拉，不丢）。
+          msgs = projectDb.historyAfter(room.team, knownCursor, 6400)
+          if (msgs.length === 6400) {
+            log.warn(`轮询 ${room.team} 单拍增量打满 6400 条，剩余下一拍续拉`)
+          }
+        } else {
+          // 初见房间（含重启后首轮）：取近 50 条做时间快进基线（语义与旧版一致）
+          msgs = projectDb.history(room.team, 50)
         }
       } catch (err) {
         log.warn(`轮询 ${room.team} 失败`, err)
