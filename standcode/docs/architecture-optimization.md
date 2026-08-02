@@ -82,7 +82,7 @@
 
 ```
 Caller.send_message()
-    → SQLite INSERT（projects.db / messages 表）
+    → SQLite INSERT（tasks.db / messages 表）
         team=<room team>  from_agent="Hermes"  human_relay=1
     → areco room-relay 检测到新消息
         humanRelayAgents=["Hermes"] 白名单内 → 清零链深、投全体

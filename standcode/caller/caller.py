@@ -65,7 +65,7 @@ ARECO_ROOT = (
     or _detect_areco_root()
     or str(Path(HOME_DIR) / "Code" / "StandCode" / "areco")
 )
-PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
+PROJECTS_DB = Path(ARECO_ROOT) / "data" / "tasks.db"
 REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
 
 # ── 房间来源标记 / 台账 / 自动归档 ──────────────────────────────────
