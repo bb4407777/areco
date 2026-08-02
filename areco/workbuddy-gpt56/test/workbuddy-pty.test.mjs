@@ -445,3 +445,20 @@ test("adapter matches its own turn when GUI persists the enveloped user event", 
     await fs.rm(home, { recursive: true, force: true });
   }
 });
+
+test("enqueue echoes the prompt immediately even while a previous turn is running", async () => {
+  const output = [];
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const adapter = new WorkBuddyPtyAdapter({
+    stdout: { write: (text) => output.push(text) },
+    stderr: { write: (text) => output.push(text) },
+  });
+  adapter.runPrompt = async () => { await firstGate; };
+  const first = adapter.enqueue("第一条");
+  const second = adapter.enqueue("第二条");   // 第一条未完成时入队
+  // areco nonce 回显判据：第二条的回显必须此刻已可见，不得等队列轮转
+  assert.ok(output.join("").includes("> 第二条"));
+  releaseFirst();
+  await Promise.all([first, second]);
+});
