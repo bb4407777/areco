@@ -1,0 +1,58 @@
+#!/bin/bash
+# sc — StandCode 通用派发入口（2026-08-02 多向派发）
+#
+# 让本机任何 agent（QClaw / WorkBuddy / Kimi / areco Stand / 人工终端）一条命令
+# 用上 StandCode 派发平台，不再只有 Hermes 单向派发：
+#
+#   sc go "<任务>" --caller QClaw                # 派发（自动路由 worker/think/plan）
+#   sc go "<子任务>" --caller "<成员名>" --depth 1  # Stand 转派子任务（按任务书委派说明）
+#   sc inbox --digest --caller QClaw             # 收自己通道的结果简报（按 caller 隔离）
+#   sc status <task_id>                          # 查任务状态
+#
+# 身份解析优先级：--caller 旗标 > $STANDCODE_CALLER > HERMES_HOME 特征（Hermes）> cli。
+# 身份即署名（from_agent 落库，审计/台账/收信箱全按它分维）——署名真实，禁冒名。
+# 深度红线：转派子任务必须带 --depth（上限默认 2，超限拒派）；分身层退役（2026-07-29）
+# 的教训——中转链没有正确率增量、纯付中转税。
+#
+# caller.py 真身在 deploy 树（纪律：派单一律跑已提交代码，禁从 agent 树跑 WIP）；
+# 解释器需带 requests（homebrew 3.13 已统一），WorkBuddy 内置 python 兜底。
+set -euo pipefail
+
+CALLER_PY="${STANDCODE_CALLER_PY:-/Users/gao/Code/StandCode-deploy/standcode/caller/caller.py}"
+
+# ── 摘出 --caller，其余参数原样透传（caller.py 只认 env STANDCODE_CALLER）──
+args=()
+caller="${STANDCODE_CALLER:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --caller)
+      [ $# -ge 2 ] || { echo "sc: --caller 需要一个身份名参数" >&2; exit 2; }
+      caller="$2"; shift 2 ;;
+    --caller=*)
+      caller="${1#--caller=}"; shift ;;
+    *)
+      args+=("$1"); shift ;;
+  esac
+done
+
+if [ -z "$caller" ]; then
+  if [ -n "${HERMES_HOME:-}" ]; then
+    caller="Hermes"   # Hermes gateway 的 terminal 子进程继承 HERMES_HOME
+  else
+    caller="cli"      # 身份不明按人工 CLI 记账；agent 调用请显式 --caller
+  fi
+fi
+export STANDCODE_CALLER="$caller"
+
+# ── 解释器：python3 带 requests 即用；WorkBuddy 内置 3.13 兜底 ──
+PY=""
+for cand in python3 /opt/homebrew/bin/python3 \
+    /Users/gao/.workbuddy/binaries/python/versions/3.13.12/bin/python3; do
+  if command -v "$cand" >/dev/null 2>&1 \
+      && "$cand" -c "import requests" >/dev/null 2>&1; then
+    PY="$cand"; break
+  fi
+done
+[ -n "$PY" ] || { echo "sc: 找不到带 requests 的 python3（brew install python / 检查 WorkBuddy 内置）" >&2; exit 127; }
+
+exec "$PY" "$CALLER_PY" ${args[@]+"${args[@]}"}

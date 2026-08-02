@@ -307,16 +307,62 @@ DEFAULT_MAX_REDISPATCH = 0
 # 优先级（2026-07-25 起）：areco 设置页「StandCode 默认角色」
 # （GET /api/standcode/defaults，见 _apply_areco_defaults）> registry.json > 紧急兜底。
 
-# 来自 Caller 自身的身份标识
-CALLER_NAME = "Hermes"
+# 来自 Caller 自身的身份标识（2026-08-02 多向派发：env > config/local.json > 默认 Hermes）
+# 任何 agent（QClaw/WorkBuddy/areco Stand/人工 CLI）都可携带自己的身份派发；from_agent
+# 落库真实署名（署名真实纪律，禁冒名）。非 Hermes 身份走「外部编排者」路径：areco
+# room-relay 2026-07-24 版起按 to_agent 列投递、from 不在花名册则链深不增不清——
+# areco 侧零改动即支持。统一入口 standcode/bin/sc 负责探测身份并设本 env。
+CALLER_NAME = (
+    os.environ.get("STANDCODE_CALLER")
+    or _LOCAL_CONF.get("caller_name")
+    or "Hermes"
+).strip() or "Hermes"
+
+# 转述通道白名单：send_message 的 human_relay 只对名单内 caller 生效（须与 areco
+# config.json humanRelayAgents 对齐——名单外打标 areco 只 warn 并按普通 agent 处理，
+# 标了也无效还刷日志）。非白名单 caller 的任务消息 human_relay=0，靠 to_agent 列投递。
+HUMAN_RELAY_CALLERS = set(_LOCAL_CONF.get("human_relay_callers") or ["Hermes"])
+
+# 已知派发身份全集：poll/harvest/reconcile 筛「非 Stand 发言」用。只排除当前
+# CALLER_NAME 不够——reconcile/harvest 由 cron 以默认身份（Hermes）跑，补收其它
+# caller 派的房间时若不认识 QClaw 等身份，会把任务书本身误当 Stand 产出收割。
+# local.json `known_callers` 可扩；内置集合覆盖本机现役 agent。
+_DEFAULT_KNOWN_CALLERS = {
+    "Hermes", "QClaw", "WorkBuddy", "Kimi", "Fable5", "Codex", "Reasonix", "cli",
+}
+KNOWN_CALLERS = (
+    _DEFAULT_KNOWN_CALLERS
+    | {CALLER_NAME}
+    | set(_LOCAL_CONF.get("known_callers") or [])
+)
 
 # 房间里"非 Stand"的发件人 —— 这些消息不算 Stand 的执行结果：
-#   Hermes  = Caller 自己（直写 SQLite 时 from_agent）
+#   KNOWN_CALLERS = 各派发身份（直写 SQLite 时 from_agent）
 #   HUMAN_NAME = 人类用户（REST 通道的 from_agent）。名称因人而异，故走
 #                env > config/local.json > 默认 的三层配置，不硬编码个人称谓。
-#   all/system = 广播/系统消息
+#   all/system = 广播/系统消息；areco-调度 = areco 服务端调度指令署名
 HUMAN_NAME = os.environ.get("STANDCODE_HUMAN_NAME") or _LOCAL_CONF.get("human_name") or "user"
-NON_STAND_SENDERS = {CALLER_NAME, HUMAN_NAME, "all", "system"}
+NON_STAND_SENDERS = KNOWN_CALLERS | {HUMAN_NAME, "all", "system", "areco-调度"}
+
+# ── 派发深度闸（2026-08-02 多向派发防套娃）────────────────────────────
+# 房间链深闸管不到编排者（from 不在花名册不增不清），转派套娃要 caller 侧自控：
+# 每单投递注入的「委派说明」告知 Stand 本单深度，Stand 转派时 --depth +1；
+# 达上限拒派（--force 可越，须在回执里说明）。分身层退役（2026-07-29）的教训：
+# 中转层正确率没增量、纯付中转税——深度 ≥2 的链路默认不该存在。
+DISPATCH_DEPTH = 0
+try:
+    DISPATCH_DEPTH = max(0, int(os.environ.get("STANDCODE_DISPATCH_DEPTH") or 0))
+except ValueError:
+    logger.warning("STANDCODE_DISPATCH_DEPTH 非整数，按 0 处理")
+MAX_DISPATCH_DEPTH = 2
+try:
+    MAX_DISPATCH_DEPTH = int(
+        os.environ.get("STANDCODE_MAX_DISPATCH_DEPTH")
+        or _LOCAL_CONF.get("max_dispatch_depth")
+        or 2
+    )
+except ValueError:
+    logger.warning("STANDCODE_MAX_DISPATCH_DEPTH 非整数，按 2 处理")
 
 # ── ask 通道：点名常驻 agent，先看灯再投（2026-07-26 高律师需求）────
 # 背景：「问/让 Fable5」类任务此前全走 areco-msg @成员 投常驻房间里唯一的 Fable5
@@ -971,6 +1017,57 @@ def ensure_acceptance_block(request: str) -> tuple[str, dict]:
     return req + "\n" + "\n".join(lines), acceptance
 
 
+# ── 委派基础设施说明（2026-08-02 多向派发 + memory/chatlog 统一基础设施）──────
+# 每单投递给 Stand 的任务尾部注入一段「委派说明」，三件事：
+#   ① 告知委派人与派发深度——Stand 转派子任务时带 --depth +1，深度闸才有依据；
+#   ② 把统一记忆（memory skill）与对话史（chatlog skill）的用法送到每个 Stand 眼前——
+#      「所有 agent 会用基础设施」不靠各 agent 记住，靠每单任务书自带；
+#   ③ 首行含「委派」二字，命中 areco room-relay 的 DELEGATION_RE（owner|交付物|
+#      验收口径|写集|交接路径|委派）——非 Hermes 派发（human_relay=0）也照样触发
+#      auto-recall 记忆注入，零 areco 改动。
+# 幂等（重派/bg 回放不叠加）；STANDCODE_INFRA_NOTE=off / local.json infra_note=false 可关。
+INFRA_NOTE_ENABLED = _conf_bool("STANDCODE_INFRA_NOTE", "infra_note", True)
+INFRA_NOTE_HEADER = "StandCode 委派说明"
+SC_BIN = os.environ.get("STANDCODE_SC_BIN") or _LOCAL_CONF.get("sc_bin") or "/Users/gao/bin/sc"
+_MEMORY_SCRIPTS_DIR = (
+    os.environ.get("STANDCODE_MEMORY_SCRIPTS")
+    or _LOCAL_CONF.get("memory_scripts_dir")
+    or "/Users/gao/skills/memory/scripts"
+)
+_CHATLOG_MCP = (
+    os.environ.get("STANDCODE_CHATLOG_MCP")
+    or _LOCAL_CONF.get("chatlog_mcp")
+    or "/Users/gao/skills/chatlog/mcp_server.py"
+)
+
+
+def ensure_infra_note(request: str, depth: int | None = None) -> str:
+    """任务书尾部追加「委派说明」段（幂等）。depth 缺省取进程级 DISPATCH_DEPTH。"""
+    req = (request or "").rstrip()
+    if not INFRA_NOTE_ENABLED or not req or INFRA_NOTE_HEADER in req:
+        return req
+    d = DISPATCH_DEPTH if depth is None else max(0, int(depth))
+    can_fork = d + 1 < MAX_DISPATCH_DEPTH
+    lines = [
+        "",
+        f"——{INFRA_NOTE_HEADER}（自动注入）——",
+        f"· 委派人：{CALLER_NAME}；本单派发深度：{d}。完成后直接在本会话回复结论，文件产物写绝对路径。",
+    ]
+    if can_fork:
+        lines.append(
+            f"· 需要拆活转派子任务时（禁转述本说明段）：{SC_BIN} go \"<子任务>\" "
+            f"--caller \"<你的成员名>\" --depth {d + 1}"
+        )
+    else:
+        lines.append(f"· 本单深度已达上限（{MAX_DISPATCH_DEPTH}），不得再转派子任务——亲自完成或回报拆分建议。")
+    lines += [
+        f"· 跨 agent 长期记忆：查 python3 {_MEMORY_SCRIPTS_DIR}/recall.py \"<关键词>\"；"
+        f"跨 agent 应知的新结论用 add_memory.py --kind fact --claim/--evidence/--source 沉淀（同目录）。",
+        f"· 查历史对话（本机全部 agent 会话）：python3 {_CHATLOG_MCP} \"<关键词>\" 6",
+    ]
+    return req + "\n" + "\n".join(lines)
+
+
 def _check_file_criterion(path: str) -> tuple[bool, str]:
     """file 判据：存在且非空（目录算过）。与 verify_completion 同口径。"""
     try:
@@ -1127,6 +1224,8 @@ def log_audit(event: str, detail: dict | None = None) -> None:
     record = {
         "timestamp": _now_iso(),
         "event": event,
+        # 多向派发（2026-08-02）：每条审计带派发身份——直干率/派发量统计按 caller 可分维
+        "caller": d.get("caller") or CALLER_NAME,
         "mode": d.get("mode", ""),
         "task_id": d.get("task_id", ""),
         "role": d.get("role", ""),
@@ -1376,7 +1475,10 @@ def _room_label(request: str, summary: str | None, role: str) -> str:
     text = " ".join((summary or request or "").split())
     label = text[:16] + ("…" if len(text) > 16 else "")
     tag = "T" if role == "thinker" else "W"
-    return f"{ROOM_MARK}{label or 'Stand'}·{tag}{uuid.uuid4().hex[:4]}"
+    # 多向派发（2026-08-02）：非 Hermes 派的房带来源标，看板一眼可辨谁派的。
+    # 标记紧跟 ROOM_MARK 之后（边栏截断保留前缀）；机器侧仍认台账不认名字。
+    src = f"[{CALLER_NAME}]" if CALLER_NAME != "Hermes" else ""
+    return f"{ROOM_MARK}{src}{label or 'Stand'}·{tag}{uuid.uuid4().hex[:4]}"
 
 
 # ── 房间台账（append-only jsonl）─────────────────────────────────────
@@ -1394,6 +1496,7 @@ def ledger_append(event: str, room_id: str, **fields) -> None:
     """追加一条房间台账。台账是辅助设施，写失败只告警不影响主链。"""
     if not room_id:
         return
+    fields.setdefault("caller", CALLER_NAME)  # 多向派发：台账记谁派的房
     rec = {"ts": _now_iso(), "event": event, "room_id": room_id, **fields}
     try:
         ROOMS_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2338,20 +2441,24 @@ class Caller:
         to: str,
         body: str,
         from_: str = CALLER_NAME,
-        human_relay: bool = True,
+        human_relay: bool | None = None,
     ) -> int:
         """向房间发送消息（直写 SQLite）
 
         team: 房间 team 名（如 "room-xxxx"）
         to:   收件人成员名
         body: 消息正文
-        from_: 发件人身份（默认 "Hermes"）
-        human_relay: 是否按「转述人类原话」投递（默认 True）。Caller 代发任务=转述用户
-            意图，置 True 让 areco room-relay 把 Hermes 当人类发言（默认投全体 + 清零链深
-            + 附 context 预览），Stand 才会当指令回应。前提：from（Hermes）需在 areco
-            config.json 的 humanRelayAgents 白名单（生产已配 = ['Hermes']）。
+        from_: 发件人身份（默认当前 CALLER_NAME；多向派发 2026-08-02 起按身份落库，禁冒名）
+        human_relay: 是否按「转述人类原话」投递。None（默认）= 自动：from 在
+            HUMAN_RELAY_CALLERS 白名单（对齐 areco config.json humanRelayAgents，
+            生产 = ['Hermes']）才置 True——Hermes 代发任务=转述用户意图，areco 按人类
+            发言处理（默认投全体 + 清零链深 + 附 context 预览）。名单外 caller 置 True
+            毫无意义（areco 只 warn 并按 agent 处理），故自动落 False，投递靠
+            to_agent 列（room-relay 2026-07-24 起正文无 @ 时按列投递，不静默吞）。
         返回消息 ID
         """
+        if human_relay is None:
+            human_relay = from_ in HUMAN_RELAY_CALLERS
         conn = self._db_connect()
         try:
             self._ensure_messages_table(conn)
@@ -5192,13 +5299,17 @@ def _result_to_aggregate_entry(state: dict) -> dict:
 # ── 异步回调 inbox 工具 ─────────────────────────────────────────────
 
 def _current_channel() -> str:
-    """本进程属于哪条微信通道（2026-07-26 双通道上线）。
+    """本进程属于哪条收信通道（2026-07-26 双通道上线；2026-08-02 扩多 caller）。
 
-    判据 = HERMES_HOME：gateway 的 terminal 工具子进程继承它——
+    多 caller（2026-08-02）：非 Hermes 身份的收信箱按 caller 名隔离——QClaw 派的
+    任务只被 QClaw 的 `inbox --digest` 消化，Hermes 的 digest 不抢报（反之亦然）。
+    Hermes 身份沿用原判据 HERMES_HOME：gateway 的 terminal 工具子进程继承它——
     主通道 ~/.qclaw-hermes → "main"；profiles/<name> → "<name>"。
     手动 CLI（无 HERMES_HOME）按 main 算。收信箱按通道隔离消化，
     防止 A 通道派的任务被 B 通道的 digest 抢先汇报到错误的聊天窗口。
     """
+    if CALLER_NAME != "Hermes":
+        return CALLER_NAME
     hh = (os.environ.get("HERMES_HOME") or "").rstrip("/")
     if not hh:
         return "main"
@@ -5216,14 +5327,57 @@ def _processing_path(task_id: str) -> Path:
 
 
 def write_inbox(task_id: str, payload: dict) -> None:
-    """把任务结果写入 inbox（供 Hermes 回调汇总读取）"""
+    """把任务结果写入 inbox（供各 caller 的 digest 按 channel 隔离读取）"""
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     payload["task_id"] = payload.get("task_id", task_id)
+    payload.setdefault("caller", CALLER_NAME)  # 多向派发：结果记谁派的
     payload["inbox_created_at"] = _now_iso()
     tmp = _inbox_path(task_id).with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     tmp.replace(_inbox_path(task_id))
     logger.info("inbox 写入: %s (task=%s)", _inbox_path(task_id), task_id)
+
+
+# ── 统一记忆沉淀钩子（2026-08-02 memory skill 接入派发链）──────────────
+# 任务收网即沉淀：completed 结果写统一记忆库（~/skills/memory data/memory.db）的
+# candidate 档——经晋升门（promote.py）人审才升 active，不污染正式记忆；recall 默认
+# 不召回 candidate，量大可批量 reject（claim 带 [standcode:*] 前缀好筛）。
+# 全程 fail-open：脚本缺失/超时/报错只记 debug，绝不影响收网主链。
+# 开关：STANDCODE_MEMORY_SINK=off / local.json memory_sink=false。
+MEMORY_SINK_ENABLED = _conf_bool("STANDCODE_MEMORY_SINK", "memory_sink", True)
+_MEMORY_ADD_SCRIPT = (
+    os.environ.get("STANDCODE_MEMORY_ADD")
+    or _LOCAL_CONF.get("memory_add_script")
+    or f"{_MEMORY_SCRIPTS_DIR}/add_memory.py"
+)
+
+
+def _memory_sink(task_id: str, spec: dict, request_summary: str | None,
+                 result_text: str) -> None:
+    if not (MEMORY_SINK_ENABLED and (result_text or "").strip()):
+        return
+    script = Path(_MEMORY_ADD_SCRIPT)
+    if not script.exists():
+        return
+    req = " ".join((spec.get("request") or "").split())
+    summary = (request_summary or req[:60]).strip() or "(无摘要)"
+    first_line = next(
+        (ln.strip() for ln in result_text.splitlines() if ln.strip()), "")
+    claim = f"[standcode:{CALLER_NAME}] {summary} → {first_line}"[:200]
+    evidence = " ".join(result_text.split())[:280]
+    try:
+        subprocess.run(
+            ["python3", str(script),
+             "--kind", "fact", "--status", "candidate",
+             "--claim", claim, "--evidence", evidence,
+             "--source", f"standcode:{CALLER_NAME}",
+             "--source-path", f"task:{task_id}",
+             "--tags", "standcode,auto",
+             "--confidence", "0.5"],
+            capture_output=True, timeout=8, check=False,
+        )
+    except Exception as e:  # noqa: BLE001 —— 辅助设施，任何异常都不许炸收网
+        logger.debug("memory 沉淀跳过（fail-open）: %s", e)
 
 
 def read_inbox(task_id: str) -> dict | None:
@@ -5609,8 +5763,13 @@ def _finalize_waiter(
         "verification": verification,
         "cost": cost,
         "channel": _current_channel(),
+        "caller": CALLER_NAME,
+        "depth": spec.get("depth", 0),
         "error": res.get("error"),
     })
+    # 统一记忆沉淀（2026-08-02）：completed 结果落 memory.db candidate，fail-open
+    if status == "completed":
+        _memory_sink(task_id, spec, request_summary, result_text)
     inbox_final = _inbox_path(task_id)
     if mark_done and status == "completed":
         # 双报去重（2026-07-26 高律师批全量修复 B4）：completed 的结果已随本进程退出
@@ -5961,6 +6120,26 @@ def _cmd_run(args) -> int:
 
     args.plan = decision["mode"] == "plan"  # 供下方 bg spec 回放沿用旧字段
 
+    # ── 派发深度闸（2026-08-02 多向派发防套娃）──
+    # go 委托 _cmd_run，此处一闸全覆盖。深度来源：--depth 旗标 > env
+    # STANDCODE_DISPATCH_DEPTH > 0。达上限拒派（退出码 2）；--force 可越（回执须说明）。
+    depth = DISPATCH_DEPTH if getattr(args, "depth", None) is None \
+        else max(0, int(args.depth))
+    if depth >= MAX_DISPATCH_DEPTH and not getattr(args, "force", False):
+        log_audit("dispatch_blocked", {
+            "mode": decision["mode"], "blocked": True, "reason": "depth_limit",
+            "depth": depth, "max_depth": MAX_DISPATCH_DEPTH,
+            "request_preview": (args.request or "")[:200],
+        })
+        print(json.dumps({
+            "status": "depth_blocked",
+            "depth": depth, "max_depth": MAX_DISPATCH_DEPTH,
+            "error": (f"派发深度 {depth} 已达上限 {MAX_DISPATCH_DEPTH}——转派链过长"
+                      f"（分身层退役教训：中转税没有正确率增量）。亲自完成本单，"
+                      f"或向委派人回报拆分建议；确有必要可 --force 强派并在回执说明。"),
+        }, ensure_ascii=False, indent=2), file=_sys.stderr)
+        return 2
+
     # ── 作业单验收栏（2026-07-29 批件①）：路由定夺后、派发前补齐三栏 ──
     # worker/fast 自动追加（幂等，已带验收栏不重复）；plan 只解析不追加——PLAN_TEMPLATE
     # 本就强制 Thinker 写「完成判据/最终产物落点」，再贴一份就是同一契约两处漂移；
@@ -5973,6 +6152,10 @@ def _cmd_run(args) -> int:
         args.request, acceptance = ensure_acceptance_block(args.request)
     elif decision["mode"] == "plan":
         acceptance = extract_acceptance(args.request)
+
+    # ── 委派基础设施说明（2026-08-02）：验收栏之后、派发之前追加在任务书最尾 ──
+    # 所有模式都注（Thinker 也该会用记忆/对话史）；幂等；开关见 INFRA_NOTE_ENABLED。
+    args.request = ensure_infra_note(args.request, depth=depth)
 
     # ── 后台（已弃用 2026-07-25）──
     if getattr(args, "bg", False):
@@ -6002,6 +6185,8 @@ def _cmd_run(args) -> int:
             "no_relay": args.no_relay,
             "dry_run": args.dry_run,
             "acceptance": acceptance,
+            "caller": CALLER_NAME,
+            "depth": depth,
         }
         log_path = TASKS_DIR / f"{task_id}.log"
         TASKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -6070,6 +6255,8 @@ def _cmd_run(args) -> int:
             "plan_only": decision["plan_only"],
             "subs": decision["subs"],
             "acceptance": acceptance,
+            "caller": CALLER_NAME,
+            "depth": depth,
         }
         state = {
             "task_id": task_id,
@@ -6293,6 +6480,24 @@ def _cmd_go(args) -> int:
         }, ensure_ascii=False))
         return 2
 
+    # 0c) 派发深度闸（2026-08-02 多向派发）：go 入口先拦——dry-run 预览也要如实反映
+    #     会被拒；真派发链在 _cmd_run 还有同款闸兜底（run 直用者也覆盖）。
+    depth = DISPATCH_DEPTH if getattr(args, "depth", None) is None \
+        else max(0, int(args.depth))
+    if depth >= MAX_DISPATCH_DEPTH and not getattr(args, "force", False):
+        log_audit("go", {
+            "mode": None, "blocked": True, "reason": "depth_limit",
+            "depth": depth, "max_depth": MAX_DISPATCH_DEPTH,
+            "request_preview": request[:200],
+        })
+        print(json.dumps({
+            "cmd": "go", "status": "depth_blocked",
+            "depth": depth, "max_depth": MAX_DISPATCH_DEPTH,
+            "error": (f"派发深度 {depth} 已达上限 {MAX_DISPATCH_DEPTH}——亲自完成本单，"
+                      f"或向委派人回报拆分建议；确有必要可 --force 强派并在回执说明。"),
+        }, ensure_ascii=False), file=_sys.stderr)
+        return 2
+
     # 1) 定模式：显式 --mode 改判优先，缺省 route 四格自动判（route 不产 fanout/operator）。
     if args.mode:
         mode, plan_only, route_reason = args.mode, bool(args.plan_only), "显式 --mode 改判"
@@ -6340,11 +6545,15 @@ def _cmd_go(args) -> int:
         "plan_only": plan_only, "summary": summary,
         "route_reason": route_reason[:80],
         "recall": (args.recall or "").strip() or None,
+        "caller": CALLER_NAME,  # 多向派发：头行亮明派发身份
     }, ensure_ascii=False), flush=True)
 
     if args.dry_run:
+        # 预览要与真派发同貌：委派说明段也展示（真实注入在 _cmd_run 组包处）
+        preview = ensure_infra_note(dispatched_request, depth=depth)
         print(json.dumps({"cmd": "go", "status": "dry_run", "dispatched": False,
-                          "request_final": dispatched_request[:300]}, ensure_ascii=False))
+                          "caller": CALLER_NAME, "depth": depth,
+                          "request_final": preview[:600]}, ensure_ascii=False))
         return 0
 
     # 3) 委托 run --wait 全链（等待者模式：dispatch→poll→state→inbox→brief stdout）。
@@ -6358,6 +6567,7 @@ def _cmd_go(args) -> int:
         no_relay=False, dry_run=False, reuse_plan=bool(args.reuse_plan),
         force=bool(getattr(args, "force", False)),
         fresh=bool(getattr(args, "fresh", False)),
+        depth=getattr(args, "depth", None),  # 深度闸在 _cmd_run 统一执行
     )
     return _cmd_run(ns)
 
@@ -6458,6 +6668,23 @@ def _cmd_ask(args) -> int:
         }, ensure_ascii=False), file=_sys.stderr)
         return 2
 
+    # 0b) 派发深度闸（2026-08-02 多向派发）：ask 不走 _cmd_run，单独设闸。
+    #     点名通道无 --force 越权门——深度超限说明转派链已过长，回报拆分建议即可。
+    depth = DISPATCH_DEPTH if getattr(args, "depth", None) is None \
+        else max(0, int(args.depth))
+    if depth >= MAX_DISPATCH_DEPTH:
+        log_audit("ask", {
+            "mode": "worker", "blocked": True, "reason": "depth_limit",
+            "depth": depth, "max_depth": MAX_DISPATCH_DEPTH,
+            "request_preview": request[:200],
+        })
+        print(json.dumps({
+            "cmd": "ask", "status": "depth_blocked",
+            "depth": depth, "max_depth": MAX_DISPATCH_DEPTH,
+            "error": f"派发深度 {depth} 已达上限 {MAX_DISPATCH_DEPTH}——亲自完成或回报拆分建议。",
+        }, ensure_ascii=False, indent=2), file=_sys.stderr)
+        return 2
+
     caller = Caller()
     channel = caller.resolve_ask_channel(room_id=args.room_id, member=args.member)
 
@@ -6475,6 +6702,14 @@ def _cmd_ask(args) -> int:
 
     task_id = f"wait-{int(time.time())}-{uuid.uuid4().hex[:6]}"
 
+    # 组包（2026-08-02 上移到 claim 之前——原位置在 acquire_ask_claim 引用
+    # dispatched_request 之后，direct 路由一走就 NameError；顺带补委派说明注入）
+    summary = args.summary or " ".join(request.split())[:24]
+    dispatched_request = request
+    if args.recall and not re.search(r"(?:相关记忆|recall)\s*[:：]", request, re.I):
+        dispatched_request = f"{request}\n\n相关记忆：{args.recall.strip()}"
+    dispatched_request = ensure_infra_note(dispatched_request, depth=depth)
+
     # 2) 直投席位：探灯说空闲还要抢到 claim 才算数（同轮并发闸，见 acquire_ask_claim）。
     claim_held = False
     if route == "direct":
@@ -6482,11 +6717,6 @@ def _cmd_ask(args) -> int:
                                        request=dispatched_request)
         if not claim_held and not args.direct:
             route, probe_reason = "fork", "直投席位被并发 ask 占用，另开并行任务"
-
-    summary = args.summary or " ".join(request.split())[:24]
-    dispatched_request = request
-    if args.recall and not re.search(r"(?:相关记忆|recall)\s*[:：]", request, re.I):
-        dispatched_request = f"{request}\n\n相关记忆：{args.recall.strip()}"
 
     log_audit("ask", {
         "mode": "worker", "blocked": False, "route": route,
@@ -8174,6 +8404,12 @@ def _build_parser():
         help="干净上下文标记（2026-07-29 会话复用层）：跳过旧会话复用、强制 spawn 新会话。"
              "擂台/基准测试必须带（公平性，各模型同起点）；正文含「干净上下文」/[fresh] 同效",
     )
+    pr.add_argument(
+        "--depth", type=int, default=None,
+        help="派发深度（2026-08-02 多向派发防套娃）：顶层派发 0（默认），Stand 转派子任务"
+             "按任务书「委派说明」+1。达上限（默认 2，STANDCODE_MAX_DISPATCH_DEPTH 可调）"
+             "拒派退出码 2，--force 可越；env STANDCODE_DISPATCH_DEPTH 为缺省来源",
+    )
     pr.set_defaults(func=_cmd_run)
 
     pg = sub.add_parser(
@@ -8210,6 +8446,9 @@ def _build_parser():
     pg.add_argument("--fresh", action="store_true",
                     help="干净上下文标记：跳过旧会话复用、强制新会话"
                          "（擂台/基准测试必带；正文含「干净上下文」/[fresh] 同效）")
+    pg.add_argument("--depth", type=int, default=None,
+                    help="派发深度（多向派发防套娃）：Stand 转派子任务时按任务书「委派说明」"
+                         "带 +1；达上限拒派（--force 可越），详见 run --depth")
     pg.set_defaults(func=_cmd_go)
 
     pk = sub.add_parser(
@@ -8239,6 +8478,9 @@ def _build_parser():
                     help="stdout 结果不截断（缺省截 700 字，全文在 inbox）")
     pk.add_argument("--dry-run", action="store_true",
                     help="只探灯+定路由不投递（测试/预览用）")
+    pk.add_argument("--depth", type=int, default=None,
+                    help="派发深度（多向派发防套娃）：达上限直接拒（ask 无 --force 门），"
+                         "详见 run --depth")
     pk.set_defaults(func=_cmd_ask)
 
     prt = sub.add_parser(
