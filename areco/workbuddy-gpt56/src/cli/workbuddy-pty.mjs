@@ -156,6 +156,28 @@ function contentText(content) {
     .join("");
 }
 
+// WorkBuddy GUI 落盘的 user 消息不是裸文本：真实指令包在信封里——
+//   <system-reminder data-role="user-context">…几 KB 系统注入…</system-reminder>
+//   <user_query>真实指令</user_query>
+// （chatlog 提取器 2026-07-13 起同款剥离逻辑。）此前 inspectJsonlTurns 直接拿全文当
+// userText，与 runPrompt 发送的裸 prompt 全文精确比对永不相等 → turnAfterBaseline/
+// claimLocalTurn 全部落空，新会话回合永远匹配不上、等到超时（2026-08-02 真机实锤：
+// GUI 26 秒完成「链路正常」，PTY 侧 150 秒超时）。单测此前全用裸文本造假 JSONL，
+// 信封格式从没进过用例——单测全绿、真机必死。
+export function userPromptText(raw) {
+  const text = String(raw || "");
+  // 真实 user_query 在信封末尾；取最后一个匹配，防 system-reminder 正文里出现示例标签
+  const openTag = "<user_query>";
+  const start = text.lastIndexOf(openTag);
+  if (start !== -1) {
+    const rest = text.slice(start + openTag.length);
+    const end = rest.indexOf("</user_query>");
+    return (end === -1 ? rest : rest.slice(0, end)).trim();
+  }
+  // 兜底：没有 user_query 标签（旧版 GUI/其它来源）就剥掉 system-reminder 块
+  return text.replace(/<system-reminder[\s\S]*?<\/system-reminder>/gu, "").trim();
+}
+
 function errorText(event) {
   return String(
     event?.providerData?.error?.message ||
@@ -202,7 +224,7 @@ export function inspectJsonlTurns(raw) {
     if (event?.type === "message" && event?.role === "user") {
       currentTurn = {
         userId: jsonlEventId(event, index),
-        userText: contentText(event.content).trim(),
+        userText: userPromptText(contentText(event.content)),
         userIndex: index,
         terminal: null,
         terminalId: "",

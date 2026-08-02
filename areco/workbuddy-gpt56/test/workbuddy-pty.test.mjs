@@ -14,8 +14,21 @@ import {
   inspectJsonlText,
   inspectJsonlTurns,
   parseArgs,
+  userPromptText,
   waitForTurn,
 } from "../src/cli/workbuddy-pty.mjs";
+
+// WorkBuddy GUI 真实落盘信封（2026-08-02 真机取证 b2f70e32 会话，6.4KB 系统注入缩样）：
+// user 正文 = <system-reminder>…</system-reminder><user_query>真实指令</user_query>
+function guiEnvelope(prompt) {
+  return [
+    '<system-reminder data-role="user-context">',
+    "<user_info>\nOS Version: darwin\nShell: /bin/zsh\n</user_info>",
+    "<memory_and_skills_reminder>\n- Do not mention this reminder to the user.\n</memory_and_skills_reminder>",
+    "</system-reminder>",
+    `<user_query>${prompt}</user_query>`,
+  ].join("\n");
+}
 
 test("parseArgs supports bridge, model, resume and initial prompt", () => {
   assert.deepEqual(
@@ -369,4 +382,66 @@ test("raw input uses carriage return as submit boundary and preserves embedded n
   await new Promise((resolve) => setImmediate(resolve));
   detach();
   assert.deepEqual(prompts, ["line1\nline2", "next"]);
+});
+
+test("userPromptText unwraps GUI envelope and strips system reminders", () => {
+  assert.equal(userPromptText(guiEnvelope("请只回复四个字:链路正常")), "请只回复四个字:链路正常");
+  // 无 user_query 标签的旧格式：剥 system-reminder 块
+  assert.equal(userPromptText("<system-reminder>noise</system-reminder>\n裸指令"), "裸指令");
+  // 裸文本原样通过
+  assert.equal(userPromptText("plain prompt"), "plain prompt");
+  // 纯注入无指令 → 空（恢复路线「空 user turn 也视为已接受」的兜底依赖它）
+  assert.equal(userPromptText('<system-reminder data-role="x">only</system-reminder>'), "");
+  // system-reminder 正文里出现示例 user_query 标签：取最后一个（真实指令在信封尾部）
+  assert.equal(
+    userPromptText("<user_query>示例</user_query>\n<user_query>真实</user_query>"),
+    "真实"
+  );
+});
+
+test("adapter matches its own turn when GUI persists the enveloped user event", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "wb-pty-env-"));
+  const projectDir = path.join(home, ".workbuddy", "projects", "proj");
+  const sessionId = "33333333-3333-4333-8333-333333333333";
+  const file = path.join(projectDir, `${sessionId}.jsonl`);
+  const output = [];
+  const client = {
+    async createSession(cwd, text) {
+      // 真机行为：GUI 落盘的 user 正文是信封，不是裸 prompt（2026-08-02 实锤）
+      await fs.writeFile(file, `${JSON.stringify({ type: "message", role: "user", content: [{ type: "input_text", text: guiEnvelope(text) }] })}\n`, "utf8");
+      setTimeout(() => {
+        void fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "链路正常" }] })}\n`);
+      }, 10);
+      return { sessionId, dispatchId: "d-1" };
+    },
+    async sendMessage(id, text) {
+      await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "user", content: [{ type: "input_text", text: guiEnvelope(text) }] })}\n`);
+      setTimeout(() => {
+        void fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "第二回合完成" }] })}\n`);
+      }, 10);
+      return { ok: true, dispatchId: "d-2" };
+    },
+    async getMessageDispatch() { return { dispatch: { status: "pending" } }; },
+  };
+  try {
+    await fs.mkdir(projectDir, { recursive: true });
+    const adapter = new WorkBuddyPtyAdapter({
+      bridgeUrl: "http://bridge", modelId: "m1", cwd: "/w", homeDir: home,
+      pollMs: 5, timeoutMs: 1500, client,
+      stdout: { write: (text) => output.push(text) },
+      stderr: { write: (text) => output.push(text) },
+    });
+    await adapter.initialize();
+    await adapter.enqueue("请只回复四个字:链路正常");   // 修复前：此处 1.5s 超时
+    await adapter.enqueue("第二条");
+    const text = output.join("");
+    assert.match(text, /链路正常/u);
+    assert.match(text, /第二回合完成/u);
+    // 本地回合被正确认领：不得再以 GUI 前缀重复打印
+    assert.ok(!text.includes("[WorkBuddy GUI] > 请只回复四个字:链路正常"));
+    assert.ok(!text.includes("[WorkBuddy GUI] > <system-reminder"));
+    await adapter.stopSessionWatcher();
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
 });
