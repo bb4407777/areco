@@ -1,7 +1,8 @@
 // 文件拖放/选件：document 级拖放监听 + 路径回填输入框。会话页/项目页共用。
 // 散文件 → 先 Spotlight 反查源路径（name+size 精确匹配），命中零复制直填源路径；
 //          查不到（手机端拍照/网盘/未索引位置）才上传副本落盘 data/uploads；
-// 文件夹 → 不上传内容：只报目录名+首层子项名，服务端 Spotlight 反查源目录路径回填，agent 直读源目录（零复制，空文件夹/iCloud 占位也秒回）
+// 文件夹 → 不上传内容：只报目录名+首层子项名，服务端 Spotlight 反查（零命中再实扫常用目录，
+//          兜住新建目录的索引滞后）源目录路径回填，agent 直读源目录（零复制，空文件夹/iCloud 占位也秒回）
 import { nextTick, onMounted, onUnmounted, ref, type Ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { api } from '../api'
@@ -110,7 +111,7 @@ export function useFileDrop({ text, inputEl, afterFill }: Options) {
         const samples = await firstLevelNames(dir, 5)
         const { paths } = await api.post<{ paths: string[] }>('/api/files/locate-dir', { name: dir.name, samples })
         if (!paths.length) {
-          message.error(`未能定位「${dir.name}」的源路径（可能不在 Spotlight 索引内）——请直接把文件夹路径粘贴进输入框`)
+          message.error(`未能定位「${dir.name}」的源路径（Spotlight 未收录，常用目录扫描也未命中）——请直接把文件夹路径粘贴进输入框`)
           continue
         }
         await fillPaths(paths[0])

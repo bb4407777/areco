@@ -24,6 +24,7 @@ import {
   resolveKimiWire,
 } from '../services/history'
 import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/chatlog'
+import { sweepForDir } from '../services/dir-sweep'
 
 // 与 history.ts 的 SAFE_SEGMENT 同规则：单段路径只允许安全字符（本地副本，history.ts 未导出该常量）
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$|^-[A-Za-z0-9._-]+$/
@@ -916,6 +917,9 @@ export class ApiControllers {
         .filter((p) => samples.every((s) => fs.existsSync(path.join(p, s))))
       if (found.length) break
     }
+    // Spotlight 对新建目录有分钟级以上的索引滞后（拖「刚建的文件夹」两条查询都空手）：
+    // 零命中退回 BFS 实扫可见目录，同款 basename+samples 核验（见 dir-sweep.ts）
+    if (!found.length) found = await sweepForDir(name, samples)
     // data/uploads 里的历史上传副本不是答案（旧版拖文件夹曾整包复制过去，用户要的是源目录）：
     // 有真源目录就整个剔除；全是副本才保留兜底（用户真从 uploads 里拖的场景）
     const uploadsRoot = path.join(DATA_DIR, 'uploads') + path.sep
