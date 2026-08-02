@@ -1,12 +1,24 @@
-// 项目消息库：data/tasks.db（node:sqlite，WAL）。项目协作的消息 SoT，零外部依赖。
-// 服务端 room-relay 读写；本机任何终端可用 scripts/areco-msg.mjs 直写本库回执——
+// 消息库（双库，2026-08-02 高律师定名分库）：任务房 → data/tasks.db，项目房 → data/projects.db。
+// 路由收在本层内部：按 data/rooms.json 的房间 kind 选库（mtime 缓存），调用方（room-relay/
+// controllers/CLI）签名与行为零改动；kind 查无（孤儿/已删房/测试无 rooms.json）兜底 tasks.db，
+// 因此无 rooms.json 的环境行为与旧单库完全一致。
+// id 永不相撞：存量来自原单库（id 天然唯一）；新增侧 projects.db 三张自增表的起点 seed 到
+// 10_000_000（openFor 建库与迁移脚本双保险），tasks.db 自然增长——按 id 的查询两库顺查即可。
+// 服务端 room-relay 读写；本机任何终端可用 scripts/areco-msg.mjs 直写回执（同路由规则）——
 // WAL + busy_timeout 保证与服务端并发安全，relay 的 2s 游标轮询自然拾取。
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { DATA_DIR } from '../config'
 
-const DB_PATH = path.join(DATA_DIR, 'tasks.db')
+export type DbKind = 'task' | 'project'
+const DB_PATHS: Record<DbKind, string> = {
+  task: path.join(DATA_DIR, 'tasks.db'),
+  project: path.join(DATA_DIR, 'projects.db'),
+}
+const ROOMS_JSON = path.join(DATA_DIR, 'rooms.json')
+/** projects.db 自增起点：与 tasks.db 的自然增长（当前 ~2k，日增几十）永不相交 */
+const PROJECT_ID_SEED = 10_000_000
 
 export interface ProjectMessageRow {
   id: number
@@ -81,20 +93,78 @@ CREATE TABLE IF NOT EXISTS delivery (
 // CLI 侧（areco-msg.mjs）短连接并发互不阻塞（reader 不挡 writer，writer 锁有
 // busy_timeout=3000 兜底）。调用点的 finally db.close() 全部改为空操作注释——
 // 单例连接随进程存亡，SQLite 进程退出自动释放。
-let sharedDb: DatabaseSync | null = null
+const sharedDbs: Record<DbKind, DatabaseSync | null> = { task: null, project: null }
 
-function open(): DatabaseSync {
-  if (sharedDb) return sharedDb
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
-  const db = new DatabaseSync(DB_PATH)
+function open(kind: DbKind): DatabaseSync {
+  const cached = sharedDbs[kind]
+  if (cached) return cached
+  fs.mkdirSync(path.dirname(DB_PATHS[kind]), { recursive: true })
+  const db = new DatabaseSync(DB_PATHS[kind])
   // busy_timeout 先设：journal_mode=WAL 本身就可能要拿锁，
   // 原顺序（WAL 在前）让唯一真正需要等锁的那条语句反而没有超时保护。
   db.exec('PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL;')
   db.exec(SCHEMA)
   migrateMessages(db)
   migrateDispatch(db)
-  sharedDb = db
+  if (kind === 'project') seedProjectSequences(db)
+  sharedDbs[kind] = db
   return db
+}
+
+/** projects.db 三张自增表起点 seed（幂等）：已有更高水位不动，防两库 id 相撞 */
+function seedProjectSequences(db: DatabaseSync): void {
+  for (const table of ['messages', 'dispatch', 'delivery']) {
+    const row = db.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(table) as
+      | { seq: number }
+      | undefined
+    if (!row) db.prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)').run(table, PROJECT_ID_SEED)
+    else if (Number(row.seq) < PROJECT_ID_SEED)
+      db.prepare('UPDATE sqlite_sequence SET seq = ? WHERE name = ?').run(PROJECT_ID_SEED, table)
+  }
+}
+
+// ── kind 路由：data/rooms.json 的房间 kind（mtime 缓存），查无兜底 task ──
+let roomsKindCache: { mtimeMs: number; kinds: Map<string, DbKind> } | null = null
+
+export function dbKindForTeam(team: string): DbKind {
+  try {
+    const st = fs.statSync(ROOMS_JSON)
+    if (!roomsKindCache || roomsKindCache.mtimeMs !== st.mtimeMs) {
+      const arr = JSON.parse(fs.readFileSync(ROOMS_JSON, 'utf8'))
+      const kinds = new Map<string, DbKind>()
+      if (Array.isArray(arr))
+        for (const r of arr)
+          if (r && typeof r === 'object' && r.team)
+            kinds.set(String(r.team), r.kind === 'project' ? 'project' : 'task')
+      roomsKindCache = { mtimeMs: st.mtimeMs, kinds }
+    }
+    return roomsKindCache.kinds.get(team) ?? 'task'
+  } catch {
+    return 'task' // rooms.json 缺失/损坏：兜底任务库（与旧单库行为一致）
+  }
+}
+
+function openFor(team: string): DatabaseSync {
+  return open(dbKindForTeam(team))
+}
+
+/** 已落盘的库集合（存在才 open，只读路径不误建空库），task 在前保持顺查稳定序 */
+function existingDbs(): DatabaseSync[] {
+  const out: DatabaseSync[] = []
+  for (const kind of ['task', 'project'] as DbKind[]) if (fs.existsSync(DB_PATHS[kind])) out.push(open(kind))
+  return out
+}
+
+/** 含指定消息 id 的库（两库 id 永不相撞，最多命中一个） */
+function dbWithMessage(id: number): DatabaseSync | null {
+  for (const db of existingDbs()) if (db.prepare('SELECT 1 FROM messages WHERE id = ?').get(id)) return db
+  return null
+}
+
+/** 含指定 dispatch id 的库 */
+function dbWithDispatch(id: number): DatabaseSync | null {
+  for (const db of existingDbs()) if (db.prepare('SELECT 1 FROM dispatch WHERE id = ?').get(id)) return db
+  return null
 }
 
 /**
@@ -178,7 +248,7 @@ export function send(
   opts?: { humanRelay?: boolean }
 ): ProjectMessageRow {
   if (!team || !from || !to || !body.trim()) throw new Error('team/from/to/body 不能为空')
-  const db = open()
+  const db = openFor(team)
   try {
     const res = db
       .prepare('INSERT INTO messages (team, from_agent, to_agent, body, human_relay) VALUES (?, ?, ?, ?, ?)')
@@ -192,8 +262,9 @@ export function send(
 
 /** 消息流：按 team 拉最近 limit 条，升序返回 */
 export function history(team: string, limit = 100): ProjectMessageRow[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
+  const kind = dbKindForTeam(team)
+  if (!fs.existsSync(DB_PATHS[kind])) return []
+  const db = open(kind)
   try {
     const rows = db.prepare('SELECT * FROM messages WHERE team=? ORDER BY id DESC LIMIT ?').all(team, limit)
     return (rows as Record<string, unknown>[]).map(rowToMessage).reverse()
@@ -208,42 +279,44 @@ export function history(team: string, limit = 100): ProjectMessageRow[] {
  */
 export function correctMessageSender(id: number, newFrom: string): void {
   if (!newFrom.trim()) throw new Error('newFrom 不能为空')
-  const db = open()
-  try {
-    db.prepare('UPDATE messages SET from_agent = ? WHERE id = ?').run(newFrom, id)
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
+  // id 两库无撞：逐库 UPDATE，命中即止（no-op UPDATE 零伤害）
+  for (const db of existingDbs()) {
+    const res = db.prepare('UPDATE messages SET from_agent = ? WHERE id = ?').run(newFrom, id)
+    if (Number(res.changes) > 0) return
   }
 }
 
 /** 跨所有项目房间搜消息正文（LIKE，% _ \ 转义防通配符误判），按 id 倒序返回 limit 条 */
 export function search(q: string, limit = 50): ProjectMessageRow[] {
   const needle = q.trim()
-  if (!needle || !fs.existsSync(DB_PATH)) return []
+  if (!needle) return []
   const escaped = needle.replace(/[\\%_]/g, (c) => `\\${c}`)
-  const db = open()
-  try {
+  // 跨库合并：两库各取 limit，按 created_at 倒序（跨库 id 不可比时序，projects 存量 id 小于
+  // tasks 新增而时间更晚）取前 limit
+  const merged: ProjectMessageRow[] = []
+  for (const db of existingDbs()) {
     const rows = db
       .prepare("SELECT * FROM messages WHERE body LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?")
       .all(`%${escaped}%`, limit)
-    return (rows as Record<string, unknown>[]).map(rowToMessage)
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
+    merged.push(...(rows as Record<string, unknown>[]).map(rowToMessage))
   }
+  return merged.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : b.id - a.id)).slice(0, limit)
 }
 
 /** 各 team 最后一条消息时间（房间列表按最近回复排序用）；无消息的 team 缺席。created_at 为 ISO 文本，MAX 词典序即最新 */
 export function lastMessageAts(): Record<string, string> {
-  if (!fs.existsSync(DB_PATH)) return {}
-  const db = open()
-  try {
+  // 两库合并：同一 team 的消息只会在一个库（路由确定性），直接并集；
+  // 万一迁移半途同 team 两库都有，取时间较大者
+  const out: Record<string, string> = {}
+  for (const db of existingDbs()) {
     const rows = db.prepare('SELECT team, MAX(created_at) AS last FROM messages GROUP BY team').all()
-    const out: Record<string, string> = {}
-    for (const r of rows as Record<string, unknown>[]) out[String(r.team)] = String(r.last)
-    return out
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
+    for (const r of rows as Record<string, unknown>[]) {
+      const team = String(r.team)
+      const last = String(r.last)
+      if (!out[team] || out[team] < last) out[team] = last
+    }
   }
+  return out
 }
 
 // ---- 房间调度（2026-07-22 设计：不上 LLM selector，规则确定性轮转）----
@@ -314,25 +387,18 @@ function rowToDelivery(r: Record<string, unknown>): DeliveryRow {
 
 /** 记录一条消息的真实收件人集合（广播展开成成员名逐行落；INSERT OR IGNORE 幂等） */
 export function recordMessageTargets(messageId: number, targets: string[]): void {
-  const db = open()
-  try {
-    const stmt = db.prepare('INSERT OR IGNORE INTO message_targets (message_id, target_name) VALUES (?, ?)')
-    for (const t of targets) stmt.run(messageId, t)
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  // targets 与其 message 同库（含该 id 消息的库；查无兜底任务库,与旧行为一致）
+  const db = dbWithMessage(messageId) ?? open('task')
+  const stmt = db.prepare('INSERT OR IGNORE INTO message_targets (message_id, target_name) VALUES (?, ?)')
+  for (const t of targets) stmt.run(messageId, t)
 }
 
 /** 一条消息的真实收件人（审计/测试用），按 target_name 排序返回 */
 export function targetsOf(messageId: number): string[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
-  try {
-    const rows = db.prepare('SELECT target_name FROM message_targets WHERE message_id = ? ORDER BY target_name').all(messageId)
-    return (rows as Record<string, unknown>[]).map((r) => String(r.target_name))
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  const db = dbWithMessage(messageId)
+  if (!db) return []
+  const rows = db.prepare('SELECT target_name FROM message_targets WHERE message_id = ? ORDER BY target_name').all(messageId)
+  return (rows as Record<string, unknown>[]).map((r) => String(r.target_name))
 }
 
 /** 幂等建 dispatch：UNIQUE(team, root_message_id)，重复建单返回既有行（created=false） */
@@ -342,7 +408,7 @@ export function createDispatch(
   mode: DispatchMode,
   maxDepth = 3
 ): { dispatch: DispatchRow; created: boolean } {
-  const db = open()
+  const db = openFor(team)
   try {
     const res = db
       .prepare('INSERT OR IGNORE INTO dispatch (team, root_message_id, mode, max_depth) VALUES (?, ?, ?, ?)')
@@ -356,32 +422,26 @@ export function createDispatch(
 
 /** 为 dispatch 补 deliveries（INSERT OR IGNORE 防重），返回该 dispatch 当前全部 delivery（按 id 升序 = 成员顺序） */
 export function addDeliveries(dispatchId: number, members: { name: string; sessionId: string | null }[]): DeliveryRow[] {
-  const db = open()
-  try {
-    const stmt = db.prepare('INSERT OR IGNORE INTO delivery (dispatch_id, member_name, session_id) VALUES (?, ?, ?)')
-    for (const m of members) stmt.run(dispatchId, m.name, m.sessionId)
-    const rows = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id').all(dispatchId)
-    return (rows as Record<string, unknown>[]).map(rowToDelivery)
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  // delivery 与其 dispatch 同库
+  const db = dbWithDispatch(dispatchId) ?? open('task')
+  const stmt = db.prepare('INSERT OR IGNORE INTO delivery (dispatch_id, member_name, session_id) VALUES (?, ?, ?)')
+  for (const m of members) stmt.run(dispatchId, m.name, m.sessionId)
+  const rows = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id').all(dispatchId)
+  return (rows as Record<string, unknown>[]).map(rowToDelivery)
 }
 
 export function dispatchById(id: number): DispatchRow | null {
-  if (!fs.existsSync(DB_PATH)) return null
-  const db = open()
-  try {
-    const row = db.prepare('SELECT * FROM dispatch WHERE id = ?').get(id)
-    return row ? rowToDispatch(row as Record<string, unknown>) : null
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  const db = dbWithDispatch(id)
+  if (!db) return null
+  const row = db.prepare('SELECT * FROM dispatch WHERE id = ?').get(id)
+  return row ? rowToDispatch(row as Record<string, unknown>) : null
 }
 
 /** 房间的 dispatch 列表（按 id 倒序，新的在前），各自带 deliveries（成员顺序） */
 export function listDispatches(team: string, limit = 50): DispatchWithDeliveries[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
+  const kind = dbKindForTeam(team)
+  if (!fs.existsSync(DB_PATHS[kind])) return []
+  const db = open(kind)
   try {
     const rows = db.prepare('SELECT * FROM dispatch WHERE team = ? ORDER BY id DESC LIMIT ?').all(team, limit)
     const delStmt = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id')
@@ -395,14 +455,10 @@ export function listDispatches(team: string, limit = 50): DispatchWithDeliveries
 }
 
 export function deliveriesOf(dispatchId: number): DeliveryRow[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
-  try {
-    const rows = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id').all(dispatchId)
-    return (rows as Record<string, unknown>[]).map(rowToDelivery)
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  const db = dbWithDispatch(dispatchId)
+  if (!db) return []
+  const rows = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id').all(dispatchId)
+  return (rows as Record<string, unknown>[]).map(rowToDelivery)
 }
 
 /** 更新 delivery；patch 里 undefined 的字段不动（null 是真实写入，用于清 correlation_id 等） */
@@ -425,14 +481,11 @@ export function updateDelivery(
     vals.push(patch.correlationId)
   }
   if (!sets.length) return
-  const db = open()
-  try {
-    db.prepare(`UPDATE delivery SET ${sets.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`).run(
-      ...vals,
-      id
-    )
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
+  for (const db of existingDbs()) {
+    const res = db
+      .prepare(`UPDATE delivery SET ${sets.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`)
+      .run(...vals, id)
+    if (Number(res.changes) > 0) return
   }
 }
 
@@ -465,21 +518,19 @@ export function setDispatchState(
     vals.push(patch.cancelReason)
   }
   if (!sets.length) return
-  const db = open()
-  try {
-    db.prepare(`UPDATE dispatch SET ${sets.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`).run(
-      ...vals,
-      id
-    )
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
+  for (const db of existingDbs()) {
+    const res = db
+      .prepare(`UPDATE dispatch SET ${sets.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`)
+      .run(...vals, id)
+    if (Number(res.changes) > 0) return
   }
 }
 
 /** 房间内全部 active 的 serial dispatch（按 id 升序）；串行推进/超时扫描用 */
 export function activeSerialDispatches(team: string): DispatchRow[] {
-  if (!fs.existsSync(DB_PATH)) return []
-  const db = open()
+  const kind = dbKindForTeam(team)
+  if (!fs.existsSync(DB_PATHS[kind])) return []
+  const db = open(kind)
   try {
     const rows = db
       .prepare("SELECT * FROM dispatch WHERE team = ? AND mode = 'serial' AND state = 'active' ORDER BY id")
@@ -492,12 +543,8 @@ export function activeSerialDispatches(team: string): DispatchRow[] {
 
 /** 按 id 取消息（serial 放行下一位时回取根消息正文用） */
 export function messageById(id: number): ProjectMessageRow | null {
-  if (!fs.existsSync(DB_PATH)) return null
-  const db = open()
-  try {
-    const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id)
-    return row ? rowToMessage(row as Record<string, unknown>) : null
-  } finally {
-    /* P2-10 共享长连接：不逐调用关闭（见 open） */
-  }
+  const db = dbWithMessage(id)
+  if (!db) return null
+  const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id)
+  return row ? rowToMessage(row as Record<string, unknown>) : null
 }
