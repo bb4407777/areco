@@ -23,6 +23,7 @@ standcode/caller/hermes/
 │   ├── lens                       # 瘦命令工具箱（Python）
 │   └── tirith                     # 18MB arm64 二进制工具（家目录自带，原样收）
 ├── home/                      # 家目录配置层模板（全部脱敏，*.example.*）
+│   ├── .env.example               # 主 gateway 环境变量键名快照（2026-08-02 补，真身含通道 id/密钥不入仓）
 │   ├── SOUL.example.md            # 通用 Caller/分身人格骨架（真身不进仓，见下）
 │   ├── agent.example.json         # agent 元数据字段结构示例（真身不进仓）
 │   ├── config.example.yaml        # 主配置：7 个 provider 的 api_key 全占位，路径为 <HOME>
@@ -30,9 +31,17 @@ standcode/caller/hermes/
 │   ├── platforms/pairing/*.example.json  # 配对表结构示例（键名保留、值占位）
 │   ├── weixin/accounts/*.example.json    # 微信账号同步态结构示例（真身是通道凭证，不入仓）
 │   ├── scripts/morning-todo-data.example.sh  # 晨报数据源脚本模板（<HOME> 占位）
+│   ├── cron/jobs.example.json     # cron 任务定义配置层结构（2026-08-02 补；晨报任务等业务调度在此，重建即丢的教训）
+│   ├── skills/                    # Hermes 自有分类 skills 真身（2026-08-02 补收：automation/tui-automation、
+│   │                              #   devops/loopback-web-services、devops/local-file-open-endpoint、
+│   │                              #   devops/shared-repo-commit-surgery、docs/docx-page-compaction——
+│   │                              #   纯自研零软链、不在 ~/skills，此前未收编=重建即丢；
+│   │                              #   .curator_state/.usage.json/.curator_backups 为 curator 运行态不收）
 │   └── profiles/
-│       ├── second/            # config.example.yaml + SOUL.example.md + agent.example.json
-│       └── secretary-01/      # 同上
+│       ├── second/            # config/SOUL/agent 三件套 + .env.example（14 键微信凭证结构，2026-08-02 补）
+│       └── secretary-01/      # 同上；⚠️ 2026-08-02 盘点：真机 profiles/ 下已无 secretary-01 目录
+│                              #   （07-29 建、后续迁移中消失，launchd ai.hermes.gateway.secretary 是否仍在跑另查），
+│                              #   本模板留档备重建
 └── launchd/                   # 6 个 launchd plist 存档（绝对路径保留现状值，按需改）
     ├── ai.hermes.gateway.plist
     ├── ai.hermes.gateway-second.plist      # 历史存档：连字符版 07-30 已删（launchd 早已 disabled）
@@ -52,6 +61,10 @@ standcode/caller/hermes/
 
 | 排除项 | 理由 |
 |---|---|
+| `.env`（主 + 各 profile） | 通道 id、微信 token、API_SERVER_KEY 等凭证——键名结构见 `home/**/.env.example`（2026-08-02 补，此前既未收编也未列本表，重建者无从知晓要配哪些键） |
+| `cron/executions.db` `cron/output/` `cron/ticker_*` | cron 运行态（任务**定义**的配置层结构见 `home/cron/jobs.example.json`） |
+| `skills/.curator_state` `skills/.usage.json*` `skills/.curator_backups/` | skills curator 运行态与备份的备份（skill 真身已收 `home/skills/`） |
+| `skills-router/` | StandCode skill 的本地手抄副本（真身在 ~/skills/StandCode，属软链纪律治理对象，不收） |
 | `auth.json` / `auth.lock` | 登录凭证 |
 | `*.db*`（state/kanban/memory_store/response_store/audit/verification_evidence） | 运行时 SQLite 状态，可重建 |
 | `sessions/` `logs/` `cache/` `state/` `lsp/` | 会话、日志、缓存等运行时产物 |

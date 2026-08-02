@@ -1,0 +1,21 @@
+{
+  "_note": "~/.qclaw-hermes/cron/jobs.json 的配置层结构快照（2026-08-02）。真身另含运行态字段（last_run_at/next_run_at/last_status/last_error/last_delivery_error/repeat.completed 等，其中 last_delivery_error 可能带微信通道 id）——复原时只需按本结构重建配置字段，运行态由调度器自生。executions.db / output/ / ticker_* 为运行时产物，不入仓。",
+  "jobs": [
+    {
+      "id": "<12位hex，调度器生成>",
+      "name": "morning-todo-digest",
+      "prompt": "下面注入的是今日待办账本的原始汇总(功过格案件待办的今日与积压、非案件日常事项、案源雷达)。你的唯一任务:把这份数据整理成一条清爽好读的微信晨报发出。硬要求:①不要调用任何工具——不要读文件、不要跑命令、不要查任何东西,数据已全部随本消息注入,直接排版输出;②保留全部案号、当事人、事项、数量与天数,不得增删事实、不得改写、不得编造,案号照原文写;③分区排版用你惯常的清爽风格,首行为标题并带日期;④若数据显示无待办,发一句简短的今日清爽播报即可。",
+      "skills": [],
+      "skill": null,
+      "model": "k3",
+      "provider": "kimi_direct",
+      "base_url": null,
+      "script": "morning-todo-data.sh",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": { "kind": "cron", "expr": "49 8 * * *", "display": "49 8 * * *" },
+      "repeat": { "times": null },
+      "enabled": true
+    }
+  ]
+}
