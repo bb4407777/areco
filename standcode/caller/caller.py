@@ -2040,6 +2040,9 @@ class Caller:
             return
         lanes = [("default_thinker_id", "thinker 默认"),
                  ("default_worker_id", "worker 默认"),
+                 # heavy 锚三角色统一后跟随 thinker（2026-08-02），停新单改道必须同列——
+                 # 否则 thinker 改道了、heavy 仍派停新单 stand，同一语义两种行为
+                 ("default_heavy_worker_id", "heavy 车道锚"),
                  ("default_template_id", "全局兜底")]
         for attr, label in lanes:
             cur = getattr(self, attr, "")
