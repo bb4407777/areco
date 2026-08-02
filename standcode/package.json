@@ -17,13 +17,15 @@
     "config/harnesses.example.json",
     "config/models.json",
     "config/presets.json",
-    "stand/",
+    "stand/registry.json",
+    "requirements.txt",
     "README.md",
     "LICENSE"
   ],
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "python3 -m py_compile caller/caller.py && python3 caller/test_modes.py && python3 caller/test_rooms.py",
-    "test:smoke": "python3 -m py_compile caller/caller.py && python3 caller/caller.py --help"
+    "test": "bash scripts/run-tests.sh",
+    "test:smoke": "python3 -m py_compile caller/caller.py && python3 caller/caller.py --help",
+    "prepack": "bash scripts/pack-check.sh"
   }
 }

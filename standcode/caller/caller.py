@@ -22,7 +22,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
-import requests
+try:
+    import requests
+except ImportError:  # 2026-08-02 P2-4：npm 包不代装 Python 依赖，缺依赖给人话而非裸 traceback
+    raise SystemExit(
+        "standcode: 缺少 Python 依赖 requests（需 Python >= 3.10）。\n"
+        "  安装：python3 -m pip install -r requirements.txt   # 或 pip install requests\n"
+        "  说明：standcode 是 Node + Python 双运行时（npm 只装 CLI 壳，见 README）。"
+    ) from None
 
 logger = logging.getLogger("standcode.caller")
 
@@ -258,10 +265,30 @@ FAST_LANE_STAND = "qclaw-flash"   # fallback 常量：真锚在 areco 设置页 
 # ② Stand 输出扫描：poll/harvest 链对 Stand 回复做大小写不敏感子串匹配，
 #    命中即 a) 该 stand 标停新单（写 STAND_STOP_PATH）b) 涉及车道按备胎表改道
 #    c) cc-send 微信告警高律师 d) 事件追加 StandCode SKILL.md 台账 + 审计日志。
-QUOTA_SIGNAL_WORDS = ("429", "rate limit", "quota", "余额不足", "insufficient", "额度")
+#    词表收紧（2026-08-02 检查报告 P1-3）：裸「额度」「insufficient」「quota」在法律
+#    正文里是常客（保险赔偿额度/授信额度/证据 insufficient to establish/进口配额
+#    quota），单词命中会把正常业务输出误判成限流 → 停新单+改道+告警三连环——业务层
+#    误杀比漏报贵得多（漏报还有 429 正则和人工兜底）。全部改上下文组合词；
+#    「429」另有 _QUOTA_429_RE 边界正则防「第429条/号」误伤。
+QUOTA_SIGNAL_WORDS = (
+    "429",                # 特殊：经 _QUOTA_429_RE 边界匹配，不是裸子串
+    "rate limit",         # rate limit / rate limited / rate limit exceeded
+    "余额不足",
+    "额度不足", "额度已满", "额度已用", "额度用尽", "额度打满", "超出额度",
+    "模型额度", "调用额度", "使用上限",
+    "quota exceed", "quota limit", "api quota", "quota_exceeded",
+    "insufficient credit", "insufficient balance", "insufficient quota",
+    "insufficient_quota",
+)
 # 车道备胎映射：stand 停新单后其涉及车道的改道目标（stand id → 备胎 stand id）。
 # 轻活备胎 workbuddy-deepseek（07-30 由 codebuddy-ds-flash 回退 workbuddy 系原名，registry 已注册），接入后补录。
-LANE_FALLBACK_MAP = {"claude-glm52": "kimi-k3", "workbuddy-deepseek": "qclaw-flash"}
+# kimi-k3 备胎 qclaw-flash（2026-08-02 补）：K3 是现役 thinker/heavy 锚且额度紧张、
+# 台账多次停新单，无备胎时 thinker 车道停摆只 warning——落免费车道保底。
+LANE_FALLBACK_MAP = {
+    "claude-glm52": "kimi-k3",
+    "workbuddy-deepseek": "qclaw-flash",
+    "kimi-k3": "qclaw-flash",
+}
 
 
 # 车道锚运行时解析（2026-07-30 高律师定案：SoT = areco 设置页 standcode 段）。
@@ -316,25 +343,40 @@ def _areco_send_from_supported() -> bool:
 
 
 def resolve_lane_anchors() -> dict:
-    """解析 heavy/fast 两车道锚。返回 {"heavy": (stand_id, source), "fast": (stand_id, source)}，
-    source ∈ areco-api / areco-config / 常量fallback（横幅口径随 go 头行 JSON 输出）。
+    """解析 heavy/fast 两车道锚。返回 {"heavy": (stand_id, source), "fast": (stand_id, source)}。
 
-    逐车道独立回落：API 拿到了 fastWorker 但没 heavyWorker（旧版服务端无此键）时，
-    heavy 车道仍可按同一来源链继续尝试 config.json → 常量，不搞一刀切。
+    三角色统一（2026-08-02，落实 08-01 高律师定案「角色只剩 Caller/Thinker/Worker，
+    重活并入 Thinker、快速并入 Worker」——此前只是把两处配置手工设成同值，areco 设置页
+    08-01 收敛三角色删掉 heavyWorker/fastWorker 字段后，本函数读不到旧字段一路落到
+    文件内常量，设置页改 Thinker/Worker 两车道完全不跟，即「UI 一套、实际跑另一套」，
+    2026-08-02 检查报告 P1-1）。新解析链——车道不再是独立配置源：
+      heavy := 旧字段 heavyWorker（迁移期兼容，配置里还写着就尊重）→ **thinker** → 常量
+      fast  := 旧字段 fastWorker（同理）→ **worker** → 常量
+    设置页改 Thinker/Worker，重活/快速车道自动跟随；常量只剩 areco 全挂的兜底。
+    source ∈ areco-api / areco-api(=thinker|worker) / areco-config / 常量fallback
+    （横幅口径随 go 头行 JSON 输出）。逐车道独立回落，不搞一刀切。
     """
     conf, conf_source = _areco_standcode_conf()
     out: dict[str, tuple[str, str]] = {}
-    for lane, key, const in (("heavy", "heavyWorker", HEAVY_LANE_STAND),
-                             ("fast", "fastWorker", FAST_LANE_STAND)):
-        value = str(conf.get(key) or "").strip()
+    for lane, legacy_key, role_key, const in (
+            ("heavy", "heavyWorker", "thinker", HEAVY_LANE_STAND),
+            ("fast", "fastWorker", "worker", FAST_LANE_STAND)):
+        # ① 迁移期兼容：旧字段仍有值（老 config 残留/手工回填）就尊重
+        value = str(conf.get(legacy_key) or "").strip()
         if value:
-            out[lane] = (value, conf_source)
+            out[lane] = (value, f"{conf_source}(旧字段{legacy_key})")
             continue
-        # API 缺该键（旧版服务端未带 heavyWorker）：再试 config.json 直读
+        # ② 三角色新口径：车道锚 = 对应角色锚（heavy=thinker / fast=worker）
+        value = str(conf.get(role_key) or "").strip()
+        if value:
+            out[lane] = (value, f"{conf_source}(={role_key})")
+            continue
+        # ③ API 缺角色键（旧版服务端）：config.json 直读同链（旧字段优先，其次角色）
         if conf_source == "areco-api":
             try:
                 cfg = json.loads((Path(ARECO_ROOT) / "config.json").read_text(encoding="utf-8"))
-                value = str((cfg.get("standcode") or {}).get(key) or "").strip()
+                sc = cfg.get("standcode") or {}
+                value = str(sc.get(legacy_key) or sc.get(role_key) or "").strip()
                 if value:
                     out[lane] = (value, "areco-config")
                     continue
@@ -343,8 +385,8 @@ def resolve_lane_anchors() -> dict:
         out[lane] = (const, "常量fallback")
         logger.warning(
             "车道锚 %s 从 areco 读不到（来源链：%s），回落文件内常量 %s"
-            "——真锚在 areco 设置页 standcode.%s，请到设置页配置",
-            lane, conf_source or "areco 不可达且 config.json 不可读", const, key,
+            "——真锚在 areco 设置页三角色（%s），请到设置页配置",
+            lane, conf_source or "areco 不可达且 config.json 不可读", const, role_key,
         )
     return out
 # 停新单运行期状态文件：registry 模板静态标记（"status": "停新单"）之外的

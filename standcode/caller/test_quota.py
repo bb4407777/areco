@@ -52,13 +52,28 @@ def test_signal_words() -> None:
     check(C.quota_signal_hit("Error 429: Too Many Requests") == "429", "命中 429")
     check(C.quota_signal_hit("HTTP/1.1 429") == "429", "命中 429（HTTP 状态行）")
     check(C.quota_signal_hit("Rate Limit exceeded") == "rate limit", "命中 rate limit（大写）")
-    check(C.quota_signal_hit("insufficient QUOTA remaining") == "quota", "命中 quota（大小写混）")
+    check(C.quota_signal_hit("insufficient QUOTA remaining") == "insufficient quota",
+          "命中 insufficient quota（大小写混）")
     check(C.quota_signal_hit("余额不足，请充值") == "余额不足", "命中 余额不足")
-    check(C.quota_signal_hit("Insufficient balance") == "insufficient", "命中 insufficient")
-    check(C.quota_signal_hit("账户额度已用完") == "额度", "命中 额度")
+    check(C.quota_signal_hit("Insufficient balance") == "insufficient balance",
+          "命中 insufficient balance")
+    check(C.quota_signal_hit("账户额度已用完") == "额度已用", "命中 额度已用完")
+    check(C.quota_signal_hit("API quota exceeded, retry later") == "quota exceed",
+          "命中 quota exceeded")
+    check(C.quota_signal_hit("error insufficient_quota (code 10018)") == "insufficient_quota",
+          "命中 insufficient_quota 错误码")
+    check(C.quota_signal_hit("已达到 5 小时使用上限") == "使用上限", "命中 使用上限（智谱1308）")
     check(C.quota_signal_hit("任务完成，产物已落盘") is None, "正常交付不命中")
     check(C.quota_signal_hit("") is None, "空文本不命中")
     check(C.quota_signal_hit(None) is None, "None 不命中")
+
+    print("\n[信号词表·业务反例] 法律正文常客不得误杀（2026-08-02 检查报告 P1-3）")
+    check(C.quota_signal_hit("本案保险赔偿额度为50万元") is None, "保险赔偿额度 不命中")
+    check(C.quota_signal_hit("授信额度共计200万元，已放款") is None, "授信额度 不命中")
+    check(C.quota_signal_hit("原告证据 insufficient to establish causation") is None,
+          "证据 insufficient 不命中")
+    check(C.quota_signal_hit("进口配额 quota 制度改革") is None, "裸 quota 不命中")
+    check(C.quota_signal_hit("信用卡额度调整申请书") is None, "信用卡额度 不命中")
 
 
 def test_429_boundary() -> None:

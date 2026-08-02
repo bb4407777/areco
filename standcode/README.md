@@ -56,7 +56,14 @@ python3 caller/caller.py list
 
 ## 快速开始
 
+> **双运行时**：npm 包只装 Node CLI 壳（`standcode` 命令，Node >= 18）；调度引擎
+> `caller/caller.py` 需要 **Python >= 3.10** 和 `requests`——npm 不代装 Python 依赖，
+> 首次使用先 `python3 -m pip install -r requirements.txt`（缺依赖时 CLI 会明确提示，
+> 不会裸 traceback）。
+
 ```bash
+# 0. Python 依赖（一次性）
+python3 -m pip install -r requirements.txt
 # 1. 前置：areco 跑在 127.0.0.1:8790，python3 ≥ 3.10
 # 2. 角色映射：stand/registry.json 的 default_thinker / default_worker
 #    直接填 areco 现有模板 id（areco 设置页可查），不新建模板

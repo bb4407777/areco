@@ -26,3 +26,10 @@ standcode/caller/hermes/**/auth.json
 /areco/bin
 /areco/node_modules
 /standcode/data
+
+# 手工备份/临时文件禁入库与发布包（2026-08-02 检查报告 P2-5：npm pack 曾夹带 7 个 registry.json.bak*）
+*.bak
+*.bak-*
+*.bak.*
+*.orig
+*.swp
