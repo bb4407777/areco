@@ -12,6 +12,7 @@ import {
   findSessionJsonl,
   hasInFlightTurn,
   inspectJsonlText,
+  inspectJsonlTurns,
   parseArgs,
   waitForTurn,
 } from "../src/cli/workbuddy-pty.mjs";
@@ -22,6 +23,7 @@ test("parseArgs supports bridge, model, resume and initial prompt", () => {
     {
       bridgeUrl: "http://localhost:8780",
       modelId: "m1",
+      modelExplicitlySet: true,
       resumeSessionId: "s1",
       pollMs: 500,
       timeoutMs: 1_800_000,
@@ -56,6 +58,21 @@ test("inspectJsonlText only treats a terminal assistant message after the latest
   const done = inspectJsonlText(`${raw}\n${row({ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "new" }] })}\n`);
   assert.equal(done.inFlight, false);
   assert.deepEqual(done.terminal, { kind: "completed", text: "new" });
+});
+
+test("inspectJsonlTurns keeps user text and terminal identities per turn", () => {
+  const raw = [
+    JSON.stringify({ type: "message", role: "user", id: "u1", content: [{ type: "input_text", text: "GUI prompt" }] }),
+    JSON.stringify({ type: "message", role: "assistant", id: "a1", status: "completed", content: [{ type: "output_text", text: "GUI answer" }] }),
+  ].join("\n");
+  assert.deepEqual(inspectJsonlTurns(raw), [{
+    userId: "u1",
+    userText: "GUI prompt",
+    userIndex: 0,
+    terminal: { kind: "completed", text: "GUI answer" },
+    terminalId: "a1",
+    needsUser: null,
+  }]);
 });
 
 test("findSessionJsonl and waitForTurn follow the target session file", async () => {
@@ -126,6 +143,7 @@ test("adapter defers session creation until first prompt and serializes later pr
     assert.deepEqual(calls.filter((call) => call[0] === "send").map((call) => call[2]), ["second"]);
     assert.match(output.join(""), /answer-1/u);
     assert.match(output.join(""), /answer-2/u);
+    await adapter.stopSessionWatcher();
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }
@@ -161,6 +179,7 @@ test("adapter keeps monitoring JSONL when legacy send HTTP fails after desktop a
     await adapter.initialize();
     await adapter.runPrompt("hello");
     assert.match(output.join(""), /recovered/u);
+    await adapter.stopSessionWatcher();
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }
@@ -191,9 +210,29 @@ test("adapter reports asynchronous message bridge failures", async () => {
     });
     await adapter.initialize();
     await assert.rejects(adapter.runPrompt("hello"), /daemon exploded/u);
+    await adapter.stopSessionWatcher();
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }
+});
+
+test("adapter resume keeps the existing model unless --model was explicit", async () => {
+  const calls = [];
+  const adapter = new WorkBuddyPtyAdapter({
+    resumeSessionId: "existing-session",
+    modelId: "m1",
+    modelExplicitlySet: false,
+    homeDir: await fs.mkdtemp(path.join(os.tmpdir(), "wb-pty-test-")),
+    client: {
+      async getSession(id) { calls.push(["get", id]); return { ok: true }; },
+      async setModel(id, model) { calls.push(["model", id, model]); return { ok: true }; },
+    },
+    stdout: { write() {} },
+    stderr: { write() {} },
+  });
+  await adapter.initialize();
+  assert.deepEqual(calls, [["get", "existing-session"]]);
+  await adapter.stopSessionWatcher();
 });
 
 test("adapter resume validates the session and reconnects an in-flight turn without resending", async () => {
@@ -202,15 +241,14 @@ test("adapter resume validates the session and reconnects an in-flight turn with
   const sessionId = "33333333-3333-4333-8333-333333333333";
   const file = path.join(projectDir, `${sessionId}.jsonl`);
   const calls = [];
+  const output = [];
   try {
     await fs.mkdir(projectDir, { recursive: true });
     await fs.writeFile(file, `${JSON.stringify({ type: "message", role: "user", content: [] })}\n`);
-    setTimeout(() => {
-      void fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "resumed" }] })}\n`);
-    }, 20);
     const adapter = new WorkBuddyPtyAdapter({
       resumeSessionId: sessionId,
       modelId: "m1",
+      modelExplicitlySet: true,
       homeDir: home,
       pollMs: 5,
       timeoutMs: 1000,
@@ -219,11 +257,100 @@ test("adapter resume validates the session and reconnects an in-flight turn with
         async setModel(id, model) { calls.push(["model", id, model]); return { ok: true }; },
         async sendMessage() { calls.push(["send"]); },
       },
-      stdout: { write() {} },
-      stderr: { write() {} },
+      stdout: { write: (text) => output.push(text) },
+      stderr: { write: (text) => output.push(text) },
     });
     await adapter.initialize();
     assert.deepEqual(calls, [["get", sessionId], ["model", sessionId, "m1"]]);
+    await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", id: "resumed-a", status: "completed", content: [{ type: "output_text", text: "resumed" }] })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.match(output.join(""), /resumed/u);
+    await adapter.stopSessionWatcher();
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("resume returns ready immediately, mirrors GUI turns, and does not replay history", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "wb-pty-test-"));
+  const projectDir = path.join(home, ".workbuddy", "projects", "proj");
+  const sessionId = "66666666-6666-4666-8666-666666666666";
+  const file = path.join(projectDir, `${sessionId}.jsonl`);
+  const output = [];
+  try {
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(file, [
+      JSON.stringify({ type: "message", role: "user", id: "old-u", content: [{ type: "input_text", text: "old prompt" }] }),
+      JSON.stringify({ type: "message", role: "assistant", id: "old-a", status: "completed", content: [{ type: "output_text", text: "old answer" }] }),
+      JSON.stringify({ type: "message", role: "user", id: "busy-u", content: [{ type: "input_text", text: "busy prompt" }] }),
+    ].join("\n") + "\n");
+    const adapter = new WorkBuddyPtyAdapter({
+      resumeSessionId: sessionId,
+      homeDir: home,
+      pollMs: 5,
+      timeoutMs: 1000,
+      client: { async getSession() { return { ok: true }; } },
+      stdout: { write: (text) => output.push(text) },
+      stderr: { write: (text) => output.push(text) },
+    });
+    await adapter.initialize();
+    assert.match(output.join(""), /已在后台接回/u);
+    assert.doesNotMatch(output.join(""), /old answer/u);
+
+    await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", id: "busy-a", status: "completed", content: [{ type: "output_text", text: "busy answer" }] })}\n`);
+    await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "user", id: "gui-u", content: [{ type: "input_text", text: "GUI asks" }] })}\n`);
+    await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", id: "gui-a", status: "completed", content: [{ type: "output_text", text: "GUI replies" }] })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.match(output.join(""), /\[WorkBuddy GUI\] busy answer/u);
+    assert.match(output.join(""), /\[WorkBuddy GUI\] > GUI asks/u);
+    assert.match(output.join(""), /\[WorkBuddy GUI\] GUI replies/u);
+    await adapter.stopSessionWatcher();
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("local prompt waits for an active GUI turn and is not mirrored twice", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "wb-pty-test-"));
+  const projectDir = path.join(home, ".workbuddy", "projects", "proj");
+  const sessionId = "77777777-7777-4777-8777-777777777777";
+  const file = path.join(projectDir, `${sessionId}.jsonl`);
+  const output = [];
+  const calls = [];
+  try {
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(file, `${JSON.stringify({ type: "message", role: "user", id: "gui-busy-u", content: [{ type: "input_text", text: "GUI busy" }] })}\n`);
+    const adapter = new WorkBuddyPtyAdapter({
+      resumeSessionId: sessionId,
+      homeDir: home,
+      pollMs: 5,
+      timeoutMs: 1000,
+      client: {
+        async getSession() { return { ok: true }; },
+        async sendMessage(id, text) {
+          calls.push([id, text]);
+          await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "user", id: "local-u", content: [{ type: "input_text", text }] })}\n`);
+          setTimeout(() => void fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", id: "local-a", status: "completed", content: [{ type: "output_text", text: "local answer" }] })}\n`), 10);
+          return { dispatchId: "local-dispatch" };
+        },
+        async getMessageDispatch() { return { dispatch: { status: "pending" } }; },
+      },
+      stdout: { write: (text) => output.push(text) },
+      stderr: { write: (text) => output.push(text) },
+    });
+    await adapter.initialize();
+    const pending = adapter.runPrompt("local prompt");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.deepEqual(calls, []);
+    await fs.appendFile(file, `${JSON.stringify({ type: "message", role: "assistant", id: "gui-busy-a", status: "completed", content: [{ type: "output_text", text: "GUI finished" }] })}\n`);
+    await pending;
+    assert.deepEqual(calls, [[sessionId, "local prompt"]]);
+    const rendered = output.join("");
+    assert.match(rendered, /GUI finished/u);
+    assert.match(rendered, /local answer/u);
+    assert.doesNotMatch(rendered, /\[WorkBuddy GUI\] > local prompt/u);
+    assert.equal((rendered.match(/local answer/gu) || []).length, 1);
+    await adapter.stopSessionWatcher();
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }

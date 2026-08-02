@@ -9,6 +9,9 @@
 // 2. 停在权限/信任确认框 → 只注入回车（Enter 选默认项，通常是 Yes；不发任何文字，
 //    高律师 2026-07-26「权限确认栏也帮我 enter」）。连环框靠逐分钟一跳清完；
 //    Enter 清不掉的框才走 8 分钟 dialog-stuck 告警。
+// 特例：智谱 5h 额度窗口（code 1308「已达到 5 小时使用上限，<时间>后可继续使用」）——
+//    上限在智谱侧，窗口内 continue 与切 FreeModel key 均徒劳；单列 quota-cap  verdict：
+//    每窗口只推一次微信、不注入不切 key，到恢复点后按普通卡死放行续跑（2026-07-27 高律师定）。
 //
 // 通道说明（为什么走 WS input 而不是 room / sendline）：
 // - room 投递只覆盖项目内成员，卡住的多是游离会话；
@@ -90,6 +93,18 @@ const LOCK_FILE = path.join(ROOT, 'data', 'api-error-continue.lock')
 // 「错误行之后直到空闲输入框再无实质内容」才判 stalled，聊天内容里出现这些词不会中招。
 const RE_ERROR =
   /API Error|Connection error|Request timed out|fetch failed|Please run \/login|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|overloaded|rate.?limit|usage limit|Internal server error|Bad Gateway|Service Unavailable|Gateway Timeout|Server Error|HTTP 5\d\d/i
+// 智谱编码套餐 5 小时额度窗口（code 1308，2026-07-27 高律师确认是智谱的）：
+// 窗口内 continue 重试与切 FreeModel key 都是徒劳（上游是智谱额度不是 FreeModel 余额），
+// 必须单列一类——认出恢复时间，到点前不注不切，到点后当普通卡死放行续跑。
+const RE_QUOTA_CAP = /\[1308\]|code["']?\s*:\s*["']?1308|已达到\s*\d+\s*小时使用上限|超限额按量付费/
+/** 错误块文本命中 1308 → 提取「YYYY-MM-DD HH:MM:SS 后可继续使用」恢复点（本地时区） */
+function matchQuotaCap(text) {
+  if (!RE_QUOTA_CAP.test(text)) return null
+  const m = text.match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*后可继续使用/)
+  if (!m) return { resumeAt: null, resumeLabel: null }
+  const t = new Date(`${m[1]}T${m[2]}`).getTime()
+  return { resumeAt: Number.isNaN(t) ? null : t, resumeLabel: `${m[1]} ${m[2]}` }
+}
 const RE_BUSY = /esc to interrupt/i
 const RE_RETRYING = /Retrying in \d+|attempt \d+\/\d+/i
 // 与 shared/traffic.ts PENDING_CHOICE_RE 同口径：权限框/信任页永不注入
@@ -122,6 +137,7 @@ function extractTrailer(lines) {
 /**
  * 尾屏 16 行 → 判定。verdict:
  *  stalled       API Error 且已停在空闲输入框 → 该注入
+ *  quota-cap     智谱 5h 额度窗口（1308）卡死 → 窗口内不注入不切 key，到点放行
  *  busy          正在工作（esc to interrupt 可见）
  *  retrying      claude 自动重试倒计时中，等它自愈
  *  dialog        停在权限/信任框，注入会误触选项
@@ -158,6 +174,10 @@ export function classifyScreen(lines) {
     if (inErrBlock && /^\s+\S/.test(ln) && !/^\s*⏺/.test(ln)) continue
     return { verdict: 'stale', errorLine }
   }
+  // 已确认是「停在错误上的卡死」形态：再区分智谱 5h 额度窗口（1308）——
+  // 恢复点可能折行在错误块里，从错误行到屏尾整段找
+  const cap = matchQuotaCap(lines.slice(errIdx).join('\n'))
+  if (cap) return { verdict: 'quota-cap', errorLine, resumeAt: cap.resumeAt, resumeLabel: cap.resumeLabel }
   return { verdict: 'stalled', errorLine }
 }
 
@@ -257,6 +277,14 @@ function selfTest() {
     // 网关错已不重试、停在空闲框 = stalled（RE_ERROR 补了 Bad Gateway / Gateway Timeout 等）
     ['stalled', ['  ⎿  502 Bad Gateway', '', box, '❯ ', box, status]],
     ['stalled', ['  ⎿  504 Gateway Timeout', '', box, '❯ ', box, status]],
+    // 智谱 5h 额度窗口 1308（2026-07-27 实战）：紧凑单行与完整 JSON 折行两种形态都要认出
+    ['quota-cap', ['  ⎿  API Error: Request rejected (429) · [1308][已达到 5 小时使用上限，2026-07-27 19:01:12 后可继续使用。如需超限额按量付费使用，可联系管理员开启超额按量付费]', '', box, '❯ ', box, status]],
+    ['quota-cap', [
+      '⏺ API Error: 429 {"type":"error","error":{"type":"rate_limit_error","code":"1308","message":"[1308][已达到 5 小时',
+      '  使用上限，2026-07-27 19:01:12 后可继续使用。如需超限额按量付费使用，可联系管理员开启超额按量付费]"}',
+      '',
+      box, '❯ ', box, status,
+    ]],
   ]
   let fail = 0
   for (const [want, lines] of cases) {
@@ -312,7 +340,30 @@ function selfTest() {
       console.error(`FAIL trailer :: ${name}`)
     }
   }
-  console.log(fail === 0 ? `self-test PASS (${cases.length + epCases.length + trCases.length} cases)` : `self-test ${fail} FAIL`)
+  // 1308 恢复点提取：本地时区解析「YYYY-MM-DD HH:MM:SS 后可继续使用」
+  const capCases = []
+  const capCheck = (name, cond) => capCases.push([name, cond])
+  {
+    const c = classifyScreen(['  ⎿  API Error: Request rejected (429) · [1308][已达到 5 小时使用上限，2026-07-27 19:01:12 后可继续使用]', '', box, '❯ ', box, status])
+    capCheck('quota-cap verdict', c.verdict === 'quota-cap')
+    capCheck('resumeLabel 提取', c.resumeLabel === '2026-07-27 19:01:12')
+    capCheck('resumeAt 本地时区', c.resumeAt === new Date('2026-07-27T19:01:12').getTime())
+    const wrapped = classifyScreen([
+      '⏺ API Error: 429 {"code":"1308","message":"[1308][已达到 5 小时',
+      '  使用上限，2026-07-27 19:01:12 后可继续使用]"}',
+      '', box, '❯ ', box, status,
+    ])
+    capCheck('折行 JSON 也提取恢复点', wrapped.verdict === 'quota-cap' && wrapped.resumeLabel === '2026-07-27 19:01:12')
+    const noTime = classifyScreen(['  ⎿  API Error: 429 · [1308][已达到 5 小时使用上限]', '', box, '❯ ', box, status])
+    capCheck('无恢复时间仍判 quota-cap（resumeAt=null）', noTime.verdict === 'quota-cap' && noTime.resumeAt === null)
+  }
+  for (const [name, cond] of capCases) {
+    if (!cond) {
+      fail++
+      console.error(`FAIL quota-cap :: ${name}`)
+    }
+  }
+  console.log(fail === 0 ? `self-test PASS (${cases.length + epCases.length + trCases.length + capCases.length} cases)` : `self-test ${fail} FAIL`)
   process.exit(fail === 0 ? 0 : 1)
 }
 
@@ -325,7 +376,7 @@ async function api(p) {
   return j.data
 }
 
-const isClaudeFamily = (s) => Boolean(s.claudeSessionId) || /^(claude|c5)$/.test(s.templateId)
+const isClaudeFamily = (s) => Boolean(s.claudeSessionId) || /^(claude-glm52|claude-fable5)$/.test(s.templateId)
 
 async function screenOf(id) {
   return (await api(`/sessions/${id}/screen`)).lines
@@ -561,6 +612,8 @@ async function main() {
     } else {
       delete st.trailer
     }
+    // 额度窗口状态只在 1308 屏上保留；屏幕恢复（clean/busy/其他错误）即清，下个窗口重新通知
+    if (cls.verdict !== 'quota-cap' && st.quota) delete st.quota
     updateEpisode(st, cls.verdict, now)
     scans.push({ s, short, name, st, cls })
     // 巡检：确认框滞留跟踪——pass2 会自动 Enter，这里只记时长；连续可见超 DIALOG_PERSIST_MS
@@ -677,6 +730,24 @@ async function main() {
       }
       continue
     }
+    // 智谱 5h 额度窗口（1308）：continue 与切 FreeModel key 都无效（上限在智谱侧）——
+    // 窗口内只通知一次、不注入；到点（now ≥ resumeAt）按普通 stalled 放行续跑。--force 人工强注不受限
+    if (cls.verdict === 'quota-cap' && !FORCE) {
+      const resumeAt = cls.resumeAt || 0
+      if (!st.quota || st.quota.resumeAt !== resumeAt) st.quota = { resumeAt, notified: false }
+      if (resumeAt && now >= resumeAt) {
+        cls = { verdict: 'stalled', errorLine: `${cls.errorLine}（额度窗口已到恢复点，放行续跑）` }
+      } else {
+        if (PATROL && !DRY && !st.quota.notified) {
+          st.quota.notified = true
+          results.push({ id: short, name, action: 'quota-cap', why: `智谱 5 小时额度已用尽${cls.resumeLabel ? `，${cls.resumeLabel} 恢复` : ''}——期间不再注 continue / 切 key，到点自动续跑` })
+          audit({ sessionId: s.id, name: s.name, action: 'quota-cap', resumeLabel: cls.resumeLabel, errorLine: cls.errorLine })
+        } else if (!PATROL) {
+          results.push({ id: short, name, action: 'skip', why: `智谱 5h 额度上限${cls.resumeLabel ? `（${cls.resumeLabel} 恢复）` : ''}，不注入` })
+        }
+        continue
+      }
+    }
     if (cls.verdict !== 'stalled' && !FORCE) {
       if (cls.verdict !== 'clean' && cls.verdict !== 'busy') {
         results.push({ id: short, name, action: 'skip', why: cls.verdict, errorLine: cls.errorLine })
@@ -740,9 +811,10 @@ async function main() {
       : r.action === 'key-switch' ? `🔑 ${r.why}`
       : r.action === 'switch-failed' ? `🆘 ${r.why}`
       : r.action === 'give-up' ? `🆘 ${r.name}：${r.why}`
+      : r.action === 'quota-cap' ? `🚫 ${r.name}：${r.why}`
       : r.action === 'dialog-stuck' ? `⚠️ ${r.name}：${r.why}，请到看板处理`
       : `💥 ${r.name}：${r.why}`
-    const logworthy = results.filter((r) => ['sent', 'dialog-enter', 'send-failed', 'key-switch', 'switch-failed', 'give-up', 'dialog-stuck', 'crashed'].includes(r.action))
+    const logworthy = results.filter((r) => ['sent', 'dialog-enter', 'send-failed', 'key-switch', 'switch-failed', 'give-up', 'quota-cap', 'dialog-stuck', 'crashed'].includes(r.action))
     const stamp = new Date().toISOString()
     if (!logworthy.length) {
       console.log(`${stamp} 巡检 clean（${targets.length} 个 claude 系会话）`)

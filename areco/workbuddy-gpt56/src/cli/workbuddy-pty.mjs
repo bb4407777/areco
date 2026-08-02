@@ -16,6 +16,7 @@ export function parseArgs(argv) {
   const options = {
     bridgeUrl: DEFAULT_BRIDGE_URL,
     modelId: DEFAULT_MODEL_ID,
+    modelExplicitlySet: false,
     resumeSessionId: "",
     pollMs: DEFAULT_POLL_MS,
     timeoutMs: DEFAULT_TURN_TIMEOUT_MS,
@@ -25,7 +26,10 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--bridge") options.bridgeUrl = String(argv[++index] || "").trim();
-    else if (arg === "--model") options.modelId = String(argv[++index] || "").trim();
+    else if (arg === "--model") {
+      options.modelId = String(argv[++index] || "").trim();
+      options.modelExplicitlySet = true;
+    }
     else if (arg === "--resume") options.resumeSessionId = String(argv[++index] || "").trim();
     else if (arg === "--poll-ms") options.pollMs = positiveInteger(argv[++index], DEFAULT_POLL_MS);
     else if (arg === "--timeout-ms") options.timeoutMs = positiveInteger(argv[++index], DEFAULT_TURN_TIMEOUT_MS);
@@ -147,7 +151,7 @@ function contentText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .filter((block) => block && typeof block === "object" && ["output_text", "text"].includes(block.type))
+    .filter((block) => block && typeof block === "object" && ["input_text", "output_text", "text"].includes(block.type))
     .map((block) => String(block.text || ""))
     .join("");
 }
@@ -179,11 +183,13 @@ export function classifyJsonlEvent(event) {
   return null;
 }
 
-export function inspectJsonlText(raw) {
-  let lastUserIndex = -1;
-  let lastUserId = "";
-  let terminal = null;
-  let needsUser = null;
+function jsonlEventId(event, index) {
+  return String(event?.id || event?.messageId || event?.timestamp || index);
+}
+
+export function inspectJsonlTurns(raw) {
+  const turns = [];
+  let currentTurn = null;
   const lines = String(raw || "").split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
     if (!lines[index].trim()) continue;
@@ -194,31 +200,85 @@ export function inspectJsonlText(raw) {
       continue;
     }
     if (event?.type === "message" && event?.role === "user") {
-      lastUserIndex = index;
-      lastUserId = String(event.id || event.messageId || event.timestamp || index);
-      terminal = null;
-      needsUser = null;
+      currentTurn = {
+        userId: jsonlEventId(event, index),
+        userText: contentText(event.content).trim(),
+        userIndex: index,
+        terminal: null,
+        terminalId: "",
+        needsUser: null,
+      };
+      turns.push(currentTurn);
       continue;
     }
-    if (lastUserIndex < 0 || index <= lastUserIndex) continue;
+    if (!currentTurn) continue;
     const classified = classifyJsonlEvent(event);
-    if (classified?.kind === "needs-user") needsUser = classified;
-    if (classified?.kind === "completed" || classified?.kind === "incomplete") terminal = classified;
+    if (classified?.kind === "needs-user") currentTurn.needsUser = classified;
+    if (classified?.kind === "completed" || classified?.kind === "incomplete") {
+      currentTurn.terminal = classified;
+      currentTurn.terminalId = jsonlEventId(event, index);
+    }
   }
+  return turns;
+}
+
+function jsonlStateFromTurns(turns) {
+  const lastTurn = turns.at(-1) || null;
   return {
-    hasUserTurn: lastUserIndex >= 0,
-    lastUserId,
-    inFlight: lastUserIndex >= 0 && !terminal,
-    terminal,
-    needsUser,
+    hasUserTurn: Boolean(lastTurn),
+    lastUserId: lastTurn?.userId || "",
+    inFlight: Boolean(lastTurn && !lastTurn.terminal),
+    terminal: lastTurn?.terminal || null,
+    needsUser: lastTurn?.needsUser || null,
   };
+}
+
+export function inspectJsonlText(raw) {
+  return jsonlStateFromTurns(inspectJsonlTurns(raw));
 }
 
 async function readJsonlState(sessionId, homeDir) {
   const filePath = await findSessionJsonl(sessionId, homeDir);
-  if (!filePath) return { filePath: "", raw: "", state: inspectJsonlText("") };
+  if (!filePath) return { filePath: "", raw: "", state: jsonlStateFromTurns([]), turns: [] };
   const raw = await fs.readFile(filePath, "utf8");
-  return { filePath, raw, state: inspectJsonlText(raw) };
+  const turns = inspectJsonlTurns(raw);
+  return { filePath, raw, state: jsonlStateFromTurns(turns), turns };
+}
+
+function turnAfterBaseline(turns, baselineUserIds, prompt = "") {
+  const expectedText = String(prompt || "").trim();
+  const freshTurns = turns.filter((turn) => !baselineUserIds.has(turn.userId));
+  if (!expectedText) return freshTurns[0] || null;
+  return freshTurns.find((turn) => turn.userText === expectedText) || null;
+}
+
+async function waitForPromptTurn(sessionId, prompt, options = {}) {
+  const homeDir = options.homeDir || os.homedir();
+  const pollMs = positiveInteger(options.pollMs, DEFAULT_POLL_MS);
+  const timeoutMs = positiveInteger(options.timeoutMs, DEFAULT_TURN_TIMEOUT_MS);
+  const baselineUserIds = new Set(options.baselineUserIds || []);
+  const startedAt = Date.now();
+  let notifiedNeedsUser = false;
+  while (Date.now() - startedAt <= timeoutMs) {
+    const snapshot = await readJsonlState(sessionId, homeDir);
+    const turn = options.targetUserId
+      ? snapshot.turns.find((candidate) => candidate.userId === options.targetUserId) || null
+      : turnAfterBaseline(snapshot.turns, baselineUserIds, prompt);
+    if (turn?.needsUser && !notifiedNeedsUser) {
+      notifiedNeedsUser = true;
+      options.onNeedsUser?.(turn.needsUser.text);
+    }
+    if (turn?.terminal) {
+      return {
+        ...turn.terminal,
+        filePath: snapshot.filePath,
+        userId: turn.userId,
+        terminalId: turn.terminalId,
+      };
+    }
+    await sleep(pollMs);
+  }
+  throw new Error(`等待 WorkBuddy 回复超时（${Math.round(timeoutMs / 1000)} 秒）`);
 }
 
 function sleep(ms) {
@@ -259,6 +319,14 @@ export class WorkBuddyPtyAdapter {
     this.stderr = options.stderr || process.stderr;
     this.sessionId = options.resumeSessionId || "";
     this.queue = Promise.resolve();
+    this.watcherRunning = false;
+    this.watcherPromise = null;
+    this.watcherWake = null;
+    this.watcherKnownUserIds = new Set();
+    this.watcherKnownTerminalIds = new Set();
+    this.watcherKnownNeedsUserIds = new Set();
+    this.localTurnIds = new Set();
+    this.activePrompt = null;
   }
 
   print(text = "") {
@@ -273,13 +341,15 @@ export class WorkBuddyPtyAdapter {
     if (this.sessionId) {
       await this.client.getSession(this.sessionId);
       this.print(`[WorkBuddy] 已恢复会话 ${this.sessionId}`);
-      await this.client.setModel(this.sessionId, this.options.modelId || DEFAULT_MODEL_ID);
-      this.print(`[WorkBuddy] 模型 ${(this.options.modelId || DEFAULT_MODEL_ID)}`);
+      if (this.options.modelExplicitlySet) {
+        await this.client.setModel(this.sessionId, this.options.modelId || DEFAULT_MODEL_ID);
+        this.print(`[WorkBuddy] 模型 ${(this.options.modelId || DEFAULT_MODEL_ID)}`);
+      }
 
-      if (await hasInFlightTurn(this.sessionId, this.homeDir)) {
-        this.print("[WorkBuddy] 检测到未结束回合，正在接回；不会重复发送指令。");
-        const terminal = await this.monitorTurn();
-        this.printTerminal(terminal);
+      const snapshot = await readJsonlState(this.sessionId, this.homeDir);
+      await this.startSessionWatcher(snapshot);
+      if (snapshot.state.inFlight) {
+        this.print("[WorkBuddy] 检测到未结束回合，已在后台接回；仍可继续输入，指令会按顺序发送。");
       }
       this.print("[WorkBuddy] 就绪");
       return this.sessionId;
@@ -289,14 +359,88 @@ export class WorkBuddyPtyAdapter {
     return "";
   }
 
-  monitorTurn(baselineUserId = "") {
-    return waitForTurn(this.sessionId, {
-      homeDir: this.homeDir,
-      pollMs: this.options.pollMs,
-      timeoutMs: this.options.timeoutMs,
-      baselineUserId,
-      onNeedsUser: (text) => this.printError(`${text}；请在 WorkBuddy 桌面端处理。`),
-    });
+  async waitUntilSessionIdle() {
+    const startedAt = Date.now();
+    const timeoutMs = positiveInteger(this.options.timeoutMs, DEFAULT_TURN_TIMEOUT_MS);
+    while (Date.now() - startedAt <= timeoutMs) {
+      const snapshot = await readJsonlState(this.sessionId, this.homeDir);
+      if (!snapshot.state.inFlight) return snapshot;
+      await sleep(positiveInteger(this.options.pollMs, DEFAULT_POLL_MS));
+    }
+    throw new Error(`等待 WorkBuddy 当前回合结束超时（${Math.round(timeoutMs / 1000)} 秒）`);
+  }
+
+  async startSessionWatcher(initialSnapshot = null) {
+    if (!this.sessionId || this.watcherRunning) return;
+    const snapshot = initialSnapshot || await readJsonlState(this.sessionId, this.homeDir);
+    for (const turn of snapshot.turns) {
+      this.watcherKnownUserIds.add(turn.userId);
+      if (turn.terminalId) this.watcherKnownTerminalIds.add(turn.terminalId);
+      if (turn.needsUser) this.watcherKnownNeedsUserIds.add(turn.userId);
+    }
+    if (snapshot.state.inFlight) {
+      const current = snapshot.turns.at(-1);
+      if (current?.terminalId) this.watcherKnownTerminalIds.delete(current.terminalId);
+    }
+    this.watcherRunning = true;
+    this.watcherPromise = this.watchSessionLoop();
+  }
+
+  async stopSessionWatcher() {
+    this.watcherRunning = false;
+    this.watcherWake?.();
+    await this.watcherPromise;
+    this.watcherPromise = null;
+  }
+
+  claimLocalTurn(turn) {
+    const active = this.activePrompt;
+    if (!active || active.userId || active.baselineUserIds.has(turn.userId)) return false;
+    if (turn.userText !== active.text) return false;
+    active.userId = turn.userId;
+    this.localTurnIds.add(turn.userId);
+    return true;
+  }
+
+  async syncSessionEvents() {
+    if (!this.sessionId) return;
+    const snapshot = await readJsonlState(this.sessionId, this.homeDir);
+    for (const turn of snapshot.turns) {
+      const isNewUser = !this.watcherKnownUserIds.has(turn.userId);
+      const isLocal = this.localTurnIds.has(turn.userId) || this.claimLocalTurn(turn);
+      if (isNewUser) {
+        this.watcherKnownUserIds.add(turn.userId);
+        if (!isLocal) this.print(`[WorkBuddy GUI] > ${turn.userText || "（非文本指令）"}`);
+      }
+      if (turn.needsUser && !this.watcherKnownNeedsUserIds.has(turn.userId)) {
+        this.watcherKnownNeedsUserIds.add(turn.userId);
+        this.printError(`${turn.needsUser.text}；请在 WorkBuddy 桌面端处理。`);
+      }
+      if (turn.terminalId && !this.watcherKnownTerminalIds.has(turn.terminalId)) {
+        this.watcherKnownTerminalIds.add(turn.terminalId);
+        if (!isLocal) this.printTerminal({ ...turn.terminal, terminalId: turn.terminalId }, "[WorkBuddy GUI] ");
+      }
+    }
+  }
+
+  async watchSessionLoop() {
+    while (this.watcherRunning) {
+      try {
+        await this.syncSessionEvents();
+      } catch (error) {
+        this.printError(`会话同步暂时失败，将自动重试：${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!this.watcherRunning) break;
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, positiveInteger(this.options.pollMs, DEFAULT_POLL_MS));
+        timer.unref?.();
+        this.watcherWake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      this.watcherWake = null;
+    }
   }
 
   async monitorDispatch(dispatchId, signal) {
@@ -310,11 +454,11 @@ export class WorkBuddyPtyAdapter {
     }
   }
 
-  printTerminal(terminal) {
+  printTerminal(terminal, prefix = "") {
     if (terminal.kind === "completed") {
-      this.print(terminal.text || "（WorkBuddy 已完成，但未返回文本）");
+      this.print(`${prefix}${terminal.text || "（WorkBuddy 已完成，但未返回文本）"}`);
     } else {
-      this.printError(`回合未完成：${terminal.text}`);
+      this.printError(`${prefix}回合未完成：${terminal.text}`);
     }
   }
 
@@ -323,7 +467,8 @@ export class WorkBuddyPtyAdapter {
     if (!prompt) return;
     this.print(`> ${prompt}`);
 
-    let initialDispatchId = "";
+    let dispatchId = "";
+    let before;
     if (!this.sessionId) {
       const created = await this.client.createSession(
         this.cwd,
@@ -332,49 +477,54 @@ export class WorkBuddyPtyAdapter {
       );
       this.sessionId = String(created.sessionId || created.task?.id || "").trim();
       if (!this.sessionId) throw new Error("桥接未返回 WorkBuddy 会话 ID");
-      initialDispatchId = String(created.dispatchId || "").trim();
+      dispatchId = String(created.dispatchId || "").trim();
+      before = { turns: [], state: inspectJsonlText("") };
+      this.activePrompt = { text: prompt, baselineUserIds: new Set(), userId: "" };
       this.print(`[WorkBuddy] 已创建会话 ${this.sessionId}`);
       this.print(`[WorkBuddy] 模型 ${(this.options.modelId || DEFAULT_MODEL_ID)}`);
+      await this.startSessionWatcher(await readJsonlState(this.sessionId, this.homeDir));
+    } else {
+      before = await this.waitUntilSessionIdle();
+      const baselineUserIds = new Set(before.turns.map((turn) => turn.userId));
+      this.activePrompt = { text: prompt, baselineUserIds, userId: "" };
+      try {
+        const payload = await this.client.sendMessage(this.sessionId, prompt);
+        dispatchId = String(payload?.dispatchId || "").trim();
+      } catch (error) {
+        const after = await readJsonlState(this.sessionId, this.homeDir);
+        const freshTurns = after.turns.filter((turn) => !baselineUserIds.has(turn.userId));
+        const acceptedTurn = turnAfterBaseline(after.turns, baselineUserIds, prompt)
+          || (freshTurns.length === 1 && !freshTurns[0].userText ? freshTurns[0] : null);
+        if (!acceptedTurn) {
+          this.activePrompt = null;
+          throw error;
+        }
+        this.activePrompt.userId = acceptedTurn.userId;
+        this.localTurnIds.add(acceptedTurn.userId);
+      }
     }
 
-    const before = await readJsonlState(this.sessionId, this.homeDir);
-    const baselineUserId = initialDispatchId ? "" : before.state.lastUserId;
-    const turnPromise = this.monitorTurn(baselineUserId);
-    const sendOutcome = initialDispatchId
-      ? Promise.resolve({ kind: "accepted", payload: { dispatchId: initialDispatchId } })
-      : this.client.sendMessage(this.sessionId, prompt).then(
-          (payload) => ({ kind: "accepted", payload }),
-          (error) => ({ kind: "send-error", error })
-        );
-    const first = await Promise.race([
-      turnPromise.then((terminal) => ({ kind: "terminal", terminal })),
-      sendOutcome,
-    ]);
-
-    if (first.kind === "terminal") {
-      this.printTerminal(first.terminal);
-      return;
-    }
-    if (first.kind === "send-error") {
-      const after = await readJsonlState(this.sessionId, this.homeDir);
-      const acceptedByDesktop = Boolean(
-        after.state.lastUserId && after.state.lastUserId !== before.state.lastUserId
-      );
-      if (!acceptedByDesktop) throw first.error;
-      const terminal = await turnPromise;
-      this.printTerminal(terminal);
-      return;
-    }
-
+    const baselineUserIds = this.activePrompt?.baselineUserIds || new Set(before.turns.map((turn) => turn.userId));
+    const turnPromise = waitForPromptTurn(this.sessionId, prompt, {
+      homeDir: this.homeDir,
+      pollMs: this.options.pollMs,
+      timeoutMs: this.options.timeoutMs,
+      baselineUserIds,
+      targetUserId: this.activePrompt?.userId || "",
+      onNeedsUser: (message) => this.printError(`${message}；请在 WorkBuddy 桌面端处理。`),
+    });
     const dispatchMonitor = new AbortController();
-    const dispatchPromise = this.monitorDispatch(first.payload.dispatchId, dispatchMonitor.signal);
+    const dispatchPromise = this.monitorDispatch(dispatchId, dispatchMonitor.signal);
     try {
       const terminal = await Promise.race([
         turnPromise,
         dispatchPromise.then(() => turnPromise),
       ]);
+      if (terminal.userId) this.localTurnIds.add(terminal.userId);
+      if (terminal.terminalId) this.watcherKnownTerminalIds.add(terminal.terminalId);
       this.printTerminal(terminal);
     } finally {
+      this.activePrompt = null;
       dispatchMonitor.abort();
     }
   }
@@ -434,6 +584,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     if (stopping) return;
     stopping = true;
     detach();
+    adapter.stopSessionWatcher();
     if (adapter.sessionId) {
       adapter.printError(`收到 ${signal}，仅退出本地适配器；已有内容的 WorkBuddy 会话 ${adapter.sessionId} 保留。`);
     } else {
