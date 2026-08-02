@@ -3,7 +3,7 @@
 # 探针失败(如 QClaw App 未运行)自动回退 zhipu,避免醒来微信通道挂死。
 # 2026-07-23 管理者指示建立;由 cc-connect cron 调度(jobs.json),会话外执行合规。
 set -u
-PY=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+PY=/opt/homebrew/bin/python3.13
 SWITCH=/Users/gao/.qclaw-hermes/bin/hermes-switch-model.py
 LOG=/Users/gao/.qclaw-hermes/logs/nightly-switch.log
 ts() { date '+%F %T'; }
