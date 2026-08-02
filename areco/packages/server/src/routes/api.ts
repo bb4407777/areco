@@ -66,6 +66,8 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   // 项目协作（Phase 6：项目 = 人 + 活会话，@mention 投递终端，消息 SoT 在项目消息库）
   router.get('/rooms', rc.list)
   router.post('/rooms', rc.create)
+  // 一键清理（2026-08-02）：批量删 kind 下无活跃会话的房间+消息库记录；注册在 /:id 路由前
+  router.post('/rooms/cleanup', rc.cleanup)
   router.get('/projects/catalog', rc.catalog)
   router.post('/projects/open', rc.openProject)
   router.post('/projects/groups', rc.createGroup)

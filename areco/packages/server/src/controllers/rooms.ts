@@ -13,9 +13,11 @@ import type { RoomRelay } from '../services/room-relay'
 import * as projectDb from '../services/project-db'
 import { MSG_CLI_PATH } from '../config'
 import type { ProjectFileService } from '../services/project-files'
+import { createLogger } from '../logger'
 
 /** 回执 CLI 绝对路径（下发给前端「邀请」提示，与 room-relay 注入文案同源） */
 const MSG_CLI = MSG_CLI_PATH
+const log = createLogger('rooms-cleanup')
 
 function ok(ctx: Context, data: unknown) {
   ctx.body = { ok: true, data }
@@ -98,31 +100,89 @@ export class RoomControllers {
       ok(ctx, room)
     })
 
+  /** 级联删房（remove/cleanup 共用，2026-08-02 抽并）：删房间条目 + 房内会话。
+   *  边界（维护者 2026-07-22）：主 = roomId 强归属；legacy 兜底 = 无归属字段的旧成员
+   *  会话且未挂在其它项目 members（多房共享的保留，免误删）；已移出项目的会话不在
+   *  边界内，属可接受残留。返回被级联删除的会话 id。调用方负责 broadcastRooms。 */
+  private removeRoomCascade(room: RoomInfo): string[] {
+    const elsewhere = new Set(
+      this.rooms
+        .list()
+        .filter((r) => r.id !== room.id)
+        .flatMap((r) => r.members.map((m) => m.sessionId))
+    )
+    const summaries = this.manager.list()
+    const bound = summaries.filter((s) => s.roomId === room.id).map((s) => s.id)
+    const existing = new Set(summaries.map((s) => s.id))
+    const legacy = room.members
+      .map((m) => (m.kind === 'session' ? m.sessionId : null))
+      .filter((id): id is string => !!id && !elsewhere.has(id) && existing.has(id) && !bound.includes(id))
+      .filter((id) => !summaries.find((s) => s.id === id)?.roomId)
+    const cascade = [...bound, ...legacy]
+    this.rooms.remove(room.id)
+    // 运行中会话 remove 走"先停后删"（exit 事件再清理），此处调用即返回，清理异步完成
+    for (const id of cascade) this.manager.remove(id)
+    return cascade
+  }
+
   remove = (ctx: Context) =>
     guard(ctx, () => {
       const room = this.rooms.get(ctx.params.id)
-      // 级联删除房内会话（维护者 2026-07-22）：主边界 = roomId 强归属（项目内 spawn 的专属会话随项目走）。
-      // legacy 兜底 = 无归属字段的旧成员会话、且未挂在其它项目 members（多房共享的保留，免误删）。
-      // 已移出项目的会话不在边界内，属可接受残留。
-      const elsewhere = new Set(
-        this.rooms
-          .list()
-          .filter((r) => r.id !== room.id)
-          .flatMap((r) => r.members.map((m) => m.sessionId))
-      )
-      const summaries = this.manager.list()
-      const bound = summaries.filter((s) => s.roomId === room.id).map((s) => s.id)
-      const existing = new Set(summaries.map((s) => s.id))
-      const legacy = room.members
-        .map((m) => (m.kind === 'session' ? m.sessionId : null))
-        .filter((id): id is string => !!id && !elsewhere.has(id) && existing.has(id) && !bound.includes(id))
-        .filter((id) => !summaries.find((s) => s.id === id)?.roomId)
-      const cascade = [...bound, ...legacy]
-      this.rooms.remove(room.id)
-      // 运行中会话 remove 走"先停后删"（exit 事件再清理），此处调用即返回，清理异步完成
-      for (const id of cascade) this.manager.remove(id)
+      const cascade = this.removeRoomCascade(room)
       this.relay.broadcastRooms()
       ok(ctx, { removed: room.id, removedSessions: cascade })
+    })
+
+  /** 一键清理（2026-08-02 高律师需求：任务/项目列表经常整批过时，成果早已落地文件）。
+   *  批量删除该 kind 下**无活跃会话**的房间（running/spawning/stopping 一律跳过），
+   *  级联房内会话，并连同消息库该房记录一并清（purgeTeam 必须先于房间删除——
+   *  房间条目没了 kind 路由查无，项目房会删错库）。?dry=1 只回计划不动手。
+   *  UI 按钮 = 高律师亲手点，符合「房间 DELETE 归高律师亲手」硬闸；agent 不得
+   *  程序化调用本端点清理任务房之外的房间（sweep-task-rooms.py 特许例外不变）。 */
+  cleanup = (ctx: Context) =>
+    guard(ctx, () => {
+      const kind = ctx.query.kind === 'project' ? 'project' : 'task'
+      const dry = ctx.query.dry === '1'
+      const summaries = this.manager.list()
+      const activeSessionIds = new Set(
+        summaries.filter((s) => s.status === 'running' || s.status === 'spawning' || s.status === 'stopping').map((s) => s.id)
+      )
+      const activeRoomIds = new Set(
+        summaries
+          .filter((s) => activeSessionIds.has(s.id) && s.roomId)
+          .map((s) => s.roomId as string)
+      )
+      const all = this.rooms.list().filter((r) => (r.kind === 'project' ? 'project' : 'task') === kind)
+      const targets: RoomInfo[] = []
+      const skipped: { id: string; name: string; reason: string }[] = []
+      for (const room of all) {
+        const memberActive = room.members.some((m) => m.sessionId && activeSessionIds.has(m.sessionId))
+        if (activeRoomIds.has(room.id) || memberActive) {
+          skipped.push({ id: room.id, name: room.name, reason: 'active-session' })
+          continue
+        }
+        targets.push(room)
+      }
+      if (dry) {
+        ok(ctx, { kind, dry: true, count: targets.length, rooms: targets.map((r) => ({ id: r.id, name: r.name })), skipped })
+        return
+      }
+      const removed: string[] = []
+      const removedSessions: string[] = []
+      let purgedMessages = 0
+      for (const room of targets) {
+        try {
+          const purged = projectDb.purgeTeam(room.team) // 先清消息（见方法注释的顺序红线）
+          purgedMessages += purged.messages
+          removedSessions.push(...this.removeRoomCascade(room))
+          removed.push(room.id)
+        } catch (err) {
+          log.warn(`一键清理 ${kind} 房间 ${room.id} 失败，跳过继续`, err)
+        }
+      }
+      this.relay.broadcastRooms()
+      log.info(`一键清理 ${kind}：删 ${removed.length} 房 / ${removedSessions.length} 会话 / ${purgedMessages} 条消息，跳过活跃 ${skipped.length}`)
+      ok(ctx, { kind, removed, removedSessions, purgedMessages, skipped })
     })
 
   archive = (ctx: Context) =>

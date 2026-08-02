@@ -422,6 +422,40 @@ async function send() {
 const nameFilter = ref('')
 const kindRooms = computed(() => rooms.sortedRooms.filter((r) => roomKindOf(r) === kind.value))
 const activeRooms = computed(() => kindRooms.value.filter((r) => typeof r.archivedAt !== 'number'))
+
+// ---- 一键清理（2026-08-02 高律师需求：任务/项目列表整批过时，成果早已落地文件）----
+// 清理 = 删本 kind 下无活跃会话的房间 + 消息库该房记录（服务端 /rooms/cleanup，
+// running 房自动跳过）。前端计数仅作按钮展示，最终判定以服务端为准。
+const cleaning = ref(false)
+const busyRoomIds = computed(() => {
+  const ids = new Set<string>()
+  for (const s of sessionsStore.sessions) {
+    const st = s.status
+    if ((st === 'running' || st === 'spawning' || st === 'stopping') && s.roomId) ids.add(s.roomId)
+  }
+  return ids
+})
+const cleanableRoomCount = computed(() => kindRooms.value.filter((r) => !busyRoomIds.value.has(r.id)).length)
+
+async function cleanupRooms() {
+  if (cleaning.value || !cleanableRoomCount.value) return
+  cleaning.value = true
+  try {
+    const d = await api.post<{ removed: string[]; removedSessions: string[]; purgedMessages: number; skipped: unknown[] }>(
+      `/api/rooms/cleanup?kind=${kind.value}`
+    )
+    if (d.removed.includes(activeId.value)) activeId.value = ''
+    await rooms.refresh()
+    message.success(
+      `已清理 ${d.removed.length} 个${kindLabel.value}（${d.purgedMessages} 条消息）` +
+      (d.skipped.length ? `，跳过活跃 ${d.skipped.length} 个` : '')
+    )
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    cleaning.value = false
+  }
+}
 const archivedRooms = computed(() => kindRooms.value.filter((r) => typeof r.archivedAt === 'number'))
 const filteredRooms = computed(() => {
   const q = nameFilter.value.trim().toLowerCase()
@@ -698,6 +732,22 @@ onMounted(async () => {
     <aside class="rooms" :class="{ overlay: ui.isMobile, open: !ui.isMobile || mobileRoomsOpen }">
       <div class="rooms-head">
         <span class="rooms-title">{{ kindLabel }}列表</span>
+        <NPopconfirm
+          :positive-text="`清理 ${cleanableRoomCount} 个`"
+          negative-text="算了"
+          placement="bottom"
+          @positive-click="cleanupRooms"
+        >
+          <template #trigger>
+            <button
+              class="icon-btn"
+              :disabled="!cleanableRoomCount || cleaning"
+              :title="`一键清理：删除全部无活跃会话的${kindLabel}及其消息记录（正在干活的自动跳过）`"
+            >🧹</button>
+          </template>
+          将删除 {{ cleanableRoomCount }} 个无活跃会话的{{ kindLabel }}及其消息记录（含已归档），不可恢复；
+          正在干活的{{ kindLabel }}自动跳过，成果文件与会话历史快照不受影响。
+        </NPopconfirm>
         <button
           class="icon-btn"
           :title="kind === 'project' ? '新建项目分组' : '新建任务'"

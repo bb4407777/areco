@@ -112,3 +112,25 @@ test('存量低 id 项目消息可回退命中（dbsForId 范围路由的 miss �
   assert.ok(db.history('room-legacy-proj', 10).some((m) => m.id === 4321))
   fs.rmSync(path.join(root, 'data', 'rooms.json'))
 })
+
+test('purgeTeam 清空该房消息/收件人/派发底账（一键清理；kind 路由先于房间删除）', () => {
+  db._resetRoutingCachesForTest()
+  fs.writeFileSync(
+    path.join(root, 'data', 'rooms.json'),
+    JSON.stringify([{ id: 'pg', team: 'room-purge-me', kind: 'project', name: '待清项目' }])
+  )
+  const m = db.send('room-purge-me', 'A', 'all', '过时消息')
+  db.recordMessageTargets(m.id, ['M1'])
+  const { dispatch } = db.createDispatch('room-purge-me', m.id, 'serial')
+  db.addDeliveries(dispatch.id, [{ name: 'M1', sessionId: null }])
+  const purged = db.purgeTeam('room-purge-me')
+  assert.equal(purged.messages, 1)
+  assert.equal(purged.dispatches, 1)
+  assert.equal(purged.deliveries, 1)
+  assert.deepEqual(db.history('room-purge-me', 10), [])
+  assert.equal(db.messageById(m.id), null)
+  assert.equal(db.dispatchById(dispatch.id), null)
+  // 幂等：再清一遍零行
+  assert.deepEqual(db.purgeTeam('room-purge-me'), { messages: 0, dispatches: 0, deliveries: 0 })
+  fs.rmSync(path.join(root, 'data', 'rooms.json'))
+})

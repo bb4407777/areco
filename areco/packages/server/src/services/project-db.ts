@@ -607,6 +607,22 @@ export function activeSerialDispatches(team: string): DispatchRow[] {
   }
 }
 
+/** 清空一个房间的全部消息/收件人/派发底账（一键清理用，2026-08-02 高律师需求）。
+ *  ⚠️ 必须在 rooms.json 删除该房**之前**调用——房间条目没了 kind 路由查无会兜底
+ *  tasks.db，项目房就删错库。返回各表删除行数（审计/回执用）。 */
+export function purgeTeam(team: string): { messages: number; dispatches: number; deliveries: number } {
+  const kind = dbKindForTeam(team)
+  if (!dbFileExists(kind)) return { messages: 0, dispatches: 0, deliveries: 0 }
+  const db = open(kind)
+  const deliveries = Number(
+    stmt(db, 'DELETE FROM delivery WHERE dispatch_id IN (SELECT id FROM dispatch WHERE team = ?)').run(team).changes
+  )
+  const dispatches = Number(stmt(db, 'DELETE FROM dispatch WHERE team = ?').run(team).changes)
+  stmt(db, 'DELETE FROM message_targets WHERE message_id IN (SELECT id FROM messages WHERE team = ?)').run(team)
+  const messages = Number(stmt(db, 'DELETE FROM messages WHERE team = ?').run(team).changes)
+  return { messages, dispatches, deliveries }
+}
+
 /** 按 id 取消息（serial 放行下一位时回取根消息正文用） */
 export function messageById(id: number): ProjectMessageRow | null {
   const db = dbWithMessage(id)
