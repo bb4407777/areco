@@ -326,6 +326,26 @@ def test_finalize_legacy_note() -> None:
           "非派单 spec 不标「无判据未验」")
 
 
+def test_infra_note_tiers() -> None:
+    """委派说明分级注入（2026-08-02 任务书优化）：fast 精简两行，worker/plan/think 全量；
+    产物路径话术归验收栏独管，说明段不复述；「委派」保留在 header（DELEGATION_RE 触发线）。"""
+    print("\n[委派说明分级]")
+    fast = C.ensure_infra_note("总结要点", depth=0, mode="fast")
+    check("委派" in fast, "fast：header 保留「委派」（auto-recall 触发词）")
+    check("sc-dispatch" in fast, "fast：转派入口指向手册")
+    check("recall.py" not in fast, "fast：不带 memory/chatlog 长命令（精简）")
+    check(len(fast) - len("总结要点") < 200, "fast：注入量 <200 字")
+    full = C.ensure_infra_note("重构模块", depth=0, mode="worker")
+    check("recall.py" in full and "mcp_server.py" in full, "全量：memory/chatlog 基础设施在")
+    check("sc-dispatch" in full, "全量：手册指针在")
+    check("文件产物写绝对路径" not in full, "全量：产物话术已归验收栏，不复述")
+    check(C.ensure_infra_note(full, depth=0, mode="worker") == full, "幂等：二次注入不叠加")
+    capped = C.ensure_infra_note("x", depth=2, mode="fast")
+    check("不得转派" in capped, "深度达上限：fast 版拒转派提示")
+    capped_full = C.ensure_infra_note("x", depth=2, mode="worker")
+    check("不得再转派" in capped_full, "深度达上限：全量版拒转派提示")
+
+
 def main() -> int:
     test_ensure_block()
     test_parse()
@@ -335,6 +355,7 @@ def main() -> int:
     test_gate()
     test_gate_switch()
     test_finalize_legacy_note()
+    test_infra_note_tiers()
     print()
     if _fails:
         print(f"✗ {len(_fails)} 项失败：")

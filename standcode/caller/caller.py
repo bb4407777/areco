@@ -1173,29 +1173,45 @@ _CHATLOG_MCP = (
 )
 
 
-def ensure_infra_note(request: str, depth: int | None = None) -> str:
-    """任务书尾部追加「委派说明」段（幂等）。depth 缺省取进程级 DISPATCH_DEPTH。"""
+def ensure_infra_note(request: str, depth: int | None = None, mode: str = "") -> str:
+    """任务书尾部追加「委派说明」段（幂等）。depth 缺省取进程级 DISPATCH_DEPTH。
+
+    分级注入（2026-08-02 任务书优化）：fast 轻快单正文常常一两句话，全量 ~350 字
+    说明段比任务本身还长——精简为两行（身份/回复方式 + 转派入口指向手册）；
+    worker/plan/think 全量。措辞去重：产物路径要求归验收栏独管（think 单更是
+    只要判断不要产物），说明段首行不再复述。「委派」二字保留在 header——
+    room-relay DELEGATION_RE 靠它触发 auto-recall，精简版同样命中。
+    """
     req = (request or "").rstrip()
     if not INFRA_NOTE_ENABLED or not req or INFRA_NOTE_HEADER in req:
         return req
     d = DISPATCH_DEPTH if depth is None else max(0, int(depth))
     can_fork = d + 1 < MAX_DISPATCH_DEPTH
+    fork_cmd = f"{SC_BIN} go \"<子任务>\" --caller \"<你的成员名>\" --depth {d + 1}"
+
+    if mode == "fast":
+        lines = [
+            "",
+            f"——{INFRA_NOTE_HEADER}——",
+            f"· 委派人：{CALLER_NAME}（深度 {d}）。直接在本会话回复结论。",
+            (f"· 拆活转派：{fork_cmd}（详见 ~/skills/sc-dispatch/SKILL.md）" if can_fork
+             else f"· 深度已达上限（{MAX_DISPATCH_DEPTH}），不得转派。"),
+        ]
+        return req + "\n" + "\n".join(lines)
+
     lines = [
         "",
         f"——{INFRA_NOTE_HEADER}（自动注入）——",
-        f"· 委派人：{CALLER_NAME}；本单派发深度：{d}。完成后直接在本会话回复结论，文件产物写绝对路径。",
+        f"· 委派人：{CALLER_NAME}；本单派发深度：{d}。完成后直接在本会话回复结论。",
     ]
     if can_fork:
-        lines.append(
-            f"· 需要拆活转派子任务时（禁转述本说明段）：{SC_BIN} go \"<子任务>\" "
-            f"--caller \"<你的成员名>\" --depth {d + 1}"
-        )
+        lines.append(f"· 需要拆活转派子任务时（禁转述本说明段）：{fork_cmd}")
     else:
         lines.append(f"· 本单深度已达上限（{MAX_DISPATCH_DEPTH}），不得再转派子任务——亲自完成或回报拆分建议。")
     lines += [
-        f"· 跨 agent 长期记忆：查 python3 {_MEMORY_SCRIPTS_DIR}/recall.py \"<关键词>\"；"
-        f"跨 agent 应知的新结论用 add_memory.py --kind fact --claim/--evidence/--source 沉淀（同目录）。",
-        f"· 查历史对话（本机全部 agent 会话）：python3 {_CHATLOG_MCP} \"<关键词>\" 6",
+        f"· 跨 agent 记忆/对话史：recall.py \"<关键词>\" 查、add_memory.py 沉淀跨 agent 结论"
+        f"（均在 {_MEMORY_SCRIPTS_DIR}/）；查历史对话 python3 {_CHATLOG_MCP} \"<关键词>\" 6；"
+        f"完整手册 ~/skills/sc-dispatch/SKILL.md",
     ]
     return req + "\n" + "\n".join(lines)
 
@@ -6399,7 +6415,7 @@ def _cmd_run(args) -> int:
 
     # ── 委派基础设施说明（2026-08-02）：验收栏之后、派发之前追加在任务书最尾 ──
     # 所有模式都注（Thinker 也该会用记忆/对话史）；幂等；开关见 INFRA_NOTE_ENABLED。
-    args.request = ensure_infra_note(args.request, depth=depth)
+    args.request = ensure_infra_note(args.request, depth=depth, mode=decision["mode"])
 
     # ── 后台（已弃用 2026-07-25）──
     if getattr(args, "bg", False):
@@ -6798,7 +6814,7 @@ def _cmd_go(args) -> int:
 
     if args.dry_run:
         # 预览要与真派发同貌：委派说明段也展示（真实注入在 _cmd_run 组包处）
-        preview = ensure_infra_note(dispatched_request, depth=depth)
+        preview = ensure_infra_note(dispatched_request, depth=depth, mode=mode)
         print(json.dumps({"cmd": "go", "status": "dry_run", "dispatched": False,
                           "caller": CALLER_NAME, "depth": depth,
                           "request_final": preview[:600]}, ensure_ascii=False))
