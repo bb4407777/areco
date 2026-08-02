@@ -44,3 +44,42 @@ test('correctMessageSender 改写 from_agent（冒名回执署名校正，2026-0
   assert.equal(db.messageById(m.id)?.from, 'hy3')
   assert.throws(() => db.correctMessageSender(m.id, '  '), /newFrom/)
 })
+
+test('双库路由（2026-08-02 定名分库）：项目房落 projects.db，任务房落 tasks.db，id 永不撞', () => {
+  // rooms.json 声明 kind；写入后 mtime 变化触发缓存刷新
+  fs.writeFileSync(
+    path.join(root, 'data', 'rooms.json'),
+    JSON.stringify([
+      { id: 'p1', team: 'room-proj1', kind: 'project', name: '项目房' },
+      { id: 't9', team: 'room-task9', kind: 'task', name: '任务房' },
+    ])
+  )
+  const pm = db.send('room-proj1', 'Owner', 'all', '项目消息一号')
+  const tm = db.send('room-task9', 'Owner', 'all', '任务消息一号')
+  assert.ok(fs.existsSync(path.join(root, 'data', 'projects.db')), '项目库文件已建')
+  // 项目库 id 从 10_000_000 seed 起步，与任务库天然错位
+  assert.ok(pm.id > 10_000_000, `项目消息 id seed 起步（实得 ${pm.id}）`)
+  assert.ok(tm.id < 10_000_000, `任务消息 id 自然增长（实得 ${tm.id}）`)
+  // history 各回各库
+  assert.deepEqual(db.history('room-proj1', 10).map((m) => m.body), ['项目消息一号'])
+  assert.deepEqual(db.history('room-task9', 10).map((m) => m.body), ['任务消息一号'])
+  // 按 id 跨库顺查
+  assert.equal(db.messageById(pm.id)?.body, '项目消息一号')
+  assert.equal(db.messageById(tm.id)?.body, '任务消息一号')
+  // 跨库搜索合并
+  const hits = db.search('消息一号', 10)
+  assert.deepEqual(new Set(hits.map((m) => m.body)), new Set(['项目消息一号', '任务消息一号']))
+  // lastMessageAts 两库并集
+  const ats = db.lastMessageAts()
+  assert.ok(ats['room-proj1'] && ats['room-task9'])
+  // dispatch/delivery 跟随房间 kind 落库并可跨库按 id 查
+  const { dispatch } = db.createDispatch('room-proj1', pm.id, 'serial')
+  assert.ok(dispatch.id > 10_000_000, 'dispatch id 同样 seed 起步')
+  const dels = db.addDeliveries(dispatch.id, [{ name: 'M1', sessionId: null }])
+  assert.equal(dels.length, 1)
+  assert.equal(db.dispatchById(dispatch.id)?.team, 'room-proj1')
+  db.updateDelivery(dels[0].id, { status: 'injected' })
+  assert.equal(db.deliveriesOf(dispatch.id)[0].status, 'injected')
+  // 收尾清掉 rooms.json，不影响其它用例的兜底行为
+  fs.rmSync(path.join(root, 'data', 'rooms.json'))
+})

@@ -72,7 +72,13 @@ ARECO_ROOT = (
     or _detect_areco_root()
     or str(Path(HOME_DIR) / "Code" / "StandCode" / "areco")
 )
-PROJECTS_DB = Path(ARECO_ROOT) / "data" / "tasks.db"
+# 双库（2026-08-02 高律师定名分库）：任务房消息 → tasks.db，项目房消息 → projects.db。
+# 路由按 areco data/rooms.json 的房间 kind（_db_path_for_team），与服务端
+# project-db.ts dbKindForTeam 同规则；查无（孤儿/新建房落盘竞态）兜底 tasks.db——
+# caller 自建派发房全是任务房，兜底即正确；--room-id 复用项目房、ask 常驻房走 kind 路由。
+PROJECTS_DB = Path(ARECO_ROOT) / "data" / "tasks.db"  # 任务库（兼容旧名变量，勿按名臆断）
+PROJECTS_KIND_DB = Path(ARECO_ROOT) / "data" / "projects.db"  # 项目库
+AREC_ROOMS_JSON = Path(ARECO_ROOT) / "data" / "rooms.json"
 REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
 
 # ── 房间来源标记 / 台账 / 自动归档 ──────────────────────────────────
@@ -2557,9 +2563,30 @@ class Caller:
 
     # ── 消息收发（直写 SQLite，绕过 REST 的固定 from 限制）─────
 
-    def _db_connect(self) -> sqlite3.Connection:
-        """连接 tasks.db（只读模式也会 WAL 写 journal，所以直接读写）"""
-        conn = sqlite3.connect(str(self.projects_db))
+    def _db_path_for_team(self, team: str) -> Path:
+        """按房间 kind 选库（任务→tasks.db，项目→projects.db；rooms.json mtime 缓存）。
+
+        与 areco 服务端 project-db.ts dbKindForTeam 同规则；rooms.json 不可读或
+        team 查无一律兜底任务库（caller 自建派发房全是任务房，兜底即正确）。
+        """
+        try:
+            st = AREC_ROOMS_JSON.stat()
+            cache = getattr(self, "_rooms_kind_cache", None)
+            if not cache or cache[0] != st.st_mtime_ns:
+                kinds: dict[str, str] = {}
+                for r in json.loads(AREC_ROOMS_JSON.read_text(encoding="utf-8")):
+                    if isinstance(r, dict) and r.get("team"):
+                        kinds[str(r["team"])] = str(r.get("kind") or "task")
+                self._rooms_kind_cache = (st.st_mtime_ns, kinds)
+            kind = self._rooms_kind_cache[1].get(team, "task")
+        except Exception:
+            kind = "task"
+        return PROJECTS_KIND_DB if kind == "project" else self.projects_db
+
+    def _db_connect(self, team: str | None = None) -> sqlite3.Connection:
+        """连接消息库（按 team 的房间 kind 选库；缺省任务库。WAL 读也写 journal，直接读写）"""
+        db_path = self._db_path_for_team(team) if team else self.projects_db
+        conn = sqlite3.connect(str(db_path))
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=3000")
         conn.row_factory = sqlite3.Row
@@ -2623,7 +2650,7 @@ class Caller:
                 logger.warning("REST 发消息返回异常 payload（%s），回落 SQLite 直写", data)
             except Exception as e:
                 logger.warning("REST 发消息失败（room=%s: %s），回落 SQLite 直写", room_id, e)
-        conn = self._db_connect()
+        conn = self._db_connect(team)
         try:
             self._ensure_messages_table(conn)
             cur = conn.execute(
@@ -2643,7 +2670,7 @@ class Caller:
 
     def get_messages(self, team: str, limit: int = 100, after_id: int = 0) -> list[dict]:
         """获取房间消息列表（旧→新），可按 after_id 增量拉取"""
-        conn = self._db_connect()
+        conn = self._db_connect(team)
         try:
             self._ensure_messages_table(conn)
             rows = conn.execute(

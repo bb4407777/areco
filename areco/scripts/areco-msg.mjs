@@ -76,8 +76,18 @@ if (flags.help) usage()
 
 const root = process.env.ARECO_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dataDir = resolve(root, 'data')
-const dbPath = resolve(dataDir, 'tasks.db')
+// 双库（2026-08-02 高律师定名分库）：任务房 → tasks.db，项目房 → projects.db。
+// 路由按 rooms.json 的房间 kind；查无（孤儿/rooms.json 不可读）兜底 tasks.db，
+// 与服务端 project-db.ts 的 dbKindForTeam 同规则。
+const dbPaths = { task: resolve(dataDir, 'tasks.db'), project: resolve(dataDir, 'projects.db') }
+const dbPath = dbPaths.task // 兜底/诊断文案用
 const roomsPath = resolve(dataDir, 'rooms.json')
+
+function dbPathForTeam(team) {
+  const rooms = loadRooms()
+  const r = rooms?.find((x) => x?.team === team)
+  return r?.kind === 'project' ? dbPaths.project : dbPaths.task
+}
 const configPath = resolve(root, 'config.json')
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS messages (
@@ -96,8 +106,8 @@ CREATE INDEX IF NOT EXISTS idx_team_created ON messages(team, created_at);`
 
 const BUSY_MS = Math.max(0, Number(process.env.ARECO_MSG_BUSY_MS ?? 3000) || 0)
 
-function openDb() {
-  const db = new DatabaseSync(dbPath)
+function openDb(team) {
+  const db = new DatabaseSync(team ? dbPathForTeam(team) : dbPath)
   // busy_timeout 先设：journal_mode=WAL 本身就可能要拿锁（服务端 P2-10 同款顺序修正）
   db.exec(`PRAGMA busy_timeout=${BUSY_MS}; PRAGMA journal_mode=WAL;`)
   db.exec(SCHEMA)
@@ -187,13 +197,17 @@ if (argv[0] === 'rooms' && argv.length === 1) {
     process.exit(EXIT.db)
   }
   const lastAts = {}
-  if (existsSync(dbPath)) {
+  for (const p of [dbPaths.task, dbPaths.project]) {
+    if (!existsSync(p)) continue
     try {
-      const db = new DatabaseSync(dbPath)
+      const db = new DatabaseSync(p)
       try {
         db.exec(`PRAGMA busy_timeout=${BUSY_MS};`)
-        for (const r of db.prepare('SELECT team, MAX(created_at) AS last FROM messages GROUP BY team').all())
-          lastAts[String(r.team)] = String(r.last)
+        for (const r of db.prepare('SELECT team, MAX(created_at) AS last FROM messages GROUP BY team').all()) {
+          const t = String(r.team)
+          const last = String(r.last)
+          if (!lastAts[t] || lastAts[t] < last) lastAts[t] = last
+        }
       } finally {
         db.close()
       }
@@ -241,7 +255,7 @@ if (argv[1] === 'history') {
   let db
   try {
     mkdirSync(dataDir, { recursive: true })
-    db = openDb() // 房间从未发过消息时表可能不存在：建空表兜底防 SELECT 报错
+    db = openDb(team) // 按房间 kind 选库；房间从未发过消息时表可能不存在：建空表兜底防 SELECT 报错
   } catch (err) {
     dieDb(err, '打开数据库')
   }
@@ -340,7 +354,7 @@ if (flags.dryRun) {
 try {
   mkdirSync(dataDir, { recursive: true })
   await withBusyRetry(() => {
-    const db = openDb()
+    const db = openDb(team) // 按房间 kind 选库(任务→tasks.db,项目→projects.db)
     try {
       // 旧库缺 human_relay 列（服务端未升级/未重启过）：就地补列再写，与服务端迁移幂等
       const cols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name)
