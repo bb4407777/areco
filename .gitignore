@@ -33,3 +33,6 @@ standcode/caller/hermes/**/auth.json
 *.bak.*
 *.orig
 *.swp
+
+# Understand-Anything 图谱输出(23MB 生成物,重跑可再生)
+/.ua/

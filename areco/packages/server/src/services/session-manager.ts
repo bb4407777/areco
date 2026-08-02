@@ -107,6 +107,7 @@ export class SessionManager extends EventEmitter {
         claudeSessionId: persisted.claudeSessionId,
         claudeHome: persisted.claudeHome ?? null,
         transcriptDir: persisted.transcriptDir ?? (tpl ? effectiveTranscriptDir(tpl) : null),
+        harness: tpl?.harness ?? null,
         createdAt: persisted.createdAt,
       })
       session.restoreFrom(persisted)
@@ -242,6 +243,7 @@ export class SessionManager extends EventEmitter {
       claudeSessionId: resumeId ?? (claudeHome !== null ? crypto.randomUUID() : null),
       claudeHome,
       transcriptDir: effectiveTranscriptDir(template),
+      harness: template.harness ?? null,
       roomId: opts.roomId ?? null,
     })
     // 官方 WorkBuddy harness 支持 --session-id：启动前钉死原生 UUID，彻底取消新会话的
@@ -694,7 +696,11 @@ export class SessionManager extends EventEmitter {
           log.info(`会话 ${session.id.slice(0, 8)} 演化改名 → ${candidate}`)
         }
       } catch (err) {
-        log.warn(`演化命名失败 ${session.id.slice(0, 8)}`, err)
+        // transcript 尚未落盘/已清理是常态（冷启会话、绑定漂移），ENOENT 每轮 WARN 纯刷屏
+        //（P2-10 降噪：生产日志末 20MB 该行 7.5k 次）；只有真异常才值得一行
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          log.warn(`演化命名失败 ${session.id.slice(0, 8)}`, err)
+        }
       }
     }
   }

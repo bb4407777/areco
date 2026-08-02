@@ -11,7 +11,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.post('/server/restart', c.restartServer)
   router.get('/config/whitelist', c.whitelist)
 
-  // StandCode 角色默认模板（caller/thinker/worker/fastWorker）：设置页编辑，caller.py 消费
+  // StandCode 角色默认模板（caller/thinker/worker/fastWorker/heavyWorker）：设置页编辑，caller.py 消费
   router.get('/standcode/defaults', c.getStandcodeDefaults)
   router.get('/standcode/catalog', c.getStandcodeCatalog)
   router.put('/standcode/defaults', c.updateStandcodeDefaults)
@@ -72,6 +72,7 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.post('/projects/groups/:id/rename', rc.renameGroup)
   router.post('/projects/groups/:id/members', rc.addGroupMember)
   router.post('/projects/groups/:id/members/remove', rc.removeGroupMember)
+  router.post('/projects/groups/:id/delete', rc.deleteGroup)
   router.post('/rooms/:id/archive', rc.archive)
   router.post('/rooms/:id/unarchive', rc.unarchive)
   router.delete('/rooms/:id', rc.remove)

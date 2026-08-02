@@ -430,6 +430,10 @@ export interface ProjectCatalogGroup {
   id: string
   label: string
   entries: ProjectCatalogEntry[]
+  /** true = 按硬盘路径自动派生的分组（pathGroups），不可改名/删除/入组/出组，前端隐藏操作按钮 */
+  derived?: boolean
+  /** 派生组的扫描根（pathGroups.base）：前端按它把同前缀的组拼成树（/Users/gao/Desktop 一级、已归档 二级…） */
+  base?: string
 }
 
 // ---- 房间调度（确定性轮转，2026-07-22）：底账在 projects.db 的 dispatch/delivery 表 ----

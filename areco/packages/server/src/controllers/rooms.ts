@@ -136,6 +136,9 @@ export class RoomControllers {
   unarchive = (ctx: Context) =>
     guard(ctx, () => {
       const room = this.rooms.unarchive(ctx.params.id)
+      // P2-10：tick 对归档房零处理后，归档期游标不再逐拍推进——恢复时一次快进，
+      // 归档期外部直写的消息不补投（与旧行为等价）
+      this.relay.fastForwardCursor(room.id)
       this.setMemberSessionsArchived(room, false)
       this.relay.broadcastRooms()
       ok(ctx, room)
@@ -234,11 +237,23 @@ export class RoomControllers {
       ok(ctx, result)
     })
 
-  /** 发消息：固定人类身份（面板就是人的嘴）；落库 + 广播 + @mention 投递由 relay 完成 */
+  /** 发消息：默认人类身份（面板就是人的嘴）；落库 + 广播 + @mention 投递由 relay 完成。
+   *  可选 from/humanRelay/to（2026-07-30 P1-5 caller REST 快路，替代 SQLite 直写等 tick）：
+   *  from ≠ 花名册人名时必须在 humanRelayAgents 白名单内，否则拒收——REST 通道不开任意署名。 */
   send = (ctx: Context) =>
     guard(ctx, () => {
-      const body = (ctx.request.body ?? {}) as { body?: string }
-      ok(ctx, this.relay.postMessage(ctx.params.id, this.rooms.humanName, body.body ?? ''))
+      const body = (ctx.request.body ?? {}) as { body?: string; from?: string; humanRelay?: boolean; to?: string }
+      const requestedFrom = String(body.from ?? '').trim()
+      let from = this.rooms.humanName
+      let opts: { humanRelay?: boolean; to?: string } | undefined
+      if (requestedFrom && requestedFrom !== this.rooms.humanName) {
+        if (!this.relay.isHumanRelayAgent(requestedFrom)) {
+          throw new Error(`署名 ${requestedFrom} 不在转述白名单（humanRelayAgents），REST 发消息只认白名单署名`)
+        }
+        from = requestedFrom
+        opts = { humanRelay: body.humanRelay === true, ...(body.to?.trim() ? { to: body.to.trim() } : {}) }
+      }
+      ok(ctx, this.relay.postMessage(ctx.params.id, from, body.body ?? '', opts))
     })
 
   /** 房间调度列表（含各 delivery）：项目页可见当前轮到谁/状态/超时/取消原因 */
@@ -284,6 +299,13 @@ export class RoomControllers {
       const body = (ctx.request.body ?? {}) as { path?: string }
       catalog.removeMember(ctx.params.id, body.path ?? '')
       ok(ctx, { removed: body.path })
+    })
+
+  /** 删除分组：只删目录册归属，不动文件夹、不删已开的房间 */
+  deleteGroup = (ctx: Context) =>
+    guard(ctx, () => {
+      catalog.deleteGroup(ctx.params.id)
+      ok(ctx, { deleted: ctx.params.id })
     })
 
   /** 按文件夹幂等开项目房：已有（rootPath realpath 相同）直接返回，没有则以文件夹名创建。

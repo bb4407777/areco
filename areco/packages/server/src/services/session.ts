@@ -45,6 +45,8 @@ export interface SessionInit {
   claudeHome?: string | null
   /** claude 布局 transcript 的 projects 根（模板声明/自动探测解析结果；null = 无对话视图） */
   transcriptDir?: string | null
+  /** 模板声明的 harness（claude/kimi/openclaw/…）：MIN_BOOT 分档等按它判，别再猜 command basename */
+  harness?: string | null
   /** 项目归属（room id）：项目内 spawn 的专属会话；缺省/null = 游离会话 */
   roomId?: string | null
   createdAt?: number
@@ -70,6 +72,8 @@ export class Session extends EventEmitter {
   claudeHome: string | null
   /** claude 布局 transcript 的 projects 根（spawn 时从模板解析并钉死） */
   transcriptDir: string | null
+  /** 模板声明的 harness（spawn/restore 时钉死；null = 模板未声明，回落 command basename 猜测） */
+  readonly harness: string | null
   agentSessionId: string | null
   agentBindingHash: string | null
   readonly createdAt: number
@@ -126,6 +130,7 @@ export class Session extends EventEmitter {
     this.claudeSessionId = init.claudeSessionId
     this.claudeHome = init.claudeHome ?? null
     this.transcriptDir = init.transcriptDir ?? null
+    this.harness = init.harness ?? null
     this.agentSessionId = null
     this.agentBindingHash = null
     this.roomId = init.roomId ?? null
@@ -435,11 +440,17 @@ export class Session extends EventEmitter {
   private static readonly MIN_BOOT_MS = 8000
   /** 启动下限按 harness 分档（2026-07-26 StandCode 提速批件）：8s 一刀切是给 codex 的
    *  zsh -ilc 冷启动定的；claude TUI 实测 1-2s 内接管 tty，降到 4s——每单派发少等 4s。
-   *  就算注入真落在 TUI 接管前（\r 不提交），StandCode 投递层的空转自愈会重投一次
-   *  （IDLE_STALL_PROBES），风险有底。env ARECO_MIN_BOOT_MS 全局覆盖（毫秒）。 */
+   *  判据用模板声明的 harness（2026-07-30 诊断 F3：旧判据看 command basename，
+   *  claude-fable5=bin/c5、claude-opus5=bin/cfm 明明是 claude harness 却落 8s 档，
+   *  4s 优化只惠及两个裸 claude 模板）；模板未声明 harness 时回落 basename 猜测。
+   *  就算注入真落在 TUI 接管前（\r 不提交），dispatch 回执的回显校验会重发（3 次 ×8s），
+   *  风险有底（注意：caller 三闸 2026-07 已全关，旧注释说的空转自愈重投不再存在）。
+   *  env ARECO_MIN_BOOT_MS 全局覆盖（毫秒）。 */
   private minBootMs(): number {
     const env = Number(process.env.ARECO_MIN_BOOT_MS)
     if (Number.isFinite(env) && env > 0) return env
+    if (this.harness === 'claude') return 4000
+    if (this.harness) return Session.MIN_BOOT_MS // 声明了非 claude harness：不再猜 basename
     const base = (this.command ?? '').split('/').pop() ?? ''
     if (base === 'claude' || base.startsWith('claude')) return 4000
     return Session.MIN_BOOT_MS
@@ -478,16 +489,23 @@ export class Session extends EventEmitter {
     // eslint-disable-next-line no-control-regex
     const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
     const onOutput = (data: string) => {
-      if (quietTimer) clearTimeout(quietTimer)
       // trust 确认页等待期不算 quiet：note 若在此 fire 会被打进 trust 页吞掉
       //（codebuddy resume 踩过：note 进 trust 输入被吞，agent 进对话后空待命）。
-      // trust 页输出跳过本次计时，等 trust 确认后的下一段输出（进对话）再开始倒计时
+      // trust 页输出停表（缴械已武装计时器），等 trust 确认后的下一段输出（进对话）再重新倒计时
       // eslint-disable-next-line no-control-regex
       trustTail = (trustTail + data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')).slice(-2000)
-      if (Session.TRUST_PAGE_RE.test(trustTail)) return
+      if (Session.TRUST_PAGE_RE.test(trustTail)) {
+        if (quietTimer) {
+          clearTimeout(quietTimer)
+          quietTimer = null
+        }
+        return
+      }
       // 纯 OSC 序列（如 codex 空转 spinner 的窗口标题刷新，~100ms 一次）不算活动：
-      // 否则 quiet 计时被无限重置，注入恒拖满 maxWaitMs 才发
+      // 既不重置也不缴械已武装的计时器，让它继续走完。旧写法先 clearTimeout 再在这里
+      // return，一个 OSC-only chunk 就把计时器永久缴械，注入恒拖满 maxWaitMs（2026-07-30 诊断 F0）
       if (!data.replace(OSC_RE, '').trim()) return
+      if (quietTimer) clearTimeout(quietTimer)
       quietTimer = setTimeout(fire, quietMs)
     }
     const onExit = () => {
@@ -497,8 +515,11 @@ export class Session extends EventEmitter {
     const maxTimer = setTimeout(fire, maxWaitMs)
     this.on('output', onOutput)
     this.on('exit', onExit)
-    // spawn 后完全无输出的极端情形：quiet 计时也从现在起算（空串不匹配 trust，正常计时）
-    onOutput('')
+    // 注册即武装：spawn 后不再产生输出的会话（qclaw-stand 空闲零输出、hermes 类适配器同理）
+    // 也从现在起算 quiet；fire 内的 minBoot 下限兜底注入不早于 8s/4s。旧写法 onOutput('')
+    // 想表达同一意图，但空串被上面的空白守卫吃掉，计时器从未武装，只能干等 maxWaitMs
+    // 兜底——qclaw 每单白等 ~29s（2026-07-30 诊断 F0 实锤，死代码修复）
+    quietTimer = setTimeout(fire, quietMs)
   }
 
   private handleExit(exitCode: number) {

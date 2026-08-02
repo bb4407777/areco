@@ -56,6 +56,12 @@ interface Located {
 }
 
 const locateCache = new Map<string, Located>()
+/** P2-10 locate 失败退避账本：sessionId → 连败次数 + 下次允许扫盘时刻。
+ *  前 LOCATE_BACKOFF_AFTER 次不退避（qclaw 冷启 ~5s 内 transcript 才落盘，退避早了拖绑定），
+ *  之后 750ms 起倍增到上限；成功定位/清缓存即复位。 */
+const locateFailCache = new Map<string, { fails: number; nextAt: number }>()
+const LOCATE_BACKOFF_AFTER = 8
+const LOCATE_BACKOFF_MAX_MS = 30_000
 
 /**
  * 占用闸提供者（2026-07-22 幽灵卡根治）：由 SessionManager 构造时注册。
@@ -596,10 +602,13 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
     if (st && st.size > 0 && !preEpochStale && (!cachedId || !gate?.(cachedId))) return hit.path
     locateCache.delete(session.id)
   }
+  // P2-10 失败退避：locate 被红绿灯每 750ms + captureTick 每 1s 反复调，永远定位不到的
+  // 会话（transcript 未写盘的适配器、qclaw 冷启 turn 中）此前每次都全量扫目录+打 2 行日志
+  // （launchd.out.log 末 20MB 中 locate 行占 86%）。前 8 次不退避（qclaw 冷启 ~5s 内正常
+  // 发现，不拖绑定），此后指数退避到 30s 上限；日志只在状态转折打（首败一行、成败转换一行）。
+  const failState = locateFailCache.get(session.id)
+  if (failState && Date.now() < failState.nextAt) return null
   const startedAt = session.startedAt ?? session.createdAt
-  const exitedAt = session.isRunning ? null : session.exitedAt
-
-  log.info(`[locate] ${kind} ${session.id.slice(0, 8)} startedAt=${startedAt} exitedAt=${exitedAt} cwd=${session.cwd}`)
 
   let files: string[] = []
   if (kind === 'workbuddy') {
@@ -647,11 +656,20 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
   }
   const found = bindCandidate(session, kind, uniqueAgentFiles(files, kind), gate)
 
-  if (found && found !== hit?.path) {
-    locateCache.set(session.id, { path: found })
-    log.info(`定位 ${kind} 会话文件 ${session.id.slice(0, 8)} → ${path.basename(found)}`)
-  } else if (!found) {
-    log.info(`[locate] ${kind} ${session.id.slice(0, 8)} 未找到`)
+  if (found) {
+    locateFailCache.delete(session.id)
+    if (found !== hit?.path) {
+      locateCache.set(session.id, { path: found })
+      log.info(`定位 ${kind} 会话文件 ${session.id.slice(0, 8)} → ${path.basename(found)}`)
+    }
+  } else {
+    const fails = (failState?.fails ?? 0) + 1
+    const nextAt = fails >= LOCATE_BACKOFF_AFTER
+      ? Date.now() + Math.min(750 * 2 ** (fails - LOCATE_BACKOFF_AFTER), LOCATE_BACKOFF_MAX_MS)
+      : 0
+    locateFailCache.set(session.id, { fails, nextAt })
+    // 状态转折才打：首败一行（成功→失败/初见即失败）；持续失败沉默（旧版每次 2 行是日志洪水主力）
+    if (fails === 1) log.info(`[locate] ${kind} ${session.id.slice(0, 8)} 未找到（连败退避接管，恢复时打「定位」行）`)
   }
   return found
 }
@@ -1139,6 +1157,7 @@ export function readAgentTrafficState(
 export function dropAgentTranscriptCache(sessionId: string) {
   parseCache.delete(sessionId)
   locateCache.delete(sessionId)
+  locateFailCache.delete(sessionId) // 会话重启/解绑后立即恢复全速重扫，不背旧退避
 }
 
 /**
@@ -1180,6 +1199,21 @@ export function readAgentTranscript(
   if (!filePath) return { exists: false, messages: [], cursor: 0 }
   const messages = loadMessages(session.id, filePath, kind)
   return paginateMessages(messages, kind, opts)
+}
+
+/** captureTick 增量读（2026-07-30 P1-7）用的三个小口子：路径定位 / 追加型判断 / 片段解析 */
+export function locateAgentTranscriptPath(session: Session, kind: AgentKind): string | null {
+  return locate(session, kind)
+}
+
+/** 该 agent 的 transcript 是否纯追加写入（可按字节锚增量读；reasonix replace 帧不在此列） */
+export function isAppendOnlyAgentKind(kind: AgentKind): boolean {
+  return APPEND_ONLY_KINDS.has(kind)
+}
+
+/** 解析 transcript 文本片段（追加型 JSONL 的行彼此独立，增量段可独立解析） */
+export function parseAgentIncrement(raw: string, kind: AgentKind): TranscriptMessage[] {
+  return parseAgentRaw(raw, kind)
 }
 
 /**

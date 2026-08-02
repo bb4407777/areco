@@ -212,13 +212,18 @@ test('初见房间：中继启动前的存量快进不补投，之后的新帖�
   assert.match(sent['sa'][0], /启动后的新帖/)
 })
 
-// ---- auto-recall 记忆注入（2026-07-22）：recallRunner 注入点替换 spawnSync，不起真 python 子进程 ----
+// ---- auto-recall 记忆注入（2026-07-22 定稿；2026-07-30 P1-6 异步化）：recallRunner 注入点
+// 替换真子进程。异步化后的行为：缓存冷 → 正文先行注入（不带块），recall 完成后补注一条
+// 「auto-recall 补充」note；缓存热（同根消息再投）→ 块直接拼进正文（旧行为）。
 
 interface RecallResult {
   error?: Error
   status: number | null
   stdout: string
 }
+
+/** 排空 recall 异步链（runRecall await + then 补注均为微任务，setTimeout 0 全覆盖） */
+const settleRecall = () => new Promise((r) => setTimeout(r, 0))
 
 /** 替换 recallRunner.fn 为假实现；restore 必须调用（finally），防泄漏污染其他用例 */
 function stubRecall(result: RecallResult): { count: () => number; restore: () => void } {
@@ -231,7 +236,7 @@ function stubRecall(result: RecallResult): { count: () => number; restore: () =>
   return { count: () => n, restore: () => { recallRunner.fn = orig } }
 }
 
-test('auto-recall：human→agent 一律注入 recall 块（命中 id 与 claim 截断行进 note）', () => {
+test('auto-recall：human→agent 正文先行，recall 完成后补注块（异步化）', async () => {
   const { rooms, roomId } = setup()
   const { manager, sent } = mockManager(['sa'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
@@ -241,15 +246,18 @@ test('auto-recall：human→agent 一律注入 recall 块（命中 id 与 claim 
   })
   try {
     relay.postMessage(roomId, 'Owner', '大家看下这个报错')
+    assert.equal(sent['sa'].length, 1, '正文应立即注入，不等 recall')
+    assert.doesNotMatch(sent['sa'][0], /auto-recall/, '首条正文不再同步等 recall 块')
+    await settleRecall()
   } finally {
     stub.restore()
   }
-  const note = sent['sa'][0]
-  assert.match(note, /【auto-recall 命中 1：m1】/, 'note 应含命中计数与记忆 id')
-  assert.match(note, /- 记忆条目内容甲/, 'note 应含 claim 截断行')
+  assert.equal(sent['sa'].length, 2, 'recall 命中后应补注一条')
+  assert.match(sent['sa'][1], /【auto-recall 命中 1：m1】/, '补注应含命中计数与记忆 id')
+  assert.match(sent['sa'][1], /- 记忆条目内容甲/, '补注应含 claim 截断行')
 })
 
-test('auto-recall：session→agent 含委派格式特征（交付物/owner）触发注入', () => {
+test('auto-recall：session→agent 含委派格式特征（交付物/owner）触发补注', async () => {
   const { rooms, roomId } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
@@ -260,16 +268,17 @@ test('auto-recall：session→agent 含委派格式特征（交付物/owner）�
   let n = 0
   try {
     relay.postMessage(roomId, 'A', '@B 这个活派给你：交付物是复核报告，owner 是你')
+    await settleRecall()
     n = stub.count()
   } finally {
     stub.restore()
   }
   assert.ok(sent['sb']?.length, 'B 应收到投递')
-  assert.match(sent['sb'][0], /【auto-recall 命中 1：m2】/, '委派消息应注入 recall 块')
+  assert.match(sent['sb'][1], /【auto-recall 命中 1：m2】/, '委派消息应补注 recall 块')
   assert.equal(n, 1, '应跑一次 recall 子进程')
 })
 
-test('auto-recall：session→agent 普通讨论（无委派特征）不触发，spawnSync 不被调用', () => {
+test('auto-recall：session→agent 普通讨论（无委派特征）不触发，子进程不被调用', async () => {
   const { rooms, roomId } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
@@ -277,16 +286,17 @@ test('auto-recall：session→agent 普通讨论（无委派特征）不触发�
   let n = 0
   try {
     relay.postMessage(roomId, 'A', '@B 我觉得这个方案挺合理')
+    await settleRecall()
     n = stub.count()
   } finally {
     stub.restore()
   }
-  assert.ok(sent['sb']?.length, '普通讨论照常投递')
+  assert.equal(sent['sb']?.length, 1, '普通讨论照常投递且无补注')
   assert.doesNotMatch(sent['sb'][0], /auto-recall/, '不应注入 recall 块')
   assert.equal(n, 0, '不应起 recall 子进程')
 })
 
-test('auto-recall：同一根消息投多个成员只跑一次 recall 子进程（缓存复用）', () => {
+test('auto-recall：同一根消息后投成员命中缓存，块直接拼正文（只跑一次子进程）', async () => {
   const { rooms, roomId } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
@@ -297,19 +307,21 @@ test('auto-recall：同一根消息投多个成员只跑一次 recall 子进程�
   let n = 0
   try {
     relay.postMessage(roomId, 'Owner', '全体成员看下这个') // 无 @ → 全体收到，串行先放行 A
+    await settleRecall() // A 的 recall 完成 → memo 已写
     relay.postMessage(roomId, 'A', '我看完了') // 回复驱动轮转：B 注入内容回取同一根消息
+    await settleRecall()
     n = stub.count()
   } finally {
     stub.restore()
   }
   assert.ok(sent['sa']?.length && sent['sb']?.length, '两个成员先后都应收到')
-  assert.match(sent['sb'][0], /【auto-recall 命中 1：m3】/, '轮到的第二成员复用缓存块')
+  assert.match(sent['sb'][0], /【auto-recall 命中 1：m3】/, '缓存热：轮到的第二成员块拼进正文')
   assert.equal(n, 1, '同一 root message 只起一次子进程')
 })
 
-test('auto-recall：子进程超时/非零退出/非法 JSON 均静默降级，投递照常完成', () => {
+test('auto-recall：子进程超时/非零退出/非法 JSON 均静默降级，投递照常完成、无补注', async () => {
   const scenarios: [string, RecallResult][] = [
-    ['超时', { error: new Error('spawnSync ETIMEDOUT'), status: null, stdout: '' }],
+    ['超时', { error: new Error('execFile ETIMEDOUT'), status: null, stdout: '' }],
     ['非零退出', { status: 1, stdout: '' }],
     ['非法 JSON', { status: 0, stdout: 'not-json{' }],
   ]
@@ -320,15 +332,16 @@ test('auto-recall：子进程超时/非零退出/非法 JSON 均静默降级，�
     const stub = stubRecall(result)
     try {
       relay.postMessage(roomId, 'Owner', '看下这个')
+      await settleRecall()
     } finally {
       stub.restore()
     }
-    assert.ok(sent['sa']?.length, `${label}：投递仍应完成`)
+    assert.equal(sent['sa']?.length, 1, `${label}：投递仍应完成且无补注`)
     assert.doesNotMatch(sent['sa'][0], /auto-recall/, `${label}：不应注入 recall 块`)
   }
 })
 
-test('auto-recall：recall 无命中（空数组）不注入任何内容', () => {
+test('auto-recall：recall 无命中（空数组）不注入任何内容', async () => {
   const { rooms, roomId } = setup()
   const { manager, sent } = mockManager(['sa'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
@@ -336,11 +349,12 @@ test('auto-recall：recall 无命中（空数组）不注入任何内容', () =>
   let n = 0
   try {
     relay.postMessage(roomId, 'Owner', '查一个没有记忆支撑的主题')
+    await settleRecall()
     n = stub.count()
   } finally {
     stub.restore()
   }
-  assert.ok(sent['sa']?.length, '投递照常完成')
+  assert.equal(sent['sa']?.length, 1, '投递照常完成且无补注')
   assert.doesNotMatch(sent['sa'][0], /auto-recall/, '空命中不注入')
   assert.equal(n, 1, 'human 消息仍跑了一次 recall（只是无命中）')
 })
@@ -409,7 +423,7 @@ test('项目房间驻场简报：每个进程代际只带一次 PROJECT.md 指�
 /** 带模板信息的假 SessionManager：get 返回带 templateId/isRunning/trafficState 的会话，
  *  templateNameOf 按映射解析（模板名取不到返回 null）。接口同 mockManager，另加署名校正所需字段 */
 function mockManagerTpls(
-  sessionSpecs: { id: string; templateId: string; isRunning?: boolean }[],
+  sessionSpecs: { id: string; templateId: string; isRunning?: boolean; trafficState?: string }[],
   tplNames: Record<string, string>
 ): { manager: unknown; sent: Sent } {
   const sent: Sent = {}
@@ -423,7 +437,7 @@ function mockManagerTpls(
         id: s.id,
         templateId: s.templateId,
         isRunning: s.isRunning !== false,
-        trafficState: 'idle',
+        trafficState: s.trafficState ?? 'idle',
         onceQuiet: (fn: () => void) => fn(),
         sendline: (text: string) => {
           ;(sent[id] ??= []).push(text)
@@ -606,37 +620,91 @@ test('Layer3：captureTick 自动捕获回执用会话当前实际模板名署�
   const relay = new RoomRelay(rooms, manager as never, () => {})
   const r = relay as unknown as {
     readSessionDelta: () => unknown[]
-    pendingCapture: Map<
-      string,
-      { team: string; roomName: string; roomId: string; memberName: string; fromName: string; beforeCount: number; injectedAt: number }
-    >
+    pendingCapture: Map<string, CapEntry>
     captureTick: () => void
   }
   r.readSessionDelta = () => [{ role: 'assistant', parts: [{ kind: 'text', text: '自动捕获的回复' }] }]
-  r.pendingCapture.set('sa', {
-    team,
-    roomName: name,
-    roomId,
-    memberName: 'A',
-    fromName: 'Owner',
-    beforeCount: 0,
-    injectedAt: Date.now(),
-  })
-  r.captureTick()
+  r.pendingCapture.set('sa', capEntry({ team, roomName: name, roomId, memberName: 'A' }))
+  // 弱文本（非交付物）走 8 拍稳定门槛：首拍建立基线，再 8 拍稳定才捕获
+  for (let i = 0; i < 9; i++) r.captureTick()
   let rows = projectDb.history(team, 10)
   assert.equal(rows[rows.length - 1].from, 'hy3', '自动捕获署名应为当前实际模板名（防接手后代跑冒名）')
   assert.equal(rows[rows.length - 1].to, 'Owner', '收件人仍是原投递者')
 
-  r.pendingCapture.set('sb', {
-    team,
-    roomName: name,
-    roomId,
-    memberName: 'B',
+  r.pendingCapture.set('sb', capEntry({ team, roomName: name, roomId, memberName: 'B' }))
+  for (let i = 0; i < 9; i++) r.captureTick()
+  rows = projectDb.history(team, 10)
+  assert.equal(rows[rows.length - 1].from, 'B', '模板名取不到时回退成员名')
+})
+
+/** pendingCapture 条目模板（2026-07-30 交付物门槛加的稳定拍字段一并给默认值） */
+type CapEntry = {
+  team: string
+  roomName: string
+  roomId: string
+  memberName: string
+  fromName: string
+  beforeCount: number
+  injectedAt: number
+  settleTicks: number
+  lastLen: number
+  lastDeltaCount: number
+  deadlineAt: number
+}
+function capEntry(p: { team: string; roomName: string; roomId: string; memberName: string } & Partial<CapEntry>): CapEntry {
+  return {
     fromName: 'Owner',
     beforeCount: 0,
     injectedAt: Date.now(),
-  })
+    settleTicks: 0,
+    lastLen: -1,
+    lastDeltaCount: -1,
+    deadlineAt: Date.now() + 60_000,
+    ...p,
+  }
+}
+
+test('Layer3：captureTick 交付物门槛——交付物 3 拍即收、开工白话干活中只顺延不抢收、收工后超时兜底', () => {
+  const { rooms, roomId, team, name } = setup()
+  const { manager } = mockManagerTpls(
+    [
+      { id: 'sa', templateId: 'tpl-hy3' }, // 灯 idle：已收工
+      { id: 'sb', templateId: 'tpl-hy3', trafficState: 'working' }, // 灯 working：干活中
+      { id: 'sc', templateId: 'tpl-hy3' },
+    ],
+    { 'tpl-hy3': 'hy3' }
+  )
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const r = relay as unknown as {
+    readSessionDelta: () => unknown[]
+    pendingCapture: Map<string, CapEntry>
+    captureTick: () => void
+  }
+  // ① 交付物文本（含产物路径）：首拍基线 + 3 拍稳定即收，第 3 拍还不收
+  r.readSessionDelta = () => [{ role: 'assistant', parts: [{ kind: 'text', text: '迁移完成，产物路径：/tmp/x.md' }] }]
+  r.pendingCapture.set('sa', capEntry({ team, roomName: name, roomId, memberName: 'A' }))
+  for (let i = 0; i < 3; i++) r.captureTick()
+  assert.equal(projectDb.history(team, 10).length, 0, '稳定拍未满不捕获')
+  r.captureTick()
+  let rows = projectDb.history(team, 10)
+  assert.equal(rows.length, 1, '交付物文本 3 拍稳定即捕获')
+  assert.ok(rows[0].body.includes('产物路径'), '捕获的是交付物正文')
+
+  // ② 开工白话 + 灯 working + 已过软超时：不抢收，顺延 deadline（F2 事故根治点）
+  r.readSessionDelta = () => [{ role: 'assistant', parts: [{ kind: 'text', text: '收到任务，我先读一下诊断报告再动手' }] }]
+  const sb = capEntry({ team, roomName: name, roomId, memberName: 'B', deadlineAt: Date.now() - 1000 })
+  r.pendingCapture.set('sb', sb)
+  for (let i = 0; i < 12; i++) r.captureTick()
+  assert.equal(projectDb.history(team, 10).length, 1, '干活中的开工白话不被捕获')
+  assert.ok(r.pendingCapture.has('sb'), '条目保留（顺延等真收工）')
+  assert.ok(sb.deadlineAt > Date.now(), 'deadline 已顺延到未来')
+  r.pendingCapture.delete('sb')
+
+  // ③ 收工（灯 idle）+ 过软超时的弱短文本：超时兜底照收（真短回复最迟 60s 收到）
+  r.readSessionDelta = () => [{ role: 'assistant', parts: [{ kind: 'text', text: '好' }] }]
+  r.pendingCapture.set('sc', capEntry({ team, roomName: name, roomId, memberName: 'C', deadlineAt: Date.now() - 1000 }))
   r.captureTick()
   rows = projectDb.history(team, 10)
-  assert.equal(rows[rows.length - 1].from, 'B', '模板名取不到时回退成员名')
+  assert.equal(rows.length, 2, '已收工会话超时兜底捕获不受门槛拦截')
+  assert.equal(rows[rows.length - 1].body, '好', '短回复原样入房')
 })

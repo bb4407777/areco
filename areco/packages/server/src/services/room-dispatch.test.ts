@@ -51,8 +51,6 @@ function setup(): {
   return { rooms, roomId: room.id, team: room.team, name }
 }
 
-const tick = (relay: unknown) => (relay as { tick(): void }).tick()
-
 test('serial：人类无 @ 发言只注入第一位成员，另一位 queued，三表记账正确', () => {
   const { rooms, roomId, team } = setup()
   const { manager, sent } = mockManager(['sa', 'sb'])
@@ -72,7 +70,7 @@ test('serial：人类无 @ 发言只注入第一位成员，另一位 queued，�
   assert.equal(d.state, 'active')
   assert.equal(d.rootMessageId, msg.id, 'root_message_id 应是本条消息')
   assert.equal(d.currentTarget, 'A', '当前放行位应是第一位成员')
-  assert.ok(d.deadline, 'serial 放行应带回复 deadline')
+  assert.equal(d.deadline, null, '2026-07-27 deadline 不再设置（超时已移除）')
 
   const byName = Object.fromEntries(d.deliveries.map((x) => [x.memberName, x]))
   assert.equal(d.deliveries.length, 2)
@@ -114,25 +112,6 @@ test('serial：最后一名成员回复后 dispatch 收单 done', () => {
   assert.equal(d.deadline, null)
   const byName = Object.fromEntries(d.deliveries.map((x) => [x.memberName, x]))
   assert.equal(byName.B.status, 'done')
-})
-
-test('serial：当前成员超时未回复，置 timeout 并自动放下一位', () => {
-  const { rooms, roomId, team } = setup()
-  const { manager, sent } = mockManager(['sa', 'sb'])
-  // 超时时长传 0：deadline = 注入当下，下一个 tick 必过期
-  const relay = new RoomRelay(rooms, manager as never, () => {}, { deliveryTimeoutMs: 0 })
-  relay.postMessage(roomId, 'Owner', '限时回复')
-  const sbBefore = sent['sb']
-  assert.equal(sbBefore, undefined, '超时前 B 不应被注入')
-
-  tick(relay) // tick 顺带扫超时
-  assert.ok(sent['sb']?.length, 'A 超时后 B 应被放行注入')
-
-  const d = projectDb.listDispatches(team)[0]
-  const byName = Object.fromEntries(d.deliveries.map((x) => [x.memberName, x]))
-  assert.equal(byName.A.status, 'timeout')
-  assert.equal(byName.B.status, 'injected')
-  assert.equal(d.currentTarget, 'B')
 })
 
 test('serial：cancelDispatch 后剩余 queued 全 cancelled，回复不再注入', () => {

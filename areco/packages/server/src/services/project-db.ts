@@ -29,6 +29,9 @@ export const SCHEMA = `CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_team_history ON messages(team, id);
+-- P2-10：lastMessageAts 的 SELECT team, MAX(created_at) GROUP BY team 走索引跳扫，
+-- 不再全表扫（该查询挂在每次建房/加成员/归档的 rooms 广播上）
+CREATE INDEX IF NOT EXISTS idx_team_created ON messages(team, created_at);
 -- 房间调度底账（确定性房间调度，2026-07-22）：消息可见性与行动许可拆开。
 -- message_targets 记录每条消息的真实收件人集合（广播也展开成成员名逐行落），
 -- 替代单一 to_agent 的审计盲区；messages.to_agent 保留不动，兼容旧数据与 areco-msg CLI。
@@ -73,21 +76,24 @@ CREATE TABLE IF NOT EXISTS delivery (
 // 打在一个 CLI 侧（areco-msg.mjs）也在并发写的库上。功能上能跑，但纯属浪费，
 // 且是房间数增长后 WAL 争用的第一个源头。
 //
-// 短连接本身保留（不与 CLI 抢长连接），只把「每次都建表」降为「首次建表」。
-let schemaReady = false
+// P2-10（2026-07-30）：短连接进一步升级为进程级共享长连接。tick 每秒对每个活跃房间
+// history() 一次，每次新开连接（open+PRAGMA+close）纯属固定税；WAL 下服务端长连接与
+// CLI 侧（areco-msg.mjs）短连接并发互不阻塞（reader 不挡 writer，writer 锁有
+// busy_timeout=3000 兜底）。调用点的 finally db.close() 全部改为空操作注释——
+// 单例连接随进程存亡，SQLite 进程退出自动释放。
+let sharedDb: DatabaseSync | null = null
 
 function open(): DatabaseSync {
-  if (!schemaReady) fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
+  if (sharedDb) return sharedDb
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
   const db = new DatabaseSync(DB_PATH)
   // busy_timeout 先设：journal_mode=WAL 本身就可能要拿锁，
   // 原顺序（WAL 在前）让唯一真正需要等锁的那条语句反而没有超时保护。
   db.exec('PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL;')
-  if (!schemaReady) {
-    db.exec(SCHEMA)
-    migrateMessages(db)
-    migrateDispatch(db)
-    schemaReady = true
-  }
+  db.exec(SCHEMA)
+  migrateMessages(db)
+  migrateDispatch(db)
+  sharedDb = db
   return db
 }
 
@@ -180,7 +186,7 @@ export function send(
     const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(res.lastInsertRowid as number)
     return rowToMessage(row as Record<string, unknown>)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -192,7 +198,7 @@ export function history(team: string, limit = 100): ProjectMessageRow[] {
     const rows = db.prepare('SELECT * FROM messages WHERE team=? ORDER BY id DESC LIMIT ?').all(team, limit)
     return (rows as Record<string, unknown>[]).map(rowToMessage).reverse()
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -206,7 +212,7 @@ export function correctMessageSender(id: number, newFrom: string): void {
   try {
     db.prepare('UPDATE messages SET from_agent = ? WHERE id = ?').run(newFrom, id)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -222,7 +228,7 @@ export function search(q: string, limit = 50): ProjectMessageRow[] {
       .all(`%${escaped}%`, limit)
     return (rows as Record<string, unknown>[]).map(rowToMessage)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -236,7 +242,7 @@ export function lastMessageAts(): Record<string, string> {
     for (const r of rows as Record<string, unknown>[]) out[String(r.team)] = String(r.last)
     return out
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -313,7 +319,7 @@ export function recordMessageTargets(messageId: number, targets: string[]): void
     const stmt = db.prepare('INSERT OR IGNORE INTO message_targets (message_id, target_name) VALUES (?, ?)')
     for (const t of targets) stmt.run(messageId, t)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -325,7 +331,7 @@ export function targetsOf(messageId: number): string[] {
     const rows = db.prepare('SELECT target_name FROM message_targets WHERE message_id = ? ORDER BY target_name').all(messageId)
     return (rows as Record<string, unknown>[]).map((r) => String(r.target_name))
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -344,7 +350,7 @@ export function createDispatch(
     const row = db.prepare('SELECT * FROM dispatch WHERE team = ? AND root_message_id = ?').get(team, rootMessageId)
     return { dispatch: rowToDispatch(row as Record<string, unknown>), created: Number(res.changes) > 0 }
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -357,7 +363,7 @@ export function addDeliveries(dispatchId: number, members: { name: string; sessi
     const rows = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id').all(dispatchId)
     return (rows as Record<string, unknown>[]).map(rowToDelivery)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -368,7 +374,7 @@ export function dispatchById(id: number): DispatchRow | null {
     const row = db.prepare('SELECT * FROM dispatch WHERE id = ?').get(id)
     return row ? rowToDispatch(row as Record<string, unknown>) : null
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -384,7 +390,7 @@ export function listDispatches(team: string, limit = 50): DispatchWithDeliveries
       deliveries: (delStmt.all(Number(r.id)) as Record<string, unknown>[]).map(rowToDelivery),
     }))
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -395,7 +401,7 @@ export function deliveriesOf(dispatchId: number): DeliveryRow[] {
     const rows = db.prepare('SELECT * FROM delivery WHERE dispatch_id = ? ORDER BY id').all(dispatchId)
     return (rows as Record<string, unknown>[]).map(rowToDelivery)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -426,7 +432,7 @@ export function updateDelivery(
       id
     )
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -466,7 +472,7 @@ export function setDispatchState(
       id
     )
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -480,7 +486,7 @@ export function activeSerialDispatches(team: string): DispatchRow[] {
       .all(team)
     return (rows as Record<string, unknown>[]).map(rowToDispatch)
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
 
@@ -492,6 +498,6 @@ export function messageById(id: number): ProjectMessageRow | null {
     const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id)
     return row ? rowToMessage(row as Record<string, unknown>) : null
   } finally {
-    db.close()
+    /* P2-10 共享长连接：不逐调用关闭（见 open） */
   }
 }
