@@ -353,7 +353,7 @@ export interface ScreenTailPayload {
   lines: string[]
 }
 
-// ---- 项目协作（Phase 6）：项目 = 人 + 活会话成员；消息 SoT 在服务端 projects.db（team=room-<id>） ----
+// ---- 项目协作（Phase 6）：项目 = 人 + 活会话成员；消息 SoT 在服务端 tasks.db（team=room-<id>） ----
 
 export interface RoomMember {
   /** 成员名（@mention/花名册用）：人类 = config.humanName（默认 Owner）；会话成员 = 模板名（房内唯一，重名自动 ·2） */
@@ -381,7 +381,7 @@ export interface RoomInfo {
   archivedAt: number | null
   /** 项目/案件文件根目录（可空）：Files 只读浏览的唯一根，不从成员 cwd 推断。 */
   rootPath: string | null
-  /** 最后一条消息时间（ISO，服务端列表时从 projects.db 注入；无消息缺省）。前端按它排序房间，不回写 rooms.json */
+  /** 最后一条消息时间（ISO，服务端列表时从 tasks.db 注入；无消息缺省）。前端按它排序房间，不回写 rooms.json */
   lastMessageAt?: string | null
   members: RoomMember[]
 }
@@ -436,7 +436,7 @@ export interface ProjectCatalogGroup {
   base?: string
 }
 
-// ---- 房间调度（确定性轮转，2026-07-22）：底账在 projects.db 的 dispatch/delivery 表 ----
+// ---- 房间调度（确定性轮转，2026-07-22）：底账在 tasks.db 的 dispatch/delivery 表 ----
 
 /** 房间级并行模式已砍（2026-07-26 维护者定：@不同成员派不同任务天然并行，房间一律串行轮转）。
  *  类型保留是给 dispatch 底账历史行显示用（旧行存有 'parallel'/'claim'），新单一律 'serial'。 */

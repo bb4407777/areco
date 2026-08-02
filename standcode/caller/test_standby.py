@@ -60,7 +60,7 @@ class _PoolCaller(TM._FakeCaller):
 def _fresh(tmp_name: str) -> "_PoolCaller":
     tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"standby-{tmp_name}-"))
     C.STANDBY_DIR = tmp / "pool"  # 每测一池，互不串
-    return _PoolCaller(tmp / "projects.db")
+    return _PoolCaller(tmp / "tasks.db")
 
 
 def test_refill_and_claim() -> None:
@@ -123,7 +123,7 @@ def test_plan_prewarm() -> None:
     _sleep = C.time.sleep
     C.time.sleep = lambda *a, **k: None
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="prewarm-"))
-    c = _PoolCaller(tmp / "projects.db")
+    c = _PoolCaller(tmp / "tasks.db")
     c._thinker_replies = [TM.GOOD_PLAN]
     _dir, _idx = C.PLANS_DIR, C.PLANS_INDEX
     C.PLANS_DIR = tmp / "plans"

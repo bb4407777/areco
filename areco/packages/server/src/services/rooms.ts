@@ -1,5 +1,5 @@
 // 项目协作元数据：data/rooms.json（原子写，与 persistence 同惯例）。
-// 消息不在这里——SoT 是项目消息库（project-db.ts，data/projects.db）；
+// 消息不在这里——SoT 是项目消息库（project-db.ts，data/tasks.db）；
 // 成员名单在此（房间=team）。本文件只管"项目有哪些、谁在项目里"。
 import crypto from 'node:crypto'
 import fs from 'node:fs'

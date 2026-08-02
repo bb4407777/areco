@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// areco 项目消息 CLI：本机终端/agent 回执与插话用，直写 data/projects.db（WAL，与服务端并发安全）。
+// areco 项目消息 CLI：本机终端/agent 回执与插话用，直写 data/tasks.db（WAL，与服务端并发安全）。
 // 用法：
 //   发消息：node scripts/areco-msg.mjs <team> <from> <to> <消息...> [--human-relay] [--dry-run] [--strict]
 //     team = 项目 team 名（页面「⇗ 邀请」里可查，形如 room-<id>；rooms 子命令可列全量）
@@ -76,7 +76,7 @@ if (flags.help) usage()
 
 const root = process.env.ARECO_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dataDir = resolve(root, 'data')
-const dbPath = resolve(dataDir, 'projects.db')
+const dbPath = resolve(dataDir, 'tasks.db')
 const roomsPath = resolve(dataDir, 'rooms.json')
 const configPath = resolve(root, 'config.json')
 

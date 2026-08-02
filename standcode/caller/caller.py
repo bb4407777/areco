@@ -46,7 +46,7 @@ ARECO_BASE = os.environ.get("ARECO_BASE", "http://127.0.0.1:8790")
 # ⚠️ 这一段必须在 ARECO_ROOT 之前——HOME_DIR 是所有「家目录派生路径」的唯一源头。
 # 改动前 ARECO_ROOT/TASKS_DIR 走 Path.home()、而 HOME_DIR 走 local.json，两者在隔离
 # HOME 下会分裂：REST 照样连本机 8790 建出真房间、起真 Stand（烧额度），随后 send_message
-# 却对着 $HOME/Code/StandCode/areco/data/projects.db 找不到库而炸——留下一个永远收不到任务的孤儿房。
+# 却对着 $HOME/Code/StandCode/areco/data/tasks.db 找不到库而炸——留下一个永远收不到任务的孤儿房。
 # 本机大量 agent 跑在隔离 HOME 下，这不是假想（见 memory: isolated-home-tool-pitfall）。
 _LOCAL_CONF_PATH = Path(__file__).resolve().parent.parent / "config" / "local.json"
 try:
@@ -72,7 +72,7 @@ ARECO_ROOT = (
     or _detect_areco_root()
     or str(Path(HOME_DIR) / "Code" / "StandCode" / "areco")
 )
-PROJECTS_DB = Path(ARECO_ROOT) / "data" / "projects.db"
+PROJECTS_DB = Path(ARECO_ROOT) / "data" / "tasks.db"
 REGISTRY_PATH = Path(__file__).resolve().parent.parent / "stand" / "registry.json"
 
 # ── 房间来源标记 / 台账 / 自动归档 ──────────────────────────────────
@@ -132,7 +132,7 @@ AUTO_ARCHIVE = _conf_bool("STANDCODE_AUTO_ARCHIVE", "auto_archive", True)
 # 清扫判定的空闲门槛（分钟）：房间最后一条消息距今超过它才算「静了」，防止把
 # 用户正在里面追问的房间扫掉。
 SWEEP_IDLE_MIN = _conf_float("STANDCODE_SWEEP_IDLE_MIN", "sweep_idle_min", 30)
-# 连续读 projects.db 失败多少次就放弃等待（见 get_messages）
+# 连续读 tasks.db 失败多少次就放弃等待（见 get_messages）
 MSG_READ_FAIL_LIMIT = int(_conf_float("STANDCODE_MSG_READ_FAIL_LIMIT", None, 10))
 
 # ── 派发/轮询节奏（2026-07-26 提速）────────────────────────────────
@@ -2558,7 +2558,7 @@ class Caller:
     # ── 消息收发（直写 SQLite，绕过 REST 的固定 from 限制）─────
 
     def _db_connect(self) -> sqlite3.Connection:
-        """连接 projects.db（只读模式也会 WAL 写 journal，所以直接读写）"""
+        """连接 tasks.db（只读模式也会 WAL 写 journal，所以直接读写）"""
         conn = sqlite3.connect(str(self.projects_db))
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=3000")
@@ -2663,7 +2663,7 @@ class Caller:
             )
             if self._msg_read_failures >= MSG_READ_FAIL_LIMIT:
                 raise RuntimeError(
-                    f"连续 {self._msg_read_failures} 次读 projects.db 失败，"
+                    f"连续 {self._msg_read_failures} 次读 tasks.db 失败，"
                     f"停止等待（库被锁 / schema 漂移 / 路径不对）：{e}"
                 ) from e
             return []

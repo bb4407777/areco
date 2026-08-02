@@ -17,7 +17,7 @@ test('send 落库并返回完整行', () => {
   assert.equal(m.body, '你好')
   assert.ok(m.id > 0)
   assert.ok(m.createdAt.endsWith('Z'))
-  assert.ok(fs.existsSync(path.join(root, 'data', 'projects.db')))
+  assert.ok(fs.existsSync(path.join(root, 'data', 'tasks.db')))
 })
 
 test('history 升序返回且按 limit 截尾', () => {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 项目协作：项目 = 人 + 多个 agent 成员。@成员/@all 的消息由服务端注入目标终端，
-// agent 用仓内 areco-msg.mjs 回执；消息 SoT 在服务端 projects.db，本页经 WS（rooms/roomMessage）实时更新，不轮询。
+// agent 用仓内 areco-msg.mjs 回执；消息 SoT 在服务端 tasks.db，本页经 WS（rooms/roomMessage）实时更新，不轮询。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NEmpty, NInput, NModal, NPopconfirm, NSelect, NSpin, useMessage } from 'naive-ui'

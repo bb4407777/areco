@@ -1,4 +1,4 @@
-// 项目消息库：data/projects.db（node:sqlite，WAL）。项目协作的消息 SoT，零外部依赖。
+// 项目消息库：data/tasks.db（node:sqlite，WAL）。项目协作的消息 SoT，零外部依赖。
 // 服务端 room-relay 读写；本机任何终端可用 scripts/areco-msg.mjs 直写本库回执——
 // WAL + busy_timeout 保证与服务端并发安全，relay 的 2s 游标轮询自然拾取。
 import fs from 'node:fs'
@@ -6,7 +6,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { DATA_DIR } from '../config'
 
-const DB_PATH = path.join(DATA_DIR, 'projects.db')
+const DB_PATH = path.join(DATA_DIR, 'tasks.db')
 
 export interface ProjectMessageRow {
   id: number

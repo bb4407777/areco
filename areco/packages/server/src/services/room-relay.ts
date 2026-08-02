@@ -6,7 +6,7 @@
 // 房间调度（2026-07-22 确定性设计，不上 LLM selector；2026-07-26 砍掉房间级 parallel，一律串行）：
 // 消息可见性与行动许可拆开——无 @ 的人类发言全体收到（message_targets 逐行落账），但一次只放行
 // 一位成员实施，回复/超时/取消驱动轮转。@不同成员派不同任务=各自独立 dispatch，天然并行。
-// 底账在 projects.db 的 dispatch/delivery 表。
+// 底账在 tasks.db 的 dispatch/delivery 表。
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -41,7 +41,7 @@ const MSG_CLI = MSG_CLI_PATH
 
 // ---- 共享上下文空间（维护者 2026-07-20 定：项目 = 一个共享上下文空间）----
 // 每个项目房间维护一份最近消息纪要文件，投递/@ 时附路径 + 近况预览，
-// 让被叫进来的 agent 一进来就看到来龙去脉，不再失忆（真实状态仍以 data/projects.db 为准）。
+// 让被叫进来的 agent 一进来就看到来龙去脉，不再失忆（真实状态仍以 data/tasks.db 为准）。
 const CONTEXT_DIR = path.join(DATA_DIR, 'projects')
 const CONTEXT_MAX_MESSAGES = 30 // 纪要文件保留条数
 const CONTEXT_BODY_CLIP = 500 // 纪要里单条 body 截断
@@ -153,7 +153,7 @@ function renderContext(room: RoomInfo, msgs: projectDb.ProjectMessageRow[]): str
     '',
     `> 由 areco 自动维护：项目房间最近 ${msgs.length} 条消息纪要。被投递/@ 时附此文件路径，`,
     `> 让接手的 agent 一进来就看到来龙去脉，不必从零问起（项目 = 共享上下文空间）。`,
-    `> 细节以 data/projects.db 为准；本文件每次有新消息自动刷新。`,
+    `> 细节以 data/tasks.db 为准；本文件每次有新消息自动刷新。`,
     '',
   ]
   for (const m of msgs) {
@@ -466,7 +466,7 @@ export class RoomRelay {
     if (room.archivedAt !== null) return
     const parsed = parseMentions(body, room.members)
     let { targets, all } = parsed
-    // 外部通道（areco-msg CLI 直写 projects.db）的收件人记在 to_agent 列、正文不一定带 @：
+    // 外部通道（areco-msg CLI 直写 tasks.db）的收件人记在 to_agent 列、正文不一定带 @：
     // 正文无 @ 时按列投递，不再静默吞（2026-07-24 会诊房间连吞两条任务书实锤）
     if (!targets.length && !all && toField) {
       if (toField === ALL_MENTION) all = true

@@ -46,7 +46,7 @@ ROOM = {
 
 def _mk(sessions=None, rooms=None, db_path=None):
     """打桩 Caller：REST 层换成本地字典，消息层指向临时 SQLite。"""
-    c = C.Caller(projects_db=db_path or os.path.join(_TEST_ISO, "projects.db"))
+    c = C.Caller(projects_db=db_path or os.path.join(_TEST_ISO, "tasks.db"))
     c.list_rooms = lambda include_archived=False: list(
         rooms if rooms is not None else [ROOM])
     smap = {s["id"]: s for s in (sessions or [])}

@@ -74,7 +74,7 @@ class _BoomCaller(C.Caller):
         pass
 
     def dispatch_and_relay(self, *a, **k):
-        raise RuntimeError("连续 10 次读 projects.db 失败，停止等待")
+        raise RuntimeError("连续 10 次读 tasks.db 失败，停止等待")
 
     def collect_stand_cost(self, sid):
         return None
@@ -87,7 +87,7 @@ def test_a1_poll_fatal_db_error() -> None:
     c = C.Caller.__new__(C.Caller)
 
     def _boom(*a, **k):
-        raise RuntimeError("连续 10 次读 projects.db 失败，停止等待")
+        raise RuntimeError("连续 10 次读 tasks.db 失败，停止等待")
 
     c.get_messages = _boom
     t0 = time.time()

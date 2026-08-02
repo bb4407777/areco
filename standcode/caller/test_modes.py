@@ -295,7 +295,7 @@ BAD_PLAN = "我觉得可以先建个目录，然后把文件挪进去，大概�
 
 def _run_plan(thinker_replies: list[str]) -> dict:
     tmp = pathlib.Path(tempfile.mkdtemp())
-    c = _FakeCaller(tmp / "projects.db")
+    c = _FakeCaller(tmp / "tasks.db")
     c._thinker_replies = thinker_replies
     # 计划落盘也要隔离——否则测试会往仓库的 data/plans/ 里灌垃圾（首轮实测灌了 4 条）
     _dir, _idx = C.PLANS_DIR, C.PLANS_INDEX
