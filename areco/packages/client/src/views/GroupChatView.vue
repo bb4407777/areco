@@ -732,22 +732,12 @@ onMounted(async () => {
     <aside class="rooms" :class="{ overlay: ui.isMobile, open: !ui.isMobile || mobileRoomsOpen }">
       <div class="rooms-head">
         <span class="rooms-title">{{ kindLabel }}列表</span>
-        <NPopconfirm
-          :positive-text="`清理 ${cleanableRoomCount} 个`"
-          negative-text="算了"
-          placement="bottom"
-          @positive-click="cleanupRooms"
-        >
-          <template #trigger>
-            <button
-              class="icon-btn"
-              :disabled="!cleanableRoomCount || cleaning"
-              :title="`一键清理：删除全部无活跃会话的${kindLabel}及其消息记录（正在干活的自动跳过）`"
-            >🧹</button>
-          </template>
-          将删除 {{ cleanableRoomCount }} 个无活跃会话的{{ kindLabel }}及其消息记录（含已归档），不可恢复；
-          正在干活的{{ kindLabel }}自动跳过，成果文件与会话历史快照不受影响。
-        </NPopconfirm>
+        <button
+          class="icon-btn"
+          :disabled="!cleanableRoomCount || cleaning"
+          :title="`一键清理：删除全部无活跃会话的${kindLabel}及其消息记录（正在干活的自动跳过；2026-08-02 高律师定免二次确认）`"
+          @click="cleanupRooms"
+        >🧹</button>
         <button
           class="icon-btn"
           :title="kind === 'project' ? '新建项目分组' : '新建任务'"
