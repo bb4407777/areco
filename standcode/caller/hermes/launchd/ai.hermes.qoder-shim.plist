@@ -7,7 +7,7 @@
 		<key>HOME</key>
 		<string>/Users/gao</string>
 		<key>PATH</key>
-		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/Users/gao/.local/bin</string>
+		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/bin:/Users/gao/.local/bin</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -20,7 +20,7 @@
 	</array>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12</string>
+		<string>/opt/homebrew/bin/python3.13</string>
 		<string>/Users/gao/.qclaw-hermes/bin/qoder-llm-shim.py</string>
 	</array>
 	<key>RunAtLoad</key>

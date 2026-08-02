@@ -11,7 +11,7 @@
 		<key>HERMES_HOME</key>
 		<string>/Users/gao/.qclaw-hermes</string>
 		<key>PATH</key>
-		<string>/usr/local/bin:/Users/gao/scripts:/Library/Frameworks/Python.framework/Versions/3.12/bin:/Users/gao/.npm-global/bin:/Users/gao/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+		<string>/usr/local/bin:/Users/gao/scripts:/opt/homebrew/bin:/Users/gao/.npm-global/bin:/Users/gao/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
 		<key>WEIXIN_ACCOUNT_ID</key>
 		<string>08db917f1d8e@im.bot</string>
 		<key>WEIXIN_TOKEN</key>
@@ -28,7 +28,7 @@
 	</array>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12</string>
+		<string>/opt/homebrew/bin/python3.13</string>
 		<string>-m</string>
 		<string>hermes_cli.main</string>
 		<string>gateway</string>
