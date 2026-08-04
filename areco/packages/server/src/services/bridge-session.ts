@@ -6,8 +6,8 @@
 // 快照落盘、WS output 订阅）全部无感。trafficState 不再靠心跳猜：chat 起 = working，
 // run done = idle，destroy = exited（设计 §5 第 5 点「收益最大处」）。
 //
-// MVP 取舍：审批/澄清事件只能看不能批（sidecar 还没接审批回调），原样渲进输出流；
-// 恢复对话（restart resume）不支持——sidecar 会话在内存里，areco 重启即新对话。
+// MVP 取舍：审批/澄清经事件挂起 + sendline 路由回应（needs-user 黄灯），超时自动
+// deny/继续；恢复对话（restart resume）不支持——sidecar 会话在内存里，areco 重启即新对话。
 import { Session, type SessionInit } from './session'
 import type { SpawnSpec } from './templates'
 import { ensureBridgeRuntime } from './bridge-runtime'
@@ -25,6 +25,9 @@ export class BridgeSession extends Session {
   private client: AgentBridgeClient | null = null
   private runActive = false
   private abort: AbortController | null = null
+  /** 挂起的审批/澄清：agent 线程正在等回应。此时用户输入应路由给 respond 而不是新起一轮 */
+  private pendingApproval: { id: string; choices: string[] } | null = null
+  private pendingClarify: string | null = null
 
   constructor(init: SessionInit) {
     super(init)
@@ -102,6 +105,34 @@ export class BridgeSession extends Session {
     }
     // bridge 没有 TUI 回显：用户输入要自己画进输出流，否则终端视图里看不到发了什么
     this.ingestLine(`\x1b[36m>>> ${body}\x1b[0m`)
+
+    // 挂起的审批/澄清优先：agent 线程正在等这个回应，不能新起一轮
+    if (this.pendingApproval) {
+      const pending = this.pendingApproval
+      const choice = body.trim().toLowerCase()
+      if (pending.choices.includes(choice)) {
+        this.pendingApproval = null
+        this.setTrafficState('working')
+        void this.client?.approvalRespond(pending.id, choice).then((r) => {
+          if (!r.ok) this.ingestLine(`\x1b[31m[bridge] 审批回应失败：${r.error ?? '未知'}\x1b[0m`)
+        })
+      } else {
+        this.ingestLine(`\x1b[33m[bridge] 正在等审批回应，请输入 ${pending.choices.join(' / ')} 之一\x1b[0m`)
+      }
+      this.emitUpdate()
+      return
+    }
+    if (this.pendingClarify) {
+      const clarifyId = this.pendingClarify
+      this.pendingClarify = null
+      this.setTrafficState('working')
+      void this.client?.clarifyRespond(clarifyId, body).then((r) => {
+        if (!r.ok) this.ingestLine(`\x1b[31m[bridge] 澄清回应失败：${r.error ?? '未知'}\x1b[0m`)
+      })
+      this.emitUpdate()
+      return
+    }
+
     this.setTrafficState('working')
     this.workingFromInput = false
     this.emitUpdate()
@@ -143,8 +174,11 @@ export class BridgeSession extends Session {
           if (this.epoch !== currentEpoch || this.disposed) return
           if (chunk.delta) this.ingest(chunk.delta)
           for (const event of chunk.events) this.renderEvent(event)
-          //  traffic 监控有「15s 无输出→idle」兜底：流在动就钉回 working
-          if (this.trafficState !== 'working') this.setTrafficState('working')
+          // traffic 监控有「15s 无输出→idle」兜底：流在动就钉回 working——
+          // 但审批/澄清挂起时 needs-user 优先，不能抢（抢了黄灯就没了）
+          if (this.trafficState !== 'working' && !this.pendingApproval && !this.pendingClarify) {
+            this.setTrafficState('working')
+          }
         },
         { signal: this.abort?.signal },
       )
@@ -167,7 +201,8 @@ export class BridgeSession extends Session {
     }
   }
 
-  /** 工具/生命周期事件 → 终端流里的灰字一行（审批类 MVP 只展示，批不了） */
+  /** 工具/生命周期事件 → 终端流里的灰字一行；审批/澄清是黄灯事件（needs-user），
+   *  挂起期间用户输入会被路由给 approval_respond/clarify_respond（见 sendline） */
   private renderEvent(event: BridgeEvent) {
     switch (event.type) {
       case 'tool.started':
@@ -179,6 +214,45 @@ export class BridgeSession extends Session {
             ? `\x1b[31m⚠️ ${event.name ?? 'tool'} ${String(event.result_preview ?? '').slice(0, 200)}\x1b[0m`
             : `\x1b[2m↩︎ ${String(event.result_preview ?? '').slice(0, 200)}\x1b[0m`,
         )
+        break
+      case 'approval.requested': {
+        const id = String(event.approval_id ?? '')
+        const choices = Array.isArray(event.choices) ? event.choices.map(String) : []
+        this.pendingApproval = { id, choices }
+        this.setTrafficState('needs-user')
+        this.ingestLine(
+          `\x1b[33m🛑 审批请求：${String(event.description ?? '')}\x1b[0m`,
+        )
+        this.ingestLine(
+          `\x1b[33m   命令：${String(event.command ?? '').slice(0, 300)}\x1b[0m`,
+        )
+        this.ingestLine(`\x1b[33m   请输入 ${choices.join(' / ')} 之一回应（120 秒不答自动 deny）\x1b[0m`)
+        break
+      }
+      case 'approval.resolved':
+      case 'approval.timeout':
+        this.pendingApproval = null
+        if (this.runActive) this.setTrafficState('working')
+        this.ingestLine(
+          event.type === 'approval.timeout'
+            ? `\x1b[33m🛑 审批超时，已按 deny 收尾\x1b[0m`
+            : `\x1b[2m🛑 审批已回应：${String(event.choice ?? '')}\x1b[0m`,
+        )
+        break
+      case 'clarify.requested': {
+        this.pendingClarify = String(event.clarify_id ?? '')
+        this.setTrafficState('needs-user')
+        const choices = Array.isArray(event.choices) ? event.choices.map(String) : []
+        this.ingestLine(`\x1b[35m❓ Hermes 问：${String(event.question ?? '')}\x1b[0m`)
+        if (choices.length) this.ingestLine(`\x1b[35m   选项：${choices.join(' ｜ ')}（也可自由作答）\x1b[0m`)
+        this.ingestLine(`\x1b[35m   直接回话即答（300 秒不答自动继续）\x1b[0m`)
+        break
+      }
+      case 'clarify.resolved':
+      case 'clarify.timeout':
+        this.pendingClarify = null
+        if (this.runActive) this.setTrafficState('working')
+        if (event.type === 'clarify.timeout') this.ingestLine(`\x1b[33m❓ 澄清超时，已自动继续\x1b[0m`)
         break
       default:
         // lifecycle/run.error 等其余事件不进终端流（噪声），以后接事件总线再消费

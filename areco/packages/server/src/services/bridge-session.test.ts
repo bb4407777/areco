@@ -57,6 +57,14 @@ function makeFakeClient(opts: { finalStatus?: string } = {}) {
       calls.push({ method: 'steer', args: [sessionId, text] })
       return { ok: true, steered: true }
     },
+    approvalRespond: async (approvalId: string, choice: string) => {
+      calls.push({ method: 'approvalRespond', args: [approvalId, choice] })
+      return { ok: true, resolved: true }
+    },
+    clarifyRespond: async (clarifyId: string, response: string) => {
+      calls.push({ method: 'clarifyRespond', args: [clarifyId, response] })
+      return { ok: true, resolved: true }
+    },
     interrupt: async (sessionId: string) => {
       calls.push({ method: 'interrupt', args: [sessionId] })
       return { ok: true, interrupted: true }
@@ -166,5 +174,69 @@ test('占位名会话首句命名', async () => {
   await waitFor(() => s.trafficState === 'idle')
   assert.notEqual(s.name, '占位 #1')
   assert.ok(s.name.length > 0)
+  s.dispose()
+})
+
+/** 带审批/澄清事件的假 client：streamOutput 第一段就抛 approval.requested，挂住等回应 */
+function makeApprovalClient() {
+  const calls: FakeCall[] = []
+  const base = makeFakeClient()
+  base.client.streamOutput = (async (_runId: string, onChunk: (c: Record<string, unknown>) => void) => {
+    onChunk({
+      delta: '',
+      cursor: 0,
+      event_cursor: 0,
+      events: [{
+        type: 'approval.requested',
+        approval_id: 'appr-test1',
+        command: 'rm -rf /tmp/xyz',
+        description: '危险命令',
+        choices: ['once', 'session', 'always', 'deny'],
+      }],
+      done: false,
+      status: 'running',
+    })
+    return new Promise(() => {}) // 挂住：agent 线程在等审批
+  }) as never
+  for (const m of ['chat', 'steer', 'interrupt', 'destroy', 'approvalRespond', 'clarifyRespond']) {
+    const orig = (base.client as unknown as Record<string, (...a: unknown[]) => unknown>)[m]
+    ;(base.client as unknown as Record<string, unknown>)[m] = (...a: unknown[]) => {
+      calls.push({ method: m, args: a })
+      return orig(...a)
+    }
+  }
+  return { client: base.client, calls }
+}
+
+test('审批事件亮黄灯渲染，合法 choice 路由给 approvalRespond', async () => {
+  const { client, calls } = makeApprovalClient()
+  const s = makeSession(client)
+  s.spawnProcess({ file: '', args: [], cwd: root, env: {} })
+  await waitFor(() => s.status === 'running')
+  const chunks: string[] = []
+  s.on('output', (data: string) => chunks.push(data))
+  s.sendline('帮我删了那个测试目录')
+  await waitFor(() => s.trafficState === 'needs-user')
+  assert.ok(chunks.join('').includes('审批请求'), '审批事件应渲染')
+  s.sendline('once')
+  await waitFor(() => calls.some((c) => c.method === 'approvalRespond'))
+  assert.deepEqual(calls.find((c) => c.method === 'approvalRespond')?.args, ['appr-test1', 'once'])
+  assert.equal(calls.filter((c) => c.method === 'chat').length, 1, '审批回应不能新起 chat')
+  s.dispose()
+})
+
+test('审批挂起时非法输入不路由、给提示', async () => {
+  const { client, calls } = makeApprovalClient()
+  const s = makeSession(client)
+  s.spawnProcess({ file: '', args: [], cwd: root, env: {} })
+  await waitFor(() => s.status === 'running')
+  const chunks: string[] = []
+  s.on('output', (data: string) => chunks.push(data))
+  s.sendline('触发审批')
+  await waitFor(() => s.trafficState === 'needs-user')
+  s.sendline('随便一句')
+  await new Promise((r) => setTimeout(r, 100))
+  assert.equal(calls.some((c) => c.method === 'approvalRespond'), false)
+  assert.ok(chunks.join('').includes('之一'), '应提示合法选项')
   s.dispose()
 })

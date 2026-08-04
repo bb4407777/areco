@@ -7,7 +7,7 @@
 import * as esbuild from 'esbuild'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -37,6 +37,12 @@ const manager = new AgentBridgeManager({
   provider: 'qclaw',
   model: 'pool-deepseek-v4-flash',
 })
+
+// 审批用例前提：worker 的 HERMES_HOME 是 <hermesHome>/profiles/default，
+// 在这里写 approvals.mode=manual——默认 smart 模式会让辅助模型把
+// 「rm -rf /tmp/明显无害目录」直接自动放行，审批提示根本不会发（第三轮 E2E 实测踩中）
+mkdirSync(resolve(tmp, 'hermes-home', 'profiles', 'default'), { recursive: true })
+writeFileSync(resolve(tmp, 'hermes-home', 'profiles', 'default', 'config.yaml'), 'approvals:\n  mode: manual\n')
 
 try {
   const client = await manager.ensureReady()
@@ -107,6 +113,42 @@ try {
 
   const lst = await client.list()
   check('list 汇总', lst.ok && lst.sessions.length >= 2, `sessions=${lst.sessions?.length}`)
+
+  // ---- 用例 D：审批中断全流程（真触发危险命令 → 挂起 → 放行 → 执行）----
+  // 顺带验 broker 路由表：approval_id 是 broker 扫 get_output 响应学来的，
+  // approvalRespond 走错 worker 会 resolved:false。
+  const deleteMe = '/tmp/bridge-e2e-deleteme'
+  mkdirSync(deleteMe, { recursive: true })
+  const chatD = await client.chat({
+    message: `请用终端工具执行这条命令（目录是我刚建的测试垃圾，可以删）：rm -rf ${deleteMe}`,
+    toolsets: ['terminal'],
+  })
+  let approvalId = null
+  let doneD = null
+  let cursorD = 0
+  let eventCursorD = 0
+  const deadlineD = Date.now() + 120_000
+  let responded = false
+  while (Date.now() < deadlineD) {
+    const c = await client.getOutput(chatD.run_id, cursorD, eventCursorD)
+    cursorD = c.cursor
+    eventCursorD = c.event_cursor
+    for (const e of c.events) {
+      if (e.type === 'approval.requested' && !responded) {
+        approvalId = e.approval_id
+        responded = true
+        const r = await client.approvalRespond(approvalId, 'once')
+        check('D approvalRespond 路由成功', r.ok && r.resolved === true, r.error ?? `choice=once`)
+      }
+    }
+    if (c.done) {
+      doneD = c
+      break
+    }
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  check('D 审批事件挂起', Boolean(approvalId), approvalId ? `approval_id=${approvalId}` : '120s 未见 approval.requested')
+  check('D 放行后命令真执行', doneD?.done && !existsSync(deleteMe), `status=${doneD?.status} 目录已删=${!existsSync(deleteMe)}`)
 } catch (err) {
   check('端到端流程', false, String(err?.message || err))
 } finally {

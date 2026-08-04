@@ -192,6 +192,45 @@ export class AgentBridgeClient {
     return this.request({ action: 'interrupt', session_id: sessionId, message })
   }
 
+  /** 解审批阻塞：choice 必须是事件 choices 之一（once/session/always/deny，按事件给的来） */
+  approvalRespond(approvalId: string, choice: string) {
+    return this.request<{ ok: boolean; resolved: boolean; allowed_choices?: string[]; error?: string }>({
+      action: 'approval_respond',
+      approval_id: approvalId,
+      choice,
+    })
+  }
+
+  /** 解澄清阻塞：自由文本回答 */
+  clarifyRespond(clarifyId: string, response: string) {
+    return this.request<{ ok: boolean; resolved: boolean; error?: string }>({
+      action: 'clarify_respond',
+      clarify_id: clarifyId,
+      response,
+    })
+  }
+
+  contextEstimate(messages: unknown[]) {
+    return this.request<{ ok: boolean; tokens: number; message_count: number }>({
+      action: 'context_estimate',
+      messages,
+    })
+  }
+
+  titleGenerate(userMessage: string, assistantResponse: string) {
+    return this.request<{ ok: boolean; title: string | null }>({
+      action: 'title_generate',
+      user_message: userMessage,
+      assistant_response: assistantResponse,
+    })
+  }
+
+  backgroundPoll() {
+    return this.request<{ ok: boolean; pending_count: number; delegations: unknown[] }>({
+      action: 'background_poll',
+    })
+  }
+
   steer(sessionId: string, text: string) {
     return this.request<{ ok: boolean; steered: boolean }>({ action: 'steer', session_id: sessionId, text })
   }
