@@ -13,6 +13,7 @@ import { runPasswordCli } from './services/password'
 import { TemplateStore } from './services/templates'
 import { Persistence } from './services/persistence'
 import { SessionManager } from './services/session-manager'
+import { stopBridgeRuntime } from './services/bridge-runtime'
 import { ApiControllers, getAccessUrls } from './controllers/api'
 import { RoomStore, DEFAULT_HUMAN_NAME } from './services/rooms'
 import { RoomRelay } from './services/room-relay'
@@ -180,6 +181,8 @@ async function main() {
     const timeout = setTimeout(() => process.exit(0), 8000)
     void manager
       .shutdown()
+      .catch(() => undefined)
+      .then(() => stopBridgeRuntime()) // bridge sidecar 是 server 子进程，级联停掉
       .catch(() => undefined)
       .then(() => {
         roomRelay.stop()

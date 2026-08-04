@@ -49,6 +49,8 @@ export interface SessionInit {
   harness?: string | null
   /** 项目归属（room id）：项目内 spawn 的专属会话；缺省/null = 游离会话 */
   roomId?: string | null
+  /** hermes-bridge harness 的模型覆盖（模板 model 字段；'provider/model' 可连 provider 一起给） */
+  bridgeModel?: string | null
   createdAt?: number
 }
 
@@ -103,19 +105,21 @@ export class Session extends EventEmitter {
   pinned = false
   /** 项目归属（room id）：项目内 spawn 的专属会话随项目级联删除；null = 游离会话 */
   roomId: string | null
+  /** hermes-bridge 会话的模型覆盖（模板 model 字段透传；非 bridge 会话恒 null） */
+  readonly bridgeModel: string | null
 
   /** 本进程生命周期内是否有过活的影子终端（restored 会话没有，attach 走落盘快照） */
   hasLiveShadow = false
 
-  private pty: IPty | null = null
-  private shadow: Terminal | null = null
-  private serializer: SerializeAddon | null = null
-  private produced = 0
-  private shadowProcessed = 0
-  private killedBy: 'stop' | 'kill' | null = null
-  private stopTimer: NodeJS.Timeout | null = null
-  private lastLineTimer: NodeJS.Timeout | null = null
-  private disposed = false
+  protected pty: IPty | null = null
+  protected shadow: Terminal | null = null
+  protected serializer: SerializeAddon | null = null
+  protected produced = 0
+  protected shadowProcessed = 0
+  protected killedBy: 'stop' | 'kill' | null = null
+  protected stopTimer: NodeJS.Timeout | null = null
+  protected lastLineTimer: NodeJS.Timeout | null = null
+  protected disposed = false
 
   constructor(init: SessionInit) {
     super()
@@ -134,6 +138,7 @@ export class Session extends EventEmitter {
     this.agentSessionId = null
     this.agentBindingHash = null
     this.roomId = init.roomId ?? null
+    this.bridgeModel = init.bridgeModel ?? null
     this.createdAt = init.createdAt ?? Date.now()
   }
 
@@ -194,7 +199,7 @@ export class Session extends EventEmitter {
     this.emitUpdate()
   }
 
-  private rebuildShadow() {
+  protected rebuildShadow() {
     this.shadow?.dispose()
     this.shadow = new Terminal({
       cols: this.cols,
@@ -446,7 +451,7 @@ export class Session extends EventEmitter {
    *  就算注入真落在 TUI 接管前（\r 不提交），dispatch 回执的回显校验会重发（3 次 ×8s），
    *  风险有底（注意：caller 三闸 2026-07 已全关，旧注释说的空转自愈重投不再存在）。
    *  env ARECO_MIN_BOOT_MS 全局覆盖（毫秒）。 */
-  private minBootMs(): number {
+  protected minBootMs(): number {
     const env = Number(process.env.ARECO_MIN_BOOT_MS)
     if (Number.isFinite(env) && env > 0) return env
     if (this.harness === 'claude') return 4000
@@ -522,7 +527,7 @@ export class Session extends EventEmitter {
     quietTimer = setTimeout(fire, quietMs)
   }
 
-  private handleExit(exitCode: number) {
+  protected handleExit(exitCode: number) {
     if (this.stopTimer) {
       clearTimeout(this.stopTimer)
       this.stopTimer = null
@@ -562,7 +567,7 @@ export class Session extends EventEmitter {
   }
 
   /** 从影子终端 buffer 自底向上取第一个非空行（alt-screen 感知，替代 raw 流剥 ANSI） */
-  private computeLastLine() {
+  protected computeLastLine() {
     if (!this.shadow) return
     const buffer = this.shadow.buffer.active
     for (let y = buffer.length - 1; y >= 0; y--) {
@@ -577,7 +582,7 @@ export class Session extends EventEmitter {
     }
   }
 
-  private scheduleLastLine() {
+  protected scheduleLastLine() {
     if (this.lastLineTimer) return
     this.lastLineTimer = setTimeout(() => {
       this.lastLineTimer = null
@@ -585,7 +590,7 @@ export class Session extends EventEmitter {
     }, LAST_LINE_THROTTLE_MS)
   }
 
-  private emitUpdate() {
+  protected emitUpdate() {
     this.emit('update')
   }
 

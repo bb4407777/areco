@@ -8,6 +8,7 @@ import { isExitedSessionCleanupCandidate } from '../../../shared/session-cleanup
 import type { AppConfig } from '../config'
 import path from 'node:path'
 import { Session } from './session'
+import { BridgeSession } from './bridge-session'
 import { TemplateStore, buildSpawnSpec, effectiveClaudeHome, effectiveTranscriptDir } from './templates'
 import { Persistence } from './persistence'
 import {
@@ -96,7 +97,8 @@ export class SessionManager extends EventEmitter {
       // 存量会话 transcriptDir 回填：功能上线前拉起的会话没存这个字段，按模板现解析
       // （否则老会话永远进不了对话模式，2026-07-24 qoder 会话即此场景）
       const tpl = this.templates.list().find((t) => t.id === persisted.templateId)
-      const session = new Session({
+      const isBridge = tpl?.harness === 'hermes-bridge'
+      const session = new (isBridge ? BridgeSession : Session)({
         id: persisted.id,
         name: persisted.name,
         templateId: persisted.templateId,
@@ -108,6 +110,7 @@ export class SessionManager extends EventEmitter {
         claudeHome: persisted.claudeHome ?? null,
         transcriptDir: persisted.transcriptDir ?? (tpl ? effectiveTranscriptDir(tpl) : null),
         harness: tpl?.harness ?? null,
+        bridgeModel: isBridge ? tpl?.model ?? null : null,
         createdAt: persisted.createdAt,
       })
       session.restoreFrom(persisted)
@@ -231,7 +234,9 @@ export class SessionManager extends EventEmitter {
     const customName = opts.name?.trim()
     // cwd 入口统一 trim：记录与 spawn 用同一份，带首尾空白的合法路径不再静默落到 HOME
     const cwd = opts.cwd?.trim() || template.cwd
-    const session = new Session({
+    const isBridge = template.harness === 'hermes-bridge'
+    const SessionClass = isBridge ? BridgeSession : Session
+    const session = new SessionClass({
       id: crypto.randomUUID(),
       name: customName || `${template.name} #${sameTemplate + 1}`,
       autoNamed: !customName, // 占位名：首条 sendline 用第一句话替换
@@ -245,6 +250,7 @@ export class SessionManager extends EventEmitter {
       transcriptDir: effectiveTranscriptDir(template),
       harness: template.harness ?? null,
       roomId: opts.roomId ?? null,
+      bridgeModel: isBridge ? template.model ?? null : null,
     })
     // 官方 WorkBuddy harness 支持 --session-id：启动前钉死原生 UUID，彻底取消新会话的
     // “同 cwd + 时间窗 + 首句”事后认亲。桥接 GPT-5.6 未声明 harness，仍由 PTY 输出直绑。
@@ -259,14 +265,17 @@ export class SessionManager extends EventEmitter {
     this.sessions.set(session.id, session)
     if (opts.agentBindingPrompt) session.setAgentBindingPrompt(opts.agentBindingPrompt)
     session.spawnProcess(
-      buildSpawnSpec(template, {
-        cwd,
-        claudeSessionId: session.claudeSessionId,
-        agentSessionId: nativeWorkbuddyId,
-        resume: Boolean(resumeId),
-        resumeAgent: Boolean(resumeAgentId),
-        extraArgs: opts.extraArgs,
-      })
+      isBridge
+        ? // bridge 会话不拉进程：SpawnSpec 只取 cwd（buildSpawnSpec 会对空 command 拼 `exec ''` 并告警）
+          { file: '', args: [], cwd, env: {} }
+        : buildSpawnSpec(template, {
+            cwd,
+            claudeSessionId: session.claudeSessionId,
+            agentSessionId: nativeWorkbuddyId,
+            resume: Boolean(resumeId),
+            resumeAgent: Boolean(resumeAgentId),
+            extraArgs: opts.extraArgs,
+          })
     )
     this.persist()
     return session.toSummary()
@@ -379,14 +388,17 @@ export class SessionManager extends EventEmitter {
     }
 
     session.spawnProcess(
-      buildSpawnSpec(template, {
-        cwd: session.cwd,
-        claudeSessionId: session.claudeSessionId,
-        agentSessionId: template.harness === 'workbuddy' ? session.agentSessionId : null,
-        resume: resumeClaude,
-        resumeAgent: resume && didResume && template.harness === 'workbuddy',
-        extraArgs,
-      })
+      template.harness === 'hermes-bridge'
+        ? // bridge 重启 = 新对话（sidecar 会话在内存，无恢复凭据一说）；SpawnSpec 只取 cwd
+          { file: '', args: [], cwd: session.cwd, env: {} }
+        : buildSpawnSpec(template, {
+            cwd: session.cwd,
+            claudeSessionId: session.claudeSessionId,
+            agentSessionId: template.harness === 'workbuddy' ? session.agentSessionId : null,
+            resume: resumeClaude,
+            resumeAgent: resume && didResume && template.harness === 'workbuddy',
+            extraArgs,
+          })
     )
     if (resumedTraffic) {
       session.setTrafficState(resumedTraffic.state)
