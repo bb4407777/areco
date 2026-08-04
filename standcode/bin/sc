@@ -44,15 +44,18 @@ if [ -z "$caller" ]; then
 fi
 export STANDCODE_CALLER="$caller"
 
-# ── 解释器：python3 带 requests 即用；WorkBuddy 内置 3.13 兜底 ──
+# ── 解释器：python3 须 ≥3.10 且带 requests；WorkBuddy 内置 3.13 兜底 ──
+# 版本闸不可省（2026-08-04 教训）：launchd 常驻服务（Hermes gateway 等）的 PATH 里
+# 裸 python3 = Xcode CLT 3.9，caller.py 的 3.10+ 语法当场 TypeError；而 3.9 的
+# user site 一旦装过 requests，只测 import 的旧探针会选中 3.9——必须版本+依赖双测。
 PY=""
 for cand in python3 /opt/homebrew/bin/python3 \
     /Users/gao/.workbuddy/binaries/python/versions/3.13.12/bin/python3; do
   if command -v "$cand" >/dev/null 2>&1 \
-      && "$cand" -c "import requests" >/dev/null 2>&1; then
+      && "$cand" -c 'import sys; assert sys.version_info >= (3, 10); import requests' >/dev/null 2>&1; then
     PY="$cand"; break
   fi
 done
-[ -n "$PY" ] || { echo "sc: 找不到带 requests 的 python3（brew install python / 检查 WorkBuddy 内置）" >&2; exit 127; }
+[ -n "$PY" ] || { echo "sc: 找不到 ≥3.10 且带 requests 的 python3（brew install python / 检查 WorkBuddy 内置）" >&2; exit 127; }
 
 exec "$PY" "$CALLER_PY" ${args[@]+"${args[@]}"}
