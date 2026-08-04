@@ -91,6 +91,10 @@ async function load(reset = true) {
     rows.value = reset ? page.sessions : [...rows.value, ...page.sessions]
     total.value = page.total
     hasMore.value = page.hasMore
+    // 默认展开第一个会话（最近的那个）：进页面即有内容，不用先点一下。
+    // 只在尚未选中时自动选，搜索/翻页不抢走已选中的会话；
+    // auto=true 让移动端保持侧栏展开——自动选中就收起列表会让人不知道自己在哪。
+    if (!selected.value && rows.value.length) void open(rows.value[0].id, true)
   } catch (err) {
     message.error(`加载微信会话失败：${(err as Error).message}`)
   } finally {
@@ -99,12 +103,12 @@ async function load(reset = true) {
   }
 }
 
-async function open(id: string) {
+async function open(id: string, auto = false) {
   selected.value = id
   msgs.value = []
   cursor = 0
   msgLoading.value = true
-  if (ui.isMobile) sideOpen.value = false
+  if (ui.isMobile && !auto) sideOpen.value = false
   try {
     const page = await api.get<WxTranscriptPage>(`/api/weixin/sessions/${encodeURIComponent(id)}/transcript?cursor=0`)
     msgs.value = page.messages
