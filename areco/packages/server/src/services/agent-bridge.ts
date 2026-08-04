@@ -10,7 +10,7 @@
 // 分工：AgentBridgeClient 只管发请求；AgentBridgeManager 管 Python sidecar
 // 子进程（先 ping 探测已有实例，命中即 attach，否则 spawn 并等 stdout 就绪行）。
 import net from 'node:net'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -94,6 +94,35 @@ function endpointForKey(key: string): string {
 
 function socketPath(endpoint: string): string {
   return endpoint.startsWith('ipc://') ? endpoint.slice('ipc://'.length) : endpoint
+}
+
+/**
+ * 找一个能 import run_agent 的 python。launchd 下 PATH 贫瘠，`python3` 可能解析到
+ * Xcode CLT 的 /usr/bin/python3——没有 hermes 的 site-packages，sidecar 起来即死
+ *（2026-08-04 真机首验踩中：会话 crash、日志「No module named run_agent」）。
+ * 存在性不够，必须真 probe 一次 import。结果缓存：每个进程只探一轮。
+ * 覆盖：env ARECO_BRIDGE_PYTHON 优先。
+ */
+let pythonCache: string | null = null
+function resolvePython(): string {
+  if (pythonCache) return pythonCache
+  const candidates = [
+    process.env.ARECO_BRIDGE_PYTHON,
+    '/opt/homebrew/bin/python3.13',
+    '/opt/homebrew/bin/python3',
+    '/usr/local/bin/python3',
+    'python3',
+  ].filter((c): c is string => Boolean(c))
+  for (const py of candidates) {
+    try {
+      execFileSync(py, ['-c', 'import run_agent'], { timeout: 10_000, stdio: 'pipe' })
+      pythonCache = py
+      return py
+    } catch {
+      /* 这个解释器没有 run_agent，下一个 */
+    }
+  }
+  throw new Error(`找不到能 import run_agent 的 python（试过：${candidates.join(', ')}）；可用 ARECO_BRIDGE_PYTHON 指定`)
 }
 
 // ---------------------------------------------------------------- client
@@ -243,6 +272,7 @@ export class AgentBridgeManager {
 
   private spawn(): Promise<AgentBridgeClient> {
     const o = this.opts
+    const python = o.python ?? resolvePython()
     const args = [
       SIDECAR,
       '--endpoint', this.endpoint,
@@ -251,7 +281,7 @@ export class AgentBridgeManager {
       '--provider', o.provider ?? 'qclaw',
       '--model', o.model ?? 'pool-deepseek-v4-flash',
     ]
-    const child = spawn(o.python ?? 'python3', args, { stdio: ['ignore', 'pipe', 'inherit'] })
+    const child = spawn(python, args, { stdio: ['ignore', 'pipe', 'inherit'] })
     this.child = child
 
     return new Promise((resolve, reject) => {
