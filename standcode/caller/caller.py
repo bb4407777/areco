@@ -170,6 +170,11 @@ POLL_INTERVAL_SEC = _conf_float("STANDCODE_POLL_INTERVAL", "poll_interval_sec", 
 # STATE_PROBE_SEC 探针节流；STUCK_CONFIRM_HITS 连续 N 个探针周期 needs-user 才判卡死
 # （滤瞬时黄灯）；SETTLE_MAX_SEC 已有回复但灯一直 working 的强制定稿上限（灯坏死兜底）。
 STATE_PROBE_SEC = _conf_float("STANDCODE_STATE_PROBE", "state_probe_sec", 5)
+# SESSION_MISSING_LOST_SEC（2026-08-04）：_session_info 连续查无此会话（areco 列表里
+# 根本没有 = spawn 彻底失败/会话被删，与 status==exited 是两回事）多久判 lost。
+# 此前 None 不进任何 lost 分支——timeout=0 无限等时等待者永挂不报错（当日送达单
+# 「零副作用却静默」链的代码层根因之一）。取值过 ASK_RESUME_WAIT_SEC(60s) 简历窗口。
+SESSION_MISSING_LOST_SEC = _conf_float("STANDCODE_SESSION_MISSING_LOST", "session_missing_lost_sec", 90)
 STUCK_CONFIRM_HITS = int(_conf_float("STANDCODE_STUCK_HITS", "stuck_confirm_hits", 2))
 SETTLE_MAX_SEC = _conf_float("STANDCODE_SETTLE_MAX", "settle_max_sec", 1800)
 # MIN_TIMEOUT_SEC 等待类派发显式 --timeout 的下限闸（0=关闸）。「Stand 永不设超时，
@@ -3245,6 +3250,7 @@ class Caller:
         output_stall_probes = 0
         idle_hits = 0
         reinjected = False
+        session_missing_since: float | None = None  # 连续查无会话的起始时刻（None=当前查得到）
 
         def _is_my_stand(sender: str) -> bool:
             """这条消息算不算「我派的那个 Stand 的回复」"""
@@ -3304,6 +3310,11 @@ class Caller:
                 if time.time() - last_status_check > STATE_PROBE_SEC:
                     last_status_check = time.time()
                     sess_info = self._session_info(stand_session_id)
+                    if sess_info is None:
+                        if session_missing_since is None:
+                            session_missing_since = time.time()
+                    else:
+                        session_missing_since = None
                     oc = (sess_info or {}).get("outputChars")
                     if oc is not None and oc == last_output_chars:
                         output_stall_probes += 1
@@ -3365,6 +3376,13 @@ class Caller:
                     hb = heartbeat_stale(stand_session_id)  # None=无文件，True=过期，False=新鲜
                     if ses == "exited":
                         lost_reason = f"session_exited（areco 报 {stand_session_id}=exited）"
+                    elif session_missing_since is not None and \
+                            time.time() - session_missing_since >= SESSION_MISSING_LOST_SEC:
+                        lost_reason = (
+                            f"session_missing（连续 ≥{SESSION_MISSING_LOST_SEC:.0f}s areco 列表查无会话 "
+                            f"{stand_session_id}——Stand 从未拉起/已被删，非 exited；"
+                            f"查模板后端是否离线）"
+                        )
                     elif hb is True:
                         lost_reason = (
                             f"heartbeat_stale（{stand_session_id}.hb 超过 "
