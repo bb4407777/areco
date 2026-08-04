@@ -75,12 +75,16 @@ function fmtTime(ts: number | null | undefined): string {
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
-/** 角色 → 气泡右对齐：user 视作「自己」，与任务/项目里人类发言同侧 */
-function isSelf(role: string): boolean {
-  return role === 'user'
+/** 右侧只放真人发言：role=user 且带 text 段才算用户泡泡（同 ChatMessage.vue 的规则）。
+ *  weixin-sessions 按 Anthropic 约定把 tool 角色挂到 user 下，只含 tool_result 的
+ *  消息不是用户说的话，归左侧。 */
+function isSelf(m: WxMsg): boolean {
+  return m.role === 'user' && (m.parts || []).some((p) => p.kind === 'text')
 }
-function roleLabel(role: string): string {
-  return role === 'user' ? '我' : role === 'assistant' ? 'Hermes' : role
+function roleLabel(m: WxMsg): string {
+  if (isSelf(m)) return '我'
+  if (m.role === 'user') return '工具' // tool_result 挂 user 角色（Anthropic 约定）
+  return m.role === 'assistant' ? 'Hermes' : m.role
 }
 
 async function load() {
@@ -162,8 +166,8 @@ onMounted(() => void load())
       <NButton v-if="msgHasMore" size="tiny" quaternary :loading="msgLoading" class="more-btn" @click="loadMoreMsgs">
         加载更早的消息
       </NButton>
-      <div v-for="(m, i) in msgs" :key="i" class="msg" :class="{ self: isSelf(m.role) }">
-        <div class="msg-meta"><span>{{ roleLabel(m.role) }}</span></div>
+      <div v-for="(m, i) in msgs" :key="i" class="msg" :class="{ self: isSelf(m) }">
+        <div class="msg-meta"><span>{{ roleLabel(m) }}</span></div>
         <div class="bubble">
           <template v-for="(p, j) in m.parts || []" :key="j">
             <span v-if="p.kind === 'text'">{{ p.text }}</span>
