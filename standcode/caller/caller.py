@@ -2653,7 +2653,7 @@ class Caller:
             human_relay = from_ in HUMAN_RELAY_CALLERS
         if room_id and _areco_send_from_supported():
             try:
-                data = self._api_post(f"/rooms/{room_id}/send", {
+                data = self._api_post(f"/rooms/{room_id}/messages", {
                     "body": body, "from": from_, "humanRelay": human_relay, "to": to,
                 })
                 msg_id = int(data.get("id") or 0)
