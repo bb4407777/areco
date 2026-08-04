@@ -33,9 +33,35 @@ const log = createLogger('room-relay')
 // 扫的是本地 SQLite 增量 + captureTick 读屏，1s 一轮成本可忽略；env 可调回。
 const POLL_MS = Math.max(250, Number(process.env.ARECO_RELAY_POLL_MS ?? 1000) || 1000)
 const MAX_DEPTH = 3
-/** 注入回显验证：重试次数与单次等待（回显标记为每次注入的唯一 nonce，见 injectNote） */
-const ECHO_VERIFY_MS = 8000
-const ECHO_MAX_ATTEMPTS = 3
+/** 注入回显验证：重试次数与单次等待（回显标记为每次注入的唯一 nonce，见 injectNote）。
+ *  2026-08-02 qclaw 58af1338 事故（FIX C）：qclaw 冷 spawn 首屏早画但输入就绪滞后 ~28-31s
+ *  （transcript 15:07:05.660 才绑定，spawn 后 28.3s），旧 3 次×(1.2s quiet+8s 验证) 的三次
+ *  重发落在 8.0/17.2/26.4s，全部打进输入盲窗，预算 34.4s 耗尽时没有一次发向就绪会话。
+ *  改 4 次 + 递增退避 [0,3,9,18]s：即时 quiet 会话的四次尝试 ≈8.0/20.2/38.4/65.6s，
+ *  第 3/4 次越过观测盲窗（放弃点 ≈73.6s）；就绪会话首次即回显成功，退避零成本。
+ *  env 仅供测试收缩时序，生产勿配。 */
+const ECHO_VERIFY_MS = Math.max(20, Number(process.env.ARECO_ECHO_VERIFY_MS ?? 8000) || 8000)
+const ECHO_MAX_ATTEMPTS = 4
+/** 第 n 次尝试未见回显后，重发前的退避毫秒（下标=已失败的 attempt 序号，超界取末位） */
+const ECHO_RETRY_BACKOFF_MS = (process.env.ARECO_ECHO_BACKOFF_MS ?? '0,3000,9000,18000')
+  .split(',')
+  .map((s) => Math.max(0, Number(s.trim()) || 0))
+/** 新 spawn 首条注入就绪门（2026-08-02 事故 FIX B）：onceQuiet 的 minBoot 是纯时间闸，
+ *  会话自本次 spawn 后零输出（resume 静默恢复窗/冷 spawn 未画首屏）时到点照样 fire，
+ *  note 打进尚未接管 tty 的输入层被静默吞。注入前先等「spawn 后确实出过输出」再进
+ *  onceQuiet 等 quiet；上限到点强制放行——真哑死的会话退化为旧行为，不挂死串行队列。 */
+const FIRST_OUTPUT_MAX_WAIT_MS = Math.max(200, Number(process.env.ARECO_FIRST_OUTPUT_MAX_WAIT_MS ?? 20_000) || 20_000)
+/** FIX A 正文送达门缓存上限（对齐 RECALL_MEMO_MAX 的防无界策略：满了整体清空，宁丢补注不涨内存） */
+const LATE_GATE_MAX = 500
+// FIX E（2026-08-04 事故）：回显 ≠ 提交。文本打进 TUI 输入框时本就会回显，marker 一出现
+// 旧逻辑即判「送达」，但 sendline 的尾回车若在冷启动持续重绘中并帧，会被当换行——正文就
+// 一直躺在输入框里，会话 0 token 静止（08-04 单 C：屏幕上 #u1wm 在、40 分钟没跑）。
+// 判据改为「marker 消失」：提交后 TUI 清空输入框重绘，marker 会从可视尾屏滚掉；仍在 =
+// 没提交，补一个裸 \r（Session.write 对单独 '\r' 不拆帧，等价一次独立击键）。
+// 下限与 ECHO_VERIFY_MS 同口径取 20：测试要把窗口收到毫秒级，下限设高会把 env 旋钮锁死
+// （首版写 Math.max(200,…) 导致测试传 30 仍按 200 跑，4 个用例假失败）。
+const SUBMIT_VERIFY_MS = Math.max(20, Number(process.env.ARECO_SUBMIT_VERIFY_MS ?? 2500) || 2500)
+const SUBMIT_MAX_NUDGES = Math.max(0, Number(process.env.ARECO_SUBMIT_MAX_NUDGES ?? 3) || 3)
 /** 回执 CLI 的绝对路径（注入文案用）：任何终端执行即向本库写消息 */
 const MSG_CLI = MSG_CLI_PATH
 
@@ -193,6 +219,15 @@ export class RoomRelay {
   private recallMemo = new Map<number, string | null>()
   /** auto-recall 在途子进程：root message id → 结果 Promise（P1-6 异步化后并发投递共享同一子进程） */
   private recallInflight = new Map<number, Promise<string | null>>()
+  /** FIX A（2026-08-02 qclaw 58af1338 事故）：recall 补注的「正文送达门」。
+   *  键 `${rootMessageId}:${sessionId}`；正文 injectNote 回显确认后才放行补注，
+   *  正文终败/门缺失则丢弃补注——补注绝不允许先于正文落地成为会话首条消息
+   *  （事故里正文被启动页吞掉、补注却先到，Stand 对着记忆碎片答非所问被记成完成）。
+   *  清理五路：recall settle(null)、放行注入、正文终败、会话删除（onSessionRemoved）、容量清空。 */
+  private lateGates = new Map<
+    string,
+    { outcome: 'pending' | 'delivered'; block: string | null; room: RoomInfo; memberName: string; sessionId: string }
+  >()
   /** 项目驻场简报账本：sessionId → 已简报的进程代际（epoch）。每代首条投递带一次 PROJECT.md 指路；内存态，重启后重发一次无害 */
   private briefedEpochs = new Map<string, number>()
   /** 注入后待捕获 agent 回复：sessionId → 锚点（注入前消息数 + 来源 + 稳定拍计数）。agent 主动回执或自动捕获后清除 */
@@ -261,6 +296,10 @@ export class RoomRelay {
   /** 会话被删除：联动移除所有项目里指向它的 member（避免悬空 member 发消息静默失效） */
   private onSessionRemoved(sessionId: string) {
     this.briefedEpochs.delete(sessionId)
+    // FIX A：正文送达门随会话清理——正文终局回调随会话删除永不再来，门滞留只会白占内存
+    for (const [k, g] of this.lateGates) {
+      if (g.sessionId === sessionId) this.lateGates.delete(k)
+    }
     let changed = false
     for (const room of this.rooms.list()) {
       if (room.archivedAt !== null) continue // 归档项目保留成员快照，不随会话删除而改写
@@ -563,6 +602,8 @@ export class RoomRelay {
    * 向单个成员会话注入 note（离线自动 resume 拉起再投）。返回注入 nonce（回显标记，作 delivery.correlation_id）；
    * 失败返回 null：会话已从 Map 摘除（无恢复凭据）、自动 resume 失败、或注入抛错。
    * directive：附加的调度指令（认领制第一/二阶段说明等），原样拼进 note，不改主文案结构。
+   * onOutcome（FIX D）：正文注入终局回调——回显确认 true / 回显耗尽・验证期会话退出・重试链断 false。
+   * 会话在 quiet 等待期死亡且 onceQuiet 静默不 fire 的旧洞仍在（fn 不跑则无终局），该路不回调。
    */
   private injectToMember(
     room: RoomInfo,
@@ -571,7 +612,8 @@ export class RoomRelay {
     flat: string,
     senderKind: 'human' | 'session',
     currentId: number,
-    directive?: string
+    directive?: string,
+    onOutcome?: (delivered: boolean) => void
   ): string | null {
     const running = new Map(this.manager.list().map((s) => [s.id, s]))
     const session = m.sessionId ? running.get(m.sessionId) : undefined
@@ -593,10 +635,15 @@ export class RoomRelay {
       // 崩进程（postMessage 路径下消息已落库已广播却给用户返回失败）——单条投递失败记日志跳过，
       // 不影响其他投递与游标推进。
       const ctx = senderKind === 'human' ? buildContextPreview(room.team, currentId) : null
-      // recall 缓存热直接拼正文；冷则正文先行（不再同步等 3s 子进程），命中后补注（P1-6）
-      const recall = this.recallBlock(currentId, from, flat, senderKind, (lateBlock) => {
-        this.injectLateRecall(room, m.name, session.id, lateBlock)
-      })
+      // recall 缓存热直接拼正文；冷则正文先行（不再同步等 3s 子进程），命中后补注（P1-6）。
+      // FIX A（2026-08-02 事故）：补注块不再直接注入，先过「正文送达门」（键 rootMessageId:sessionId）——
+      // 正文回显确认前只缓存，确认后放行，正文终败则丢弃。事故里正文被 qclaw 启动页吞掉、
+      // 补注却抢先落地成为会话首条消息。settle 回调含 null（无命中/失败）以便清门。
+      const lateKey = `${currentId}:${session.id}`
+      const { block: recall, latePending } = this.recallBlock(currentId, from, flat, senderKind, (block) =>
+        this.settleLateRecall(lateKey, block)
+      )
+      if (latePending) this.armLateGate(lateKey, room, m.name, session.id)
       // 项目房间驻场简报：每个进程代际（epoch）首条投递带一次。resume 链会被压缩/截断，
       // 驻留上下文的 SoT 是项目根下的 PROJECT.md——指过去让成员自己读，不塞正文防 note 膨胀。
       // epoch 现读现取：上面 restart 分支刚拉起过的会话，手里的 summary 还是旧代际。
@@ -618,36 +665,56 @@ export class RoomRelay {
         (brief ? `\n${brief}\n` : '') +
         `（⚠️你在终端里的回复${this.rooms.humanName}在${kindLabel}里看不到，必须执行下面命令把回复发回${kindLabel}，否则等于没回：${replyCmd}。` +
         `如果实际执行者不是 ${m.name} 本人（会话被他人接手/代跑），必须先把命令里的署名「${m.name}」改成执行者自己的实际 Stand 名再执行，禁止照抄原署名——否则成果会记到 ${m.name} 头上）`
-      const nonce = this.injectNote(session.id, note, (sess) => {
-        // P1-7 字节锚：追加型 transcript 记「注入时刻文件大小」，captureTick 只读锚后增量
-        // （stat 未变直接零读盘）。非追加型（reasonix replace 帧等）/探测失败 → anchor=-1，
-        // 回落旧的消息数锚全量路径（beforeCount 仅该路径使用）。
-        const probe = this.captureAnchorProbe(sess)
-        const beforeCount = probe ? 0 : this.sessionMessageCount(sess) // 注入前消息数（note 尚未落盘）
-        // 标记待捕获：agent 若不主动回执，captureTick 取其回复代为回执到项目
-        this.pendingCapture.set(session.id, {
-          team: room.team,
-          roomName: room.name,
-          roomId: room.id,
-          memberName: m.name,
-          fromName: from,
-          beforeCount,
-          injectedAt: Date.now(),
-          settleTicks: 0,
-          lastLen: -1, // -1 保证首拍必判「有变化」，不虚增稳定拍
-          lastDeltaCount: -1,
-          deadlineAt: Date.now() + CAPTURE_TIMEOUT_MS,
-          anchorBytes: probe ? probe.anchorBytes : -1,
-          filePath: probe?.filePath ?? null,
-          lastSize: -1,
-          cachedDelta: null,
-        })
-      })
+      const nonce = this.injectNote(
+        session.id,
+        note,
+        (sess) => {
+          // P1-7 字节锚：追加型 transcript 记「注入时刻文件大小」，captureTick 只读锚后增量
+          // （stat 未变直接零读盘）。非追加型（reasonix replace 帧等）/探测失败 → anchor=-1，
+          // 回落旧的消息数锚全量路径（beforeCount 仅该路径使用）。
+          const probe = this.captureAnchorProbe(sess)
+          const beforeCount = probe ? 0 : this.sessionMessageCount(sess) // 注入前消息数（note 尚未落盘）
+          // 标记待捕获：agent 若不主动回执，captureTick 取其回复代为回执到项目
+          this.pendingCapture.set(session.id, {
+            team: room.team,
+            roomName: room.name,
+            roomId: room.id,
+            memberName: m.name,
+            fromName: from,
+            beforeCount,
+            injectedAt: Date.now(),
+            settleTicks: 0,
+            lastLen: -1, // -1 保证首拍必判「有变化」，不虚增稳定拍
+            lastDeltaCount: -1,
+            deadlineAt: Date.now() + CAPTURE_TIMEOUT_MS,
+            anchorBytes: probe ? probe.anchorBytes : -1,
+            filePath: probe?.filePath ?? null,
+            lastSize: -1,
+            cachedDelta: null,
+          })
+        },
+        (delivered) => {
+          // FIX A：正文终局——确认送达放行缓存补注；终败丢弃补注并撤销自动捕获锚。
+          // 撤锚是本次事故垃圾完成的根断点：正文没送达，会话里冒出的任何回复都与本单无关，
+          // 不能再被 captureTick 当成果收走（58af1338 的 88 字胡答就是这么记成 completed 的）。
+          this.resolveLateGate(lateKey, delivered)
+          if (!delivered) {
+            const cap = this.pendingCapture.get(session.id)
+            const revoked = cap && cap.team === room.team && cap.memberName === m.name
+            if (revoked) this.pendingCapture.delete(session.id)
+            log.warn(
+              `项目「${room.name}」正文投递 ${m.name} 未确认送达（回显耗尽/会话退出）${revoked ? '，已撤销自动捕获锚' : ''}`
+            )
+          }
+          onOutcome?.(delivered) // FIX D：外部（serialAdvanceNext）据此如实落账
+        }
+      )
       // 注入成功才记账：失败让下一条投递继续带简报，宁重发不漏发
       if (nonce && brief) this.briefedEpochs.set(session.id, epoch)
       log.info(`项目「${room.name}」投递 ${from} → ${m.name}`)
       return nonce
     } catch (err) {
+      this.lateGates.delete(`${currentId}:${session.id}`) // FIX A：投递未发生，门不留（补注后到即按无门丢弃）
       log.warn(`投递失败 ${room.name} → ${m.name}`, err)
       return null
     }
@@ -656,19 +723,22 @@ export class RoomRelay {
   /**
    * auto-recall 注入块：人发的一律跑；session 发的仅命中委派格式特征（或 from='areco-调度' 的调度指令）才跑。
    * 按 rootMessageId 缓存——同一根消息投多个成员只起一次 python 子进程。无命中/任何失败不注入。
-   * P1-6 异步化（2026-07-30）：缓存热 → 同步返回块拼进正文（旧行为）；缓存冷 → 返回 null
-   * 让正文先行注入零等待，后台跑 recall，命中后经 onLate 回调补注（追加 note）。
+   * P1-6 异步化（2026-07-30）：缓存热 → 同步返回块拼进正文（旧行为）；缓存冷 → block=null
+   * 让正文先行注入零等待，后台跑 recall，完成后经 onSettled 回调交回结果（含 null，供调用方清门）。
+   * 返回 latePending=true 表示已挂后到回调——调用方（injectToMember）据此立正文送达门（FIX A）。
    */
   private recallBlock(
     rootMessageId: number,
     from: string,
     flat: string,
     senderKind: 'human' | 'session',
-    onLate: (block: string) => void
-  ): string | null {
-    if (senderKind !== 'human' && from !== 'areco-调度' && !DELEGATION_RE.test(flat)) return null
+    onSettled: (block: string | null) => void
+  ): { block: string | null; latePending: boolean } {
+    if (senderKind !== 'human' && from !== 'areco-调度' && !DELEGATION_RE.test(flat)) {
+      return { block: null, latePending: false }
+    }
     const cached = this.recallMemo.get(rootMessageId)
-    if (cached !== undefined) return cached
+    if (cached !== undefined) return { block: cached, latePending: false }
     let p = this.recallInflight.get(rootMessageId)
     if (!p) {
       p = this.runRecall(this.recallQuery(flat)).then((block) => {
@@ -679,17 +749,63 @@ export class RoomRelay {
       })
       this.recallInflight.set(rootMessageId, p)
     }
-    // 每个等着的成员各挂一个补注回调（degraded 全员直投时并发共享同一子进程结果）
-    p.then((block) => {
-      if (block) onLate(block)
-    }).catch(() => {
-      /* runRecall 自身全捕获，这里只兜 onLate 抛错 */
+    // 每个等着的成员各挂一个回调（degraded 全员直投时并发共享同一子进程结果）；
+    // 无命中/失败也回调（null）——让正文送达门及时清掉，不滞留等一个永不会来的块
+    p.then((block) => onSettled(block)).catch(() => {
+      /* runRecall 自身全捕获，这里只兜 onSettled 抛错 */
     })
-    return null
+    return { block: null, latePending: true }
   }
 
-  /** recall 后到补注（P1-6）：任务正文已先行注入，把命中的记忆块作为补充 note 追加进同一会话。
-   *  不动 pendingCapture（主任务捕获锚点不受影响）；会话已退出/被删由 injectNote 内部兜住。 */
+  // ---- FIX A（2026-08-02 qclaw 58af1338 事故）：recall 补注的正文送达门 ----
+
+  /** 立门：injectToMember 在正文注入前调用（仅 recall 后到路径）。满容整体清空对齐 recallMemo 策略 */
+  private armLateGate(key: string, room: RoomInfo, memberName: string, sessionId: string): void {
+    if (this.lateGates.size >= LATE_GATE_MAX) this.lateGates.clear() // 防长驻 Map 无界增长；被清的门后到即丢弃，宁丢不抢跑
+    this.lateGates.set(key, { outcome: 'pending', block: null, room, memberName, sessionId })
+  }
+
+  /** recall 子进程尘埃落定：null（无命中/失败）清门即走；有块则按正文状态缓存或放行 */
+  private settleLateRecall(key: string, block: string | null): void {
+    const gate = this.lateGates.get(key)
+    if (block === null) {
+      if (gate) this.lateGates.delete(key) // 永远等不来块了，门无存在意义
+      return
+    }
+    if (!gate) {
+      // 门已不在：正文终败已丢弃/会话删除/容量清空。宁丢一条补注，绝不让它抢跑成首条消息
+      log.warn(`recall 补注块无对应正文送达门（${key}），丢弃`)
+      return
+    }
+    if (gate.outcome === 'delivered') {
+      this.lateGates.delete(key)
+      this.injectLateRecall(gate.room, gate.memberName, gate.sessionId, block)
+      return
+    }
+    gate.block = block // 正文尚未确认：缓存等 resolveLateGate 放行
+  }
+
+  /** 正文 injectNote 终局：确认送达 → 放行缓存补注（或留门等慢 recall）；终败 → 丢弃 */
+  private resolveLateGate(key: string, delivered: boolean): void {
+    const gate = this.lateGates.get(key)
+    if (!gate) return
+    if (!delivered) {
+      this.lateGates.delete(key)
+      if (gate.block) log.warn(`项目「${gate.room.name}」正文未确认送达，recall 补注丢弃 ${gate.memberName}`)
+      return
+    }
+    if (gate.block) {
+      const b = gate.block
+      this.lateGates.delete(key)
+      this.injectLateRecall(gate.room, gate.memberName, gate.sessionId, b)
+      return
+    }
+    gate.outcome = 'delivered' // recall 还没跑完（慢子进程）：门保持开放，settle 到块即注
+  }
+
+  /** recall 后到补注（P1-6；FIX A 后仅由送达门放行调用）：任务正文已回显确认，把命中的记忆块
+   *  作为补充 note 追加进同一会话。不动 pendingCapture（主任务捕获锚点不受影响）；
+   *  会话已退出/被删由 injectNote 内部兜住。 */
   private injectLateRecall(room: RoomInfo, memberName: string, sessionId: string, block: string): void {
     try {
       this.injectNote(sessionId, `（auto-recall 补充，相关记忆供参考）\n${block}`, () => {})
@@ -747,7 +863,27 @@ export class RoomRelay {
       for (const del of projectDb.deliveriesOf(dispatchId)) {
         if (del.status !== 'queued') continue
         const member = room.members.find((m) => m.kind === 'session' && m.name === del.memberName)
-        const nonce = member ? this.injectToMember(room, member, root.from, flat, senderKind, root.id) : null
+        // FIX D（docs/known-issues.md「投递谎报成功」）：正文终局回调把回显耗尽/会话退出如实记
+        // failed 并放行下一位——此前 failed 分支只在同步拿不到 nonce 时可达，异步吞没恒记 injected。
+        // 幂等闸（known-issues §1 强制）：status 仍是 injected 且 correlationId 未被改写才动——
+        // 已回复（advanceSerial 置 done）/已取消/已被重新投递的一概不碰，防回显假阴性覆盖真实进度。
+        // 残余风险：回显假阴性（实际送达但 nonce 未渲染）时下一位会重复接单；单成员房间无下一位，
+        // 效果是如实收单而非冻死在幻影 current_target 上（宁重复不冻结）。
+        const nonce = member
+          ? this.injectToMember(room, member, root.from, flat, senderKind, root.id, undefined, (ok) => {
+              if (ok) return
+              try {
+                const cur = projectDb.deliveriesOf(dispatchId).find((x) => x.id === del.id)
+                if (cur?.status !== 'injected' || cur.correlationId !== nonce) return
+                projectDb.updateDelivery(del.id, { status: 'failed' })
+                log.warn(`项目「${room.name}」投递 ${del.memberName} 未送达（回显耗尽/会话退出），已如实记 failed`)
+                this.serialAdvanceNext(room, dispatchId) // state 非 active 时自身守卫兜底 no-op
+                this.broadcastDispatches(room)
+              } catch (err) {
+                log.warn('failed 状态落账失败', err)
+              }
+            })
+          : null
         if (nonce) {
           projectDb.updateDelivery(del.id, { status: 'injected', attempt: del.attempt + 1, correlationId: nonce })
           projectDb.setDispatchState(dispatchId, {
@@ -828,24 +964,31 @@ export class RoomRelay {
    * 输入框光标在末尾 → nonce 必然落在可见渲染尾部。不能用 note 固有文案当标记——
    * resume 恢复渲染会重放历史消息里的旧 note 文本（「你的回复」在旧 transcript 出现 9 次），
    * 会造成回显误报、吞掉重试（epoch 8 实锤）。
-   * ECHO_VERIFY_MS 内未见回显 = 被吞，quiet 后重发，最多 ECHO_MAX_ATTEMPTS 次。
+   * ECHO_VERIFY_MS 内未见回显 = 被吞，退避（ECHO_RETRY_BACKOFF_MS）+ quiet 后重发，
+   * 最多 ECHO_MAX_ATTEMPTS 次（FIX C：退避把重试预算拉出 qclaw ~30s 启动盲窗）。
+   * 注入前过 onceQuietAfterFirstOutput 就绪门（FIX B）：spawn 后零输出的会话先等首个输出。
    * 返回本次注入的 nonce（回显标记）：调度底账用它作 delivery.correlation_id；
    * 重发会产生新 nonce，但对外只暴露首个（底账只需关联到本次注入意图）。
    *
-   * ⚠️ 返回值只代表「已排入注入队列」，**不代表已送达**。nonce 是同步返回的，而真正的
-   * sendline 发生在之后的 onceQuiet 回调里，可能根本没跑（会话在静默窗口内死掉）、
-   * 抛错、或回显校验重试耗尽。这三种情况调用方都会拿到真值 nonce 并写 status:'injected'，
-   * 于是「什么都没投出去」被记成「已投递」——串行房间会因此冻住整条队列直到超时清扫。
-   * 三条路径现已各自 log.warn（改动前完全静默），但**状态机仍未修**：
-   * 正解是加 onFailed 回调（serialAdvanceNext 里 `nonce` 为假时的 failed 分支已经写好了，
-   * 只是永远走不到），详见 docs/known-issues.md「投递谎报成功」。
+   * ⚠️ 返回值仍只代表「已排入注入队列」，**不代表已送达**——真送达与否经 onOutcome 异步交付
+   * （2026-08-02 FIX A/D）：回显确认 → onOutcome(true)；验证期会话退出、重试耗尽、重试链
+   * manager.get 抛错（会话被删）→ onOutcome(false)。sendline 抛错不算终局（重试链还在走）。
+   * 残余洞：会话在 quiet 等待期死亡时 onceQuiet 静默不 fire、回调整个不跑——该 lineage 无终局，
+   * 调用方（serialAdvanceNext）的 failed 落账等不到，delivery 停在 injected（与修前同类，面已收窄；
+   * 修净需 session.ts 侧 onceQuiet 暴露取消/退出通知，见 docs/known-issues.md「投递谎报成功」）。
    */
-  private injectNote(sessionId: string, note: string, onSent: (sess: Session) => void, attempt = 1): string {
+  private injectNote(
+    sessionId: string,
+    note: string,
+    onSent: (sess: Session) => void,
+    onOutcome?: (delivered: boolean) => void,
+    attempt = 1
+  ): string {
     const sess = this.manager.get(sessionId)
     const nonce = Math.random().toString(36).slice(2, 6)
     const wire = `${note}（#${nonce}）`
     const mark = `#${nonce}`
-    sess.onceQuiet(() => {
+    this.onceQuietAfterFirstOutput(sess, () => {
       let echoed = false
       let tail = ''
       const onOut = (data: string) => {
@@ -859,32 +1002,122 @@ export class RoomRelay {
         sess.sendline(wire, { autoName: false })
         onSent(sess)
       } catch (err) {
-        // 会话可能已退出/被删。原先是空 catch —— 这条投递彻底没发出去，
-        // 而调用方已经拿着 nonce 记了 status:injected，从日志里看不出任何异常。
-        // 至少让它可见（真正的修法见 docs/known-issues.md「投递谎报成功」）。
+        // 会话可能已退出/被删。不在此报终局——下面的验证窗对退出/耗尽各有出口，重试链继续走。
         log.warn(`note 注入 ${sessionId.slice(0, 8)} sendline 失败，本次投递未发出`, err)
       }
       setTimeout(() => {
         sess.off('output', onOut)
-        if (echoed) return
+        if (echoed) {
+          // FIX E：回显只证明「文本进了输入框」。再过一道提交门：marker 从可视尾屏消失
+          // 才算真提交；仍在就补裸回车，最多 SUBMIT_MAX_NUDGES 次。
+          this.verifySubmitted(sess, mark, sessionId, onOutcome)
+          return
+        }
         if (!sess.isRunning) {
-          // 会话在静默窗口内死了 —— 同样什么都没投出去，同样对调用方不可见
           log.warn(`note 注入 ${sessionId.slice(0, 8)} 期间会话已退出，本次投递未送达`)
+          onOutcome?.(false)
           return
         }
         if (attempt >= ECHO_MAX_ATTEMPTS) {
           log.warn(`note 注入 ${sessionId.slice(0, 8)} ${ECHO_MAX_ATTEMPTS} 次均未见回显，放弃（会话可能卡在启动页）`)
+          onOutcome?.(false)
           return
         }
-        log.info(`note 注入 ${sessionId.slice(0, 8)} 未见回显（第 ${attempt} 次疑被吞），quiet 后重发`)
-        try {
-          this.injectNote(sessionId, note, onSent, attempt + 1)
-        } catch {
-          /* 会话已被删 */
-        }
+        // FIX C：退避后再重发。旧的「quiet 即重发」让三次尝试挤在 8.0/17.2/26.4s，
+        // 全落 qclaw 冷 spawn 的 ~28-31s 输入盲窗（2026-08-02 58af1338 事故）
+        const backoff = ECHO_RETRY_BACKOFF_MS[Math.min(attempt, ECHO_RETRY_BACKOFF_MS.length - 1)] ?? 0
+        log.info(`note 注入 ${sessionId.slice(0, 8)} 未见回显（第 ${attempt} 次疑被吞），退避 ${backoff}ms 再 quiet 重发`)
+        setTimeout(() => {
+          try {
+            this.injectNote(sessionId, note, onSent, onOutcome, attempt + 1)
+          } catch {
+            onOutcome?.(false) // 会话已被删：重试链就此终止，如实报未送达
+          }
+        }, backoff).unref()
       }, ECHO_VERIFY_MS).unref() // unref：不拖住进程退出（测试/关停场景）
     })
     return nonce
+  }
+
+  /** FIX E（2026-08-04 事故）：提交确认门。回显只证明文本进了输入框，不证明被提交——
+   *  sendline 的尾回车在冷启动持续重绘时会并帧沦为换行，正文就一直躺在输入框里（08-04 单 C：
+   *  屏幕上 marker 在、0 token 静止 40 分钟，而 relay 已判「送达」）。
+   *  判据：提交后 TUI 清空输入框重绘，marker 会从可视尾屏滚掉。窗口内没再出现 marker = 已提交；
+   *  仍反复出现 = 还在输入框，补一个裸 \r（Session.write 对单独 '\r' 不拆帧 = 一次独立击键）。
+   *  nudge 用尽仍未提交则如实报未送达，交由上层 FIX A 丢补注、FIX D 落 failed、FIX C 重试链。 */
+  private verifySubmitted(
+    sess: Session,
+    mark: string,
+    sessionId: string,
+    onOutcome?: (delivered: boolean) => void,
+    nudge = 0
+  ): void {
+    let seen = false
+    let tail = ''
+    const onOut = (data: string) => {
+      // eslint-disable-next-line no-control-regex
+      tail = (tail + data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')).slice(-2000)
+      if (tail.includes(mark)) seen = true
+    }
+    sess.on('output', onOut)
+    setTimeout(() => {
+      sess.off('output', onOut)
+      if (!sess.isRunning) {
+        log.warn(`note 注入 ${sessionId.slice(0, 8)} 提交确认期间会话已退出`)
+        onOutcome?.(false)
+        return
+      }
+      if (!seen) {
+        // 窗口内 marker 未再现 → 输入框已清空 = 已提交
+        if (nudge > 0) log.info(`note 注入 ${sessionId.slice(0, 8)} 补 ${nudge} 次裸回车后确认提交`)
+        onOutcome?.(true)
+        return
+      }
+      if (nudge >= SUBMIT_MAX_NUDGES) {
+        log.warn(
+          `note 注入 ${sessionId.slice(0, 8)} 文本已在输入框但补 ${SUBMIT_MAX_NUDGES} 次回车仍未提交，如实报未送达`
+        )
+        onOutcome?.(false)
+        return
+      }
+      log.info(`note 注入 ${sessionId.slice(0, 8)} 文本滞留输入框（第 ${nudge + 1} 次补裸回车）`)
+      try {
+        sess.write('\r', { markWorking: false })
+      } catch {
+        onOutcome?.(false)
+        return
+      }
+      this.verifySubmitted(sess, mark, sessionId, onOutcome, nudge + 1)
+    }, SUBMIT_VERIFY_MS).unref()
+  }
+
+  /** FIX B（2026-08-02 事故）：首条注入前先确认会话自本次 spawn 后确实产生过输出，再交 onceQuiet
+   *  等 quiet。onceQuiet 的 minBoot 是纯时间闸，证明不了输入就绪；spawn 后零输出（resume 静默
+   *  恢复窗/冷 spawn 未画首屏）时 quiet 到点照样 fire，注入必被吞。等到首个 output 事件（或
+   *  FIRST_OUTPUT_MAX_WAIT_MS 到点强制放行——真哑死的会话退化为旧行为，不挂死串行队列）再进原
+   *  onceQuiet。字段缺失（测试桩/未 spawn）或已有输出时零开销直通；会话退出也放行，onceQuiet
+   *  内部 isRunning 守卫会拦下注入。注意（诚实声明）：本事故里 qclaw 首屏早画、输入迟 ~28s 才
+   *  就绪，此门救不了它——那类由 FIX C 的重试预算覆盖；此门救的是零输出盲窗类（codebuddy resume）。 */
+  private onceQuietAfterFirstOutput(sess: Session, fn: () => void): void {
+    const spawned = typeof sess.startedAt === 'number' ? sess.startedAt : null
+    const outputAt = typeof sess.lastOutputAt === 'number' ? sess.lastOutputAt : null
+    if (spawned === null || outputAt === null || outputAt >= spawned) {
+      sess.onceQuiet(fn)
+      return
+    }
+    let settled = false
+    const proceed = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(cap)
+      sess.off('output', proceed)
+      sess.off('exit', proceed)
+      sess.onceQuiet(fn)
+    }
+    const cap = setTimeout(proceed, FIRST_OUTPUT_MAX_WAIT_MS)
+    cap.unref()
+    sess.on('output', proceed)
+    sess.on('exit', proceed)
   }
 
   /** 读 session 注入前的 transcript 消息数（claude 系走 readHistoryAllMessages，agent 系走 readAgentTranscript）*/

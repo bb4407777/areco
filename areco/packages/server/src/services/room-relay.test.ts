@@ -2,6 +2,7 @@
 // 隔离：先于 import 设 ARECO_ROOT 到临时目录，project-db/rooms 落盘都在其下（不污染真库）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,6 +11,15 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-relay-'))
 process.env.ARECO_ROOT = root
 // auto-recall 测试需脚本路径非空（假 recallRunner 不起真子进程，路径值本身不被使用）
 process.env.ARECO_RECALL_SCRIPT = 'recall-stub'
+// 2026-08-02 投递竞态修复（FIX A/B/C/D）测试：收缩回显验证/退避/就绪门时序，让重试链毫秒级
+// 跑完（生产值 8s×4 次 + [0,3,9,18]s 退避会把测试拖到分钟级）。比例关系与生产一致。
+process.env.ARECO_ECHO_VERIFY_MS = '40'
+process.env.ARECO_ECHO_BACKOFF_MS = '0,15,25,35'
+process.env.ARECO_FIRST_OUTPUT_MAX_WAIT_MS = '250'
+// 2026-08-04 FIX E（提交确认门）：回显后再等一窗确认 marker 未再现（=输入框已清空=已提交）。
+// 同样收缩到毫秒级；补注放行、串行落账等都改为等这道门，故各用例 sleep 需覆盖 ECHO+SUBMIT 两窗。
+process.env.ARECO_SUBMIT_VERIFY_MS = '30'
+process.env.ARECO_SUBMIT_MAX_NUDGES = '2'
 
 const { RoomRelay } = await import('./room-relay')
 const { recallRunner } = await import('./room-relay')
@@ -215,6 +225,86 @@ test('初见房间：中继启动前的存量快进不补投，之后的新帖�
 // ---- auto-recall 记忆注入（2026-07-22 定稿；2026-07-30 P1-6 异步化）：recallRunner 注入点
 // 替换真子进程。异步化后的行为：缓存冷 → 正文先行注入（不带块），recall 完成后补注一条
 // 「auto-recall 补充」note；缓存热（同根消息再投）→ 块直接拼进正文（旧行为）。
+// 2026-08-02 FIX A（qclaw 58af1338 事故）后补注加「正文送达门」：正文回显确认后才补注，
+// 正文终败则丢弃——补注绝不允许先于正文成为会话首条消息。
+
+/** 可回显假会话（FIX A/B/C/D 测试）：真 EventEmitter 输出流，sendline 默认异步回显整条 wire
+ *  （尾部 nonce 落进回显验证窗 → 判送达）；swallow>0 时前 N 次 sendline 被吞（零回显，复现
+ *  qclaw 启动盲窗）。startedAt/lastOutputAt 供就绪门（FIX B）脚本化：默认 startedAt=null =
+ *  门直通（等价于「已画过屏」的存量会话）。 */
+class EchoSession extends EventEmitter {
+  sent: string[] = []
+  isRunning = true
+  startedAt: number | null = null
+  lastOutputAt = 0
+  swallow = 0
+  /** FIX E：模拟「文本进了输入框但没提交」——TUI 持续重绘把 marker 一直摆在屏幕上。
+   *  >0 时每次重绘都再吐一遍 wire；每收到一个裸 \r（=补回车）减 1，减到 0 视为终于提交。
+   *  设为 Infinity 可模拟怎么补都提交不了的死会话。 */
+  stuckInInput = 0
+  /** 收到的裸回车次数（FIX E nudge 计数） */
+  nudges = 0
+  private lastWire = ''
+  private repaint: NodeJS.Timeout | null = null
+  constructor(readonly id: string) {
+    super()
+  }
+  onceQuiet(fn: () => void) {
+    fn()
+  }
+  /** 生产 Session.write 的最小替身：FIX E 补裸回车走这里（单独 '\r' 不拆帧） */
+  write(data: string, _opts?: { markWorking?: boolean }) {
+    if (data !== '\r') return
+    this.nudges += 1
+    if (this.stuckInInput > 0 && this.stuckInInput !== Infinity) this.stuckInInput -= 1
+    if (this.stuckInInput === 0) this.stopRepaint() // 提交成功：输入框清空，marker 不再出现
+  }
+  private stopRepaint() {
+    if (this.repaint) {
+      clearInterval(this.repaint)
+      this.repaint = null
+    }
+  }
+  /** 测试收尾：清掉重绘定时器，防用例间泄漏拖住 runner */
+  dispose() {
+    this.stopRepaint()
+  }
+  sendline(text: string) {
+    this.sent.push(text)
+    this.lastWire = text
+    if (this.swallow > 0) {
+      this.swallow -= 1
+      return // 被吞：注入落进未就绪输入层，零回显
+    }
+    setTimeout(() => {
+      this.lastOutputAt = Date.now()
+      this.emit('output', text) // 回显整条 wire：尾部 nonce 可被验证窗捕获
+      if (this.stuckInInput > 0 && !this.repaint) {
+        // 滞留输入框：持续重绘，marker 反复出现 → FIX E 的提交门应判「未提交」并补回车
+        this.repaint = setInterval(() => {
+          if (this.stuckInInput > 0) this.emit('output', this.lastWire)
+          else this.stopRepaint()
+        }, 10)
+        this.repaint.unref?.()
+      }
+    }, 0)
+  }
+}
+
+function mockEchoManager(ids: string[]): { manager: unknown; sessions: Map<string, EchoSession> } {
+  const sessions = new Map(ids.map((id) => [id, new EchoSession(id)] as const))
+  const manager = {
+    list: () => ids.map((id) => ({ id, status: 'running' })),
+    get: (id: string) => {
+      const s = sessions.get(id)
+      if (!s) throw new Error(`会话不存在: ${id}`)
+      return s
+    },
+  }
+  return { manager, sessions }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 interface RecallResult {
   error?: Error
@@ -236,30 +326,36 @@ function stubRecall(result: RecallResult): { count: () => number; restore: () =>
   return { count: () => n, restore: () => { recallRunner.fn = orig } }
 }
 
-test('auto-recall：human→agent 正文先行，recall 完成后补注块（异步化）', async () => {
+test('auto-recall：human→agent 正文先行，正文回显确认后才补注块（FIX A 送达门）', async () => {
   const { rooms, roomId } = setup()
-  const { manager, sent } = mockManager(['sa'])
+  const { manager, sessions } = mockEchoManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
+  const sa = sessions.get('sa')!
   const stub = stubRecall({
     status: 0,
     stdout: JSON.stringify([{ id: 'm1', kind: 'fact', claim: '记忆条目内容甲', source: 'test' }]),
   })
   try {
     relay.postMessage(roomId, 'Owner', '大家看下这个报错')
-    assert.equal(sent['sa'].length, 1, '正文应立即注入，不等 recall')
-    assert.doesNotMatch(sent['sa'][0], /auto-recall/, '首条正文不再同步等 recall 块')
+    assert.equal(sa.sent.length, 1, '正文应立即注入，不等 recall')
+    assert.doesNotMatch(sa.sent[0], /auto-recall/, '首条正文不再同步等 recall 块')
     await settleRecall()
+    // FIX A 关键断言：recall 已完成但正文回显（40ms 验证窗）尚未确认——补注只缓存不注入。
+    // 旧行为在此刻直接补注，事故里就是它抢跑成了 qclaw 会话的首条消息。
+    assert.equal(sa.sent.length, 1, '正文回显确认前补注不得注入')
+    await sleep(150) // 越过回显验证窗(40)+FIX E 提交确认窗(30)：正文确认 → 送达门放行补注
   } finally {
     stub.restore()
   }
-  assert.equal(sent['sa'].length, 2, 'recall 命中后应补注一条')
-  assert.match(sent['sa'][1], /【auto-recall 命中 1：m1】/, '补注应含命中计数与记忆 id')
-  assert.match(sent['sa'][1], /- 记忆条目内容甲/, '补注应含 claim 截断行')
+  assert.equal(sa.sent.length, 2, '正文确认后应补注一条')
+  assert.match(sa.sent[1], /（auto-recall 补充，相关记忆供参考）/, '补注前缀不变')
+  assert.match(sa.sent[1], /【auto-recall 命中 1：m1】/, '补注应含命中计数与记忆 id')
+  assert.match(sa.sent[1], /- 记忆条目内容甲/, '补注应含 claim 截断行')
 })
 
-test('auto-recall：session→agent 含委派格式特征（交付物/owner）触发补注', async () => {
+test('auto-recall：session→agent 含委派格式特征（交付物/owner）正文确认后触发补注', async () => {
   const { rooms, roomId } = setup()
-  const { manager, sent } = mockManager(['sa', 'sb'])
+  const { manager, sessions } = mockEchoManager(['sa', 'sb'])
   const relay = new RoomRelay(rooms, manager as never, () => {})
   const stub = stubRecall({
     status: 0,
@@ -269,12 +365,14 @@ test('auto-recall：session→agent 含委派格式特征（交付物/owner）�
   try {
     relay.postMessage(roomId, 'A', '@B 这个活派给你：交付物是复核报告，owner 是你')
     await settleRecall()
+    await sleep(150) // 正文回显（40ms 验证窗）+ 提交确认（30ms）后送达门放行补注
     n = stub.count()
   } finally {
     stub.restore()
   }
-  assert.ok(sent['sb']?.length, 'B 应收到投递')
-  assert.match(sent['sb'][1], /【auto-recall 命中 1：m2】/, '委派消息应补注 recall 块')
+  const sb = sessions.get('sb')!
+  assert.ok(sb.sent.length, 'B 应收到投递')
+  assert.match(sb.sent[1], /【auto-recall 命中 1：m2】/, '委派消息应补注 recall 块')
   assert.equal(n, 1, '应跑一次 recall 子进程')
 })
 
@@ -707,4 +805,181 @@ test('Layer3：captureTick 交付物门槛——交付物 3 拍即收、开工�
   rows = projectDb.history(team, 10)
   assert.equal(rows.length, 2, '已收工会话超时兜底捕获不受门槛拦截')
   assert.equal(rows[rows.length - 1].body, '好', '短回复原样入房')
+})
+
+// ---- 2026-08-02 sc 派单×auto-recall 投递竞态（qclaw 58af1338 事故）回归 ----
+// 事故链：qclaw 冷 spawn 输入就绪滞后 ~28s，正文 3 次重发（8.0/17.2/26.4s）全落盲窗被吞；
+// recall 补注却在会话就绪后落地，成为 Stand 收到的第一条也是唯一一条消息，88 字胡答被
+// 自动捕获记成 completed。FIX A=补注过正文送达门；B=零输出就绪门；C=重试退避出盲窗；
+// D=回显耗尽如实记 failed。测试时序用文件头 env 收缩（验证窗 40ms、退避 0/15/25/35ms、门上限 250ms）。
+
+test('FIX C 重试预算：正文连吞两次后第三次落地，补注严格后于正文确认', async () => {
+  const { rooms, roomId, team } = setup()
+  const { manager, sessions } = mockEchoManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const sa = sessions.get('sa')!
+  sa.swallow = 2 // 前两次 sendline 落进「启动盲窗」零回显（事故形态；旧预算第 3 次是最后机会）
+  const stub = stubRecall({
+    status: 0,
+    stdout: JSON.stringify([{ id: 'mc', kind: 'fact', claim: '盲窗期先到的记忆', source: 'test' }]),
+  })
+  try {
+    relay.postMessage(roomId, 'Owner', '@A 复核一下部署脚本')
+    await settleRecall() // recall 先于正文送达完成（事故时序）
+    assert.equal(sa.sent.length, 1, '第 1 次注入已发出（被吞）')
+    assert.ok(!sa.sent.some((t) => t.includes('auto-recall 补充')), '正文未确认前补注不得出现')
+    await sleep(400) // 链：40 验证 + 15 退避 + 40 验证 + 25 退避 + 第 3 次回显 + 40 验证 + 30 提交确认 ≈ 190ms
+  } finally {
+    stub.restore()
+  }
+  const notes = sa.sent.filter((t) => t.includes('auto-recall 补充'))
+  assert.equal(sa.sent.length - notes.length, 3, '第 3 次重试落地（新预算 4 次内成功即停）')
+  assert.equal(notes.length, 1, '正文确认后补注恰好一次')
+  assert.equal(
+    sa.sent.findIndex((t) => t.includes('auto-recall 补充')),
+    sa.sent.length - 1,
+    '补注严格最后：绝不先于正文成为会话消息'
+  )
+  const d = projectDb.listDispatches(team)[0]
+  assert.equal(d.deliveries.find((x) => x.memberName === 'A')?.status, 'injected', '送达成功不误记 failed（FIX D 幂等闸回归）')
+  assert.equal(d.state, 'active', '等 A 回复：串行队列语义不变')
+})
+
+test('FIX A/D 正文耗尽：4 次全吞 → 补注丢弃、自动捕获锚撤销、delivery 如实记 failed、串行收单', async () => {
+  const { rooms, roomId, team } = setup()
+  const { manager, sessions } = mockEchoManager(['sa', 'sb'])
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const sa = sessions.get('sa')!
+  sa.swallow = Number.MAX_SAFE_INTEGER // 输入永不就绪：全部注入被吞
+  const stub = stubRecall({
+    status: 0,
+    stdout: JSON.stringify([{ id: 'mx', kind: 'fact', claim: '不该被孤注的记忆', source: 'test' }]),
+  })
+  const spy = spyLogs()
+  try {
+    relay.postMessage(roomId, 'Owner', '@A 这单会全程被吞')
+    await settleRecall()
+    await sleep(500) // 链：4×40ms 验证 + 15+25+35ms 退避 ≈ 235ms，全走完（终败不进提交门）
+  } finally {
+    spy.restore()
+    stub.restore()
+  }
+  assert.equal(sa.sent.length, 4, '新预算 4 次全部尝试（旧 3 次；无一是补注）')
+  assert.ok(!sa.sent.some((t) => t.includes('auto-recall 补充')), '正文终败：补注必须丢弃，绝不孤注成首条消息')
+  assert.ok(
+    spy.lines.some((l) => /正文未确认送达，recall 补注丢弃 A/.test(l)),
+    '应记补注丢弃 warn'
+  )
+  const r = relay as unknown as { pendingCapture: Map<string, unknown> }
+  assert.equal(r.pendingCapture.has('sa'), false, '自动捕获锚应撤销——无关回复不得再被记成完成（事故垃圾完成根断点）')
+  const d = projectDb.listDispatches(team)[0]
+  assert.equal(d.deliveries.find((x) => x.memberName === 'A')?.status, 'failed', 'FIX D：回显耗尽如实记 failed，不再谎报 injected')
+  assert.equal(d.state, 'done', '单收件人耗尽后如实收单，不冻死在幻影 current_target 上')
+  assert.equal(d.currentTarget, null)
+})
+
+test('FIX B 就绪门：spawn 后零输出不注入，首屏输出后才注入；recall 先到也只能等正文（事故端到端）', async () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create(`areco-boot${++seq}`)
+  rooms.addMember(room.id, { name: 'Q', kind: 'session', sessionId: 'sq' })
+  const { manager, sessions } = mockEchoManager(['sq'])
+  const sq = sessions.get('sq')!
+  sq.startedAt = Date.now() // 新 spawn：lastOutputAt(0) < startedAt → 就绪门生效
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const stub = stubRecall({
+    status: 0,
+    stdout: JSON.stringify([{ id: 'mq', kind: 'fact', claim: '先到的记忆', source: 'test' }]),
+  })
+  try {
+    relay.postMessage(room.id, 'Owner', '@Q 任务书正文')
+    await settleRecall() // 事故时序：recall（15:06:37.831）远早于会话就绪（15:07:05）完成
+    assert.equal(sq.sent.length, 0, '零输出盲窗期：正文不注入（就绪门拦住）')
+    await sleep(60)
+    assert.equal(sq.sent.length, 0, '盲窗持续期间仍不注入，补注也不得先行')
+    sq.lastOutputAt = Date.now()
+    sq.emit('output', 'qclaw 首屏就绪') // 首个输出：门放行 → onceQuiet → 注入
+    await sleep(150) // 正文回显 → 40ms 验证窗 → 30ms 提交确认 → 补注放行
+  } finally {
+    stub.restore()
+  }
+  assert.equal(sq.sent.length, 2, '首屏后正文+补注恰好各一')
+  assert.match(sq.sent[0], /任务书正文/, '第一条必须是正文')
+  assert.match(sq.sent[1], /auto-recall 补充/, '补注严格在正文回显确认之后')
+})
+
+test('FIX B 就绪门上限：始终零输出的哑会话到点强制放行，串行队列不挂死', async () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create(`areco-mute${++seq}`)
+  rooms.addMember(room.id, { name: 'M', kind: 'session', sessionId: 'sm' })
+  const { manager, sessions } = mockEchoManager(['sm'])
+  const sm = sessions.get('sm')!
+  sm.startedAt = Date.now()
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const stub = stubRecall({ status: 1, stdout: '' }) // recall 失败路径：settle(null) 清门即走
+  try {
+    relay.postMessage(room.id, 'Owner', '@M 哑会话兜底')
+    assert.equal(sm.sent.length, 0, '门上限（250ms）前不注入')
+    await sleep(400)
+  } finally {
+    stub.restore()
+  }
+  assert.ok(sm.sent.length >= 1, '上限到点退化为旧行为照常注入，不永久搁置')
+  assert.match(sm.sent[0], /哑会话兜底/)
+})
+
+// ---- 2026-08-04 FIX E：提交确认门（回显 ≠ 提交）----
+// 事故：单 C 的正文回显了（屏幕上 marker 在），但 sendline 尾回车在冷启动重绘中并帧沦为换行，
+// 正文一直躺在输入框里，会话 0 token 静止 40 分钟——而 relay 已按旧口径判「送达」。
+
+test('FIX E：文本滞留输入框（marker 反复重绘）→ 补裸回车后提交成功，判送达', async () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create(`areco-fixe1${++seq}`)
+  rooms.addMember(room.id, { name: 'S', kind: 'session', sessionId: 'ss' })
+  const { manager, sessions } = mockEchoManager(['ss'])
+  const ss = sessions.get('ss')!
+  ss.stuckInInput = 1 // 卡一次：补一个裸回车后提交
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const stub = stubRecall({
+    status: 0,
+    stdout: JSON.stringify([{ id: 'm1', kind: 'fact', claim: '记忆', source: 'test' }]),
+  })
+  try {
+    relay.postMessage(room.id, 'Owner', '@S 正文')
+    await sleep(260) // 回显 40 + 提交窗 30×N + 补注放行
+  } finally {
+    stub.restore()
+    ss.dispose()
+  }
+  assert.equal(ss.nudges, 1, '应恰好补一次裸回车（不滥补）')
+  assert.equal(ss.sent.length, 2, '提交确认后补注才放行：正文 + 补注')
+  assert.match(ss.sent[0], /正文/, '第一条是正文')
+  assert.match(ss.sent[1], /auto-recall 补充/, '补注严格后于提交确认')
+})
+
+test('FIX E：补满上限仍未提交 → 如实报未送达，补注被丢弃（不污染会话首条）', async () => {
+  const rooms = new RoomStore('Owner')
+  const room = rooms.create(`areco-fixe2${++seq}`)
+  rooms.addMember(room.id, { name: 'D', kind: 'session', sessionId: 'sd' })
+  const { manager, sessions } = mockEchoManager(['sd'])
+  const sd = sessions.get('sd')!
+  sd.stuckInInput = Infinity // 死会话：怎么补都提交不了
+  const relay = new RoomRelay(rooms, manager as never, () => {})
+  const stub = stubRecall({
+    status: 0,
+    stdout: JSON.stringify([{ id: 'm2', kind: 'fact', claim: '记忆', source: 'test' }]),
+  })
+  try {
+    relay.postMessage(room.id, 'Owner', '@D 正文')
+    await sleep(400) // 补满 ARECO_SUBMIT_MAX_NUDGES=2 次后终败
+  } finally {
+    stub.restore()
+    sd.dispose()
+  }
+  assert.equal(sd.nudges, 2, '补满上限即止，不无限补回车')
+  assert.equal(sd.sent.length, 1, '终败不放行补注——只有正文那一条 sendline')
+  assert.match(sd.sent[0], /正文/)
+  assert.ok(
+    !sd.sent.some((t) => /auto-recall 补充/.test(t)),
+    '正文未确认提交时补注必须被丢弃（否则重演 08-02 补注抢跑事故）'
+  )
 })
