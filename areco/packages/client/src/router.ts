@@ -25,6 +25,8 @@ export const router = createRouter({
     { path: '/tasks', component: () => import('./views/GroupChatView.vue'), meta: { roomKind: 'task' } },
     { path: '/projects', component: () => import('./views/GroupChatView.vue'), meta: { roomKind: 'project' } },
     { path: '/messages', redirect: '/tasks' },
+    // 微信会话（只读）：读 Hermes state.db 的 source=weixin，消「微信↔areco 割裂」的看得见那一半
+    { path: '/weixin', component: () => import('./views/WeixinView.vue') },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

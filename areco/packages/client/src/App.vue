@@ -61,6 +61,7 @@ function forceUpdate() {
               <router-link to="/tasks" class="nav-link" :class="{ active: route.path.startsWith('/tasks') }">任务</router-link>
               <router-link to="/projects" class="nav-link" :class="{ active: route.path.startsWith('/projects') }">项目</router-link>
               <router-link to="/history" class="nav-link" :class="{ active: route.path.startsWith('/history') }">历史</router-link>
+              <router-link to="/weixin" class="nav-link" :class="{ active: route.path.startsWith('/weixin') }">微信</router-link>
               <router-link to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">设置</router-link>
               <button class="nav-link theme-btn" type="button" :title="ui.theme === 'dark' ? '切到浅色' : '切到深色'" @click="ui.toggleTheme()">
                 {{ ui.theme === 'dark' ? '☀️' : '🌙' }}
