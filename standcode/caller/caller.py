@@ -8,6 +8,21 @@ Hermes 作为 Caller，接收 Client（微信）的请求，
 依赖: requests, sqlite3 (stdlib)
 """
 
+# ── 解释器自举（2026-08-04）：launchd 常驻服务（Hermes gateway 等）的 PATH 里裸 python3
+# = Xcode CLT 3.9，跑到下方 3.10+ 语法当场 TypeError（08-02~08-04 派活断档根因）。
+# <3.10 启动时就地 re-exec 到 brew 3.13；找不到才报人话退出。必须放在一切 import 之前。
+import os as _os
+import sys as _sys
+
+if _sys.version_info < (3, 10):
+    for _cand in ("/opt/homebrew/bin/python3.13", "/opt/homebrew/bin/python3"):
+        if _os.path.exists(_cand):
+            _os.execv(_cand, [_cand, _os.path.abspath(__file__)] + _sys.argv[1:])
+    raise SystemExit(
+        "standcode: 需 Python >= 3.10（当前 %d.%d；未找到 /opt/homebrew/bin/python3*，"
+        "brew install python）" % _sys.version_info[:2]
+    )
+
 import json
 import logging
 import os
