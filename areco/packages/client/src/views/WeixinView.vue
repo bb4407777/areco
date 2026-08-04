@@ -1,11 +1,13 @@
 <script setup lang="ts">
-// 微信会话列表（只读）：读 Hermes state.db 里 source=weixin 的会话。
+// 微信会话（只读）：读 Hermes state.db 里 source=weixin 的会话。
 // 消「微信与 areco 割裂」的看得见那一半——此前微信侧能派活给 areco，
 // 反过来在座舱里看不到微信在聊什么、派活的上下文是什么。
+// 排版与 GroupChatView（任务/项目）同构：左 230px 侧栏 + 右主区气泡流，复用同一套 CSS 变量。
 // 只读纪律见服务端 services/weixin-sessions.ts：DatabaseSync({readOnly:true}) 驱动层强制。
-import { computed, onMounted, ref, watch } from 'vue'
-import { NButton, NEmpty, NInput, NSpin, NTag, useMessage } from 'naive-ui'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { NButton, NEmpty, NInput, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
+import { useUiStore } from '../stores/ui'
 
 interface WeixinSessionRow {
   id: string
@@ -32,6 +34,7 @@ interface WxPart {
 interface WxMsg {
   role: string
   parts?: WxPart[]
+  timestamp?: number | null
 }
 interface WxTranscriptPage {
   exists: boolean
@@ -42,6 +45,8 @@ interface WxTranscriptPage {
 
 const PAGE = 30
 const message = useMessage()
+const ui = useUiStore()
+
 const rows = ref<WeixinSessionRow[]>([])
 const total = ref(0)
 const hasMore = ref(false)
@@ -49,20 +54,31 @@ const loading = ref(true)
 const loadingMore = ref(false)
 const q = ref('')
 const selected = ref<string | null>(null)
+// 移动端：侧栏浮层，选中会话后自动收起（与 GroupChatView 同行为）
+const sideOpen = ref(true)
 
-// 对话正文（右栏）
 const msgs = ref<WxMsg[]>([])
 const msgLoading = ref(false)
 const msgHasMore = ref(false)
+const scroller = ref<HTMLElement | null>(null)
 let cursor = 0
 
 const qTrim = computed(() => q.value.trim())
+const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
+const sideVisible = computed(() => (ui.isMobile ? sideOpen.value : true))
 
-function fmtTime(ts: number | null): string {
-  if (!ts) return '—'
+function fmtTime(ts: number | null | undefined): string {
+  if (!ts) return ''
   const d = new Date(ts < 1e11 ? ts * 1000 : ts)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+/** 角色 → 气泡右对齐：user 视作「自己」，与任务/项目里人类发言同侧 */
+function isSelf(role: string): boolean {
+  return role === 'user'
+}
+function roleLabel(role: string): string {
+  return role === 'user' ? '我' : role === 'assistant' ? 'Hermes' : role
 }
 
 async function load(reset = true) {
@@ -88,11 +104,14 @@ async function open(id: string) {
   msgs.value = []
   cursor = 0
   msgLoading.value = true
+  if (ui.isMobile) sideOpen.value = false
   try {
     const page = await api.get<WxTranscriptPage>(`/api/weixin/sessions/${encodeURIComponent(id)}/transcript?cursor=0`)
     msgs.value = page.messages
     cursor = page.cursor
     msgHasMore.value = page.hasMore
+    await nextTick()
+    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
   } catch (err) {
     message.error(`加载对话失败：${(err as Error).message}`)
   } finally {
@@ -127,66 +146,59 @@ onMounted(() => void load(true))
 </script>
 
 <template>
-  <div class="wx-wrap">
-    <div class="wx-list">
-      <div class="wx-head">
-        <span class="wx-title">微信会话</span>
-        <span class="wx-count">{{ total }} 个</span>
+  <div class="weixin">
+    <div v-if="ui.isMobile && sideOpen" class="rooms-mask" @click="sideOpen = false" />
+    <aside class="rooms" :class="{ open: sideVisible, overlay: ui.isMobile }">
+      <div class="rooms-head">
+        <span class="rooms-title">微信会话</span>
+        <span class="rooms-count">{{ total }}</span>
       </div>
-      <NInput v-model:value="q" placeholder="搜标题或会话 id" clearable size="small" class="wx-search" />
-      <NSpin v-if="loading" class="wx-spin" />
-      <NEmpty v-else-if="!rows.length" description="没有微信会话" class="wx-spin" />
-      <template v-else>
-        <div
-          v-for="r in rows"
-          :key="r.id"
-          class="wx-item"
-          :class="{ active: selected === r.id }"
-          @click="open(r.id)"
-        >
-          <div class="wx-item-top">
-            <span class="wx-item-title">{{ r.title || '（无题）' }}</span>
-            <NTag size="tiny" :bordered="false">{{ r.messageCount }}</NTag>
+      <NInput v-model:value="q" placeholder="搜标题 / 会话 id" clearable size="small" class="rooms-search" />
+      <div class="rooms-list">
+        <NSpin v-if="loading" class="rooms-empty" />
+        <NEmpty v-else-if="!rows.length" description="没有微信会话" class="rooms-empty" />
+        <template v-else>
+          <div v-for="r in rows" :key="r.id" class="cat-head" :class="{ active: selected === r.id }">
+            <button class="cat-open" :title="r.title || r.id" @click="open(r.id)">
+              <span class="room-dot" :style="{ background: r.endReason ? 'var(--faint)' : 'var(--accent)' }" />
+              <span class="room-name">{{ r.title || '（无题）' }}</span>
+              <span class="badge">{{ r.messageCount }}</span>
+            </button>
           </div>
-          <div class="wx-item-sub">
-            <span>{{ fmtTime(r.startedAt) }}</span>
-            <span class="wx-model">{{ r.model || '—' }}</span>
-          </div>
-        </div>
-        <NButton v-if="hasMore" size="small" quaternary :loading="loadingMore" block @click="load(false)">
-          加载更多
-        </NButton>
-      </template>
-    </div>
-
-    <div class="wx-detail">
-      <NEmpty v-if="!selected" description="选左侧一个会话查看对话" class="wx-spin" />
-      <template v-else>
-        <NSpin v-if="msgLoading && !msgs.length" class="wx-spin" />
-        <div v-else class="wx-msgs">
-          <div v-for="(m, i) in msgs" :key="i" class="wx-msg">
-            <div class="wx-role">{{ m.role }}</div>
-            <div class="wx-parts">
-              <div v-for="(p, j) in m.parts || []" :key="j" class="wx-part">
-                <template v-if="p.kind === 'text'">
-                  <pre class="wx-text">{{ p.text }}</pre>
-                </template>
-                <template v-else-if="p.kind === 'tool_use'">
-                  <div class="wx-tool">🔧 {{ p.name }}</div>
-                  <pre class="wx-text dim">{{ p.text }}</pre>
-                </template>
-                <template v-else>
-                  <div class="wx-tool" :class="{ err: p.isError }">
-                    {{ p.isError ? '⚠️ 工具报错' : '↩︎ 工具结果' }}
-                  </div>
-                  <pre class="wx-text dim">{{ p.text }}</pre>
-                </template>
-              </div>
-            </div>
-          </div>
-          <NButton v-if="msgHasMore" size="small" quaternary :loading="msgLoading" block @click="loadMoreMsgs">
-            加载更多消息
+          <NButton v-if="hasMore" size="tiny" quaternary :loading="loadingMore" block @click="load(false)">
+            加载更多
           </NButton>
+        </template>
+      </div>
+    </aside>
+
+    <div class="main">
+      <div class="main-head">
+        <button v-if="ui.isMobile" class="side-toggle" @click="sideOpen = true">☰</button>
+        <span class="main-title">{{ current ? current.title || '（无题）' : '微信' }}</span>
+        <span v-if="current" class="main-sub">{{ current.model }} · {{ fmtTime(current.startedAt) }}</span>
+      </div>
+
+      <NEmpty v-if="!selected" description="选左侧一个会话查看对话" class="main-empty" />
+      <template v-else>
+        <NSpin v-if="msgLoading && !msgs.length" class="main-empty" />
+        <div v-else ref="scroller" class="msgs">
+          <NButton v-if="msgHasMore" size="tiny" quaternary :loading="msgLoading" class="more-btn" @click="loadMoreMsgs">
+            加载更早的消息
+          </NButton>
+          <div v-for="(m, i) in msgs" :key="i" class="msg" :class="{ self: isSelf(m.role) }">
+            <div class="msg-meta">
+              <span>{{ roleLabel(m.role) }}</span>
+            </div>
+            <div class="bubble">
+              <template v-for="(p, j) in m.parts || []" :key="j">
+                <span v-if="p.kind === 'text'">{{ p.text }}</span>
+                <span v-else-if="p.kind === 'tool_use'" class="tool">🔧 {{ p.name }}<span v-if="p.text" class="tool-body">{{ p.text }}</span></span>
+                <span v-else class="tool" :class="{ err: p.isError }">{{ p.isError ? '⚠️ 工具报错' : '↩︎ 工具结果' }}<span v-if="p.text" class="tool-body">{{ p.text }}</span></span>
+              </template>
+            </div>
+            <div class="msg-foot"><span class="time">{{ fmtTime(m.timestamp) }}</span></div>
+          </div>
         </div>
       </template>
     </div>
@@ -194,109 +206,241 @@ onMounted(() => void load(true))
 </template>
 
 <style scoped>
-.wx-wrap {
+.weixin {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  height: 100%;
-  overflow: hidden;
+  position: relative;
 }
-.wx-list {
-  width: 300px;
-  flex: none;
-  border-right: 1px solid var(--ar-border, #2a2a2a);
-  overflow-y: auto;
-  padding: 8px;
+
+/* ---- 左侧栏：与 GroupChatView .rooms 同尺寸同变量 ---- */
+.rooms {
+  width: 230px;
+  flex: 0 0 auto;
+  border-right: 1px solid var(--border);
+  background: var(--bar);
+  display: none;
+  flex-direction: column;
 }
-.wx-head {
+.rooms.open {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 4px 4px 8px;
 }
-.wx-title {
-  font-weight: 600;
+.rooms.overlay {
+  position: absolute;
+  z-index: 20;
+  inset: 0 auto 0 0;
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
 }
-.wx-count {
-  font-size: 12px;
-  opacity: 0.6;
+.rooms-mask {
+  position: absolute;
+  z-index: 10;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
 }
-.wx-search {
-  margin-bottom: 8px;
-}
-.wx-spin {
-  margin: 32px auto;
-  display: block;
-}
-.wx-item {
-  padding: 8px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.wx-item:hover {
-  background: var(--ar-hover, rgba(255, 255, 255, 0.06));
-}
-.wx-item.active {
-  background: var(--ar-active, rgba(255, 255, 255, 0.12));
-}
-.wx-item-top {
+.rooms-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
 }
-.wx-item-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.rooms-title {
+  font-weight: 600;
 }
-.wx-item-sub {
-  display: flex;
-  justify-content: space-between;
+.rooms-count {
   font-size: 11px;
-  opacity: 0.55;
-  margin-top: 2px;
+  color: var(--muted);
 }
-.wx-model {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 55%;
+.rooms-search {
+  /* 同 GroupChatView：naive NInput 根节点自带 width:100%，叠加水平 margin 会溢出侧栏；
+     改 width:auto + flex 列 stretch，自动收成栏宽减边距 */
+  margin: 6px 8px 0;
+  width: auto;
+  align-self: stretch;
 }
-.wx-detail {
+.rooms-list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 16px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-.wx-msg {
-  margin-bottom: 14px;
+.rooms-empty {
+  margin-top: 40px;
 }
-.wx-role {
+.cat-head {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  border-radius: 7px;
+  color: var(--muted);
+  padding: 0 6px;
+}
+.cat-head:hover {
+  background: var(--hover);
+}
+.cat-head.active {
+  background: var(--hover);
+  color: var(--text);
+}
+.cat-open {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.room-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.room-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badge {
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 17px;
+  border-radius: 9px;
+  background: var(--chip-bg);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 17px;
+  text-align: center;
+  padding: 0 5px;
+}
+
+/* ---- 右主区：气泡流，与 GroupChatView .main/.msg/.bubble 同构 ---- */
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.main-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.main-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.main-sub {
   font-size: 11px;
-  opacity: 0.55;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-toggle {
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px 0 0;
+}
+.main-empty {
+  margin-top: 60px;
+}
+.msgs {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.more-btn {
+  align-self: center;
+}
+.msg {
+  max-width: 78%;
+  align-self: flex-start;
+}
+.msg.self {
+  align-self: flex-end;
+  text-align: right;
+}
+.msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
   margin-bottom: 3px;
 }
-.wx-text {
-  margin: 0;
+.msg.self .msg-meta {
+  justify-content: flex-end;
+}
+.bubble {
+  display: inline-block;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: var(--chip-bg);
+  border-left: 3px solid transparent;
+  text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.5;
 }
-.wx-text.dim {
-  opacity: 0.7;
+.msg.self .bubble {
+  background: var(--bubble-user-bg);
+  border: 1px solid var(--bubble-user-border);
+}
+.msg-foot {
+  display: flex;
+  align-items: center;
+  margin-top: 3px;
+}
+.msg.self .msg-foot {
+  justify-content: flex-end;
+}
+.msg-foot .time {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.msg.self .msg-foot .time {
+  margin-left: 0;
+}
+.tool {
+  display: block;
   font-size: 12px;
-  max-height: 220px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.tool.err {
+  color: #e08a8a;
+}
+.tool-body {
+  display: block;
+  margin-top: 2px;
+  max-height: 200px;
   overflow: auto;
-}
-.wx-tool {
   font-size: 12px;
-  opacity: 0.75;
-  margin: 4px 0 2px;
-}
-.wx-tool.err {
-  color: #e88;
-}
-.wx-part + .wx-part {
-  margin-top: 6px;
+  color: var(--faint);
+  white-space: pre-wrap;
 }
 </style>
