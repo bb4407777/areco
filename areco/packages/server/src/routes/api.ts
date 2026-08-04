@@ -2,6 +2,7 @@
 import Router from '@koa/router'
 import type { ApiControllers } from '../controllers/api'
 import type { RoomControllers } from '../controllers/rooms'
+import { weixinList, weixinTranscript } from '../controllers/weixin'
 
 export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router {
   const router = new Router({ prefix: '/api' })
@@ -50,6 +51,11 @@ export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router 
   router.get('/sessions/:id/screen', c.screen)
   router.post('/sessions/:id/input', c.sessionInput)
   router.get('/stats', c.stats)
+
+  // Hermes 微信会话只读视图（作业单 A，2026-08-04）：只读 state.db，不回填本地表。
+  // 独立 controller 模块（不并入 ApiControllers），仅新增只读端点，不改既有路由/控制器。
+  router.get('/weixin/sessions', weixinList)
+  router.get('/weixin/sessions/:id/transcript', weixinTranscript)
 
   router.get('/history', c.historyList)
   router.get('/history/:source/:project/:id/transcript', c.historyTranscript)
