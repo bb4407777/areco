@@ -20,6 +20,7 @@ import { RoomRelay } from './services/room-relay'
 import { RoomControllers } from './controllers/rooms'
 import { createAuthRouter } from './routes/auth'
 import { createApiRouter } from './routes/api'
+import { createHermesWebhookMiddleware, createHermesEventsRouter } from './controllers/webhooks-hermes'
 import { createHostOriginGuard, createApiKeyGuard, createSessionGuard } from './middleware/auth'
 import { Gateway } from './ws/gateway'
 import { FileService } from './services/files'
@@ -116,6 +117,16 @@ async function main() {
   })
 
   app.use(createHostOriginGuard(config))
+  // Hermes outbound webhook 收端（F2·台账#12）：必须挂在 bodyParser 之前——HMAC 验签要对
+  // raw body 原始字节重算，bodyParser 会消费流。HMAC 即该端点完整鉴权（Host 守卫保留在前），
+  // 不进 /api 路由表、不吃 cookie/apiKey 守卫（设计依据 03-webhook观察面-设计说明 §2.2）
+  app.use(
+    createHermesWebhookMiddleware({
+      getSecret: () => config.webhooks?.hermesSecret,
+      relay: roomRelay,
+      getObserverRoomId: () => config.webhooks?.observerRoomId,
+    })
+  )
   app.use(bodyParser({ enableTypes: ['json', 'form'], jsonLimit: '1mb', formLimit: '256kb', encoding: 'utf-8' }))
 
   // public：登录/登出（守卫之前注册 = 注册顺序式鉴权）
@@ -129,6 +140,10 @@ async function main() {
   app.use(createSessionGuard(auth))
   const apiRouter = createApiRouter(controllers, roomControllers)
   app.use(apiRouter.routes()).use(apiRouter.allowedMethods())
+  // Hermes webhook 事件只读查询（F2）：会话守卫之后 = 吃 cookie/X-API-Key 既有鉴权；
+  // 独立模块自带路由（同 weixin.ts 独立控制器风格），X-API-Key 放行面在 middleware/auth.ts isApiKeyScope
+  const hermesEventsRouter = createHermesEventsRouter()
+  app.use(hermesEventsRouter.routes()).use(hermesEventsRouter.allowedMethods())
 
   // 静态资源 + SPA fallback（CLIENT_DIR 按包布局探测——npm 安装时产物在包内，不在数据根）
   const clientDir = CLIENT_DIR

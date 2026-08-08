@@ -44,6 +44,10 @@ export interface AppConfig {
   /** 对话模式显示开关 + 新建会话模式（设置页编辑，GET/PUT /api/ui/prefs）。服务端为 SoT，
    *  浏览器 localStorage 仅作缓存；缺省 = 未显式设置，客户端回落本地默认 */
   ui?: UiPrefs
+  /** Hermes outbound webhook 观察面（F2·台账#12）：hermesSecret = HMAC 共享密钥（与 gateway 侧
+   *  env HERMES_OUTBOUND_WEBHOOK_SECRET 同值），缺省 = 收端 503 拒裸收；observerRoomId =
+   *  关键事件升格的目标项目房 id，缺省用控制器内 father 房默认值 */
+  webhooks?: { hermesSecret?: string; observerRoomId?: string }
 }
 
 const HOME = process.env.HOME || '/'
@@ -188,6 +192,16 @@ export function loadConfig(): AppConfig {
       }
       if (rawUi.spawnMode === 'role' || rawUi.spawnMode === 'template') ui.spawnMode = rawUi.spawnMode
       return Object.keys(ui).length ? { ui } : {}
+    })(),
+    // webhooks 同 standcode 口径：白名单拷贝必须带上（只收两个字符串键），
+    // 漏掉 = 重启剥字段 + 下次设置页保存回写把 HMAC secret 永久丢失 → 收端 503 自闭
+    ...(() => {
+      const rawWh = (raw.webhooks ?? {}) as { hermesSecret?: unknown; observerRoomId?: unknown }
+      const wh: { hermesSecret?: string; observerRoomId?: string } = {}
+      if (typeof rawWh.hermesSecret === 'string' && rawWh.hermesSecret.trim()) wh.hermesSecret = rawWh.hermesSecret.trim()
+      if (typeof rawWh.observerRoomId === 'string' && rawWh.observerRoomId.trim())
+        wh.observerRoomId = rawWh.observerRoomId.trim()
+      return Object.keys(wh).length ? { webhooks: wh } : {}
     })(),
   }
   if (!fs.existsSync(CONFIG_PATH)) saveConfig(config)

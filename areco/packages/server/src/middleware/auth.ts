@@ -130,7 +130,9 @@ function isApiKeyScope(path: string): boolean {
     path.startsWith('/api/rooms') ||
     path.startsWith('/api/config/whitelist') ||
     // StandCode 角色默认：caller.py 等程序化客户端需读（不泄露凭证，风险与 rooms 同级）
-    path.startsWith('/api/standcode')
+    path.startsWith('/api/standcode') ||
+    // Hermes webhook 事件只读查询（F2 观察面）：father 巡检脚本程序化拉取，风险与 rooms 同级
+    path.startsWith('/api/webhooks/hermes')
   )
 }
 export function createApiKeyGuard(config: AppConfig) {
