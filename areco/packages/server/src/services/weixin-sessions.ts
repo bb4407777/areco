@@ -192,6 +192,71 @@ function paginate(messages: TranscriptMessage[], opts: { cursor?: number; before
 
 // ---- 行 → 摘要 / 小工具 ----
 
+// ---- 跨会话全文搜索 ----
+
+export interface WeixinSearchHit {
+  sessionId: string
+  sessionTitle: string | null
+  sessionStartedAt: number | null
+  role: string
+  timestamp: number | null
+  snippet: string
+}
+
+const SEARCH_MAX_Q = 100
+const SEARCH_CTX = 60
+
+function escapeLike(q: string): string {
+  return q.replace(/[\\%_]/g, (c) => `\\${c}`)
+}
+
+function snippetOf(text: string, q: string): string {
+  const src = text.replace(/\s+/g, ' ').trim()
+  if (!src) return ''
+  const idx = src.toLowerCase().indexOf(q.toLowerCase())
+  if (idx < 0) return src.slice(0, SEARCH_CTX * 2)
+  const start = Math.max(0, idx - SEARCH_CTX)
+  const end = Math.min(src.length, idx + q.length + SEARCH_CTX)
+  return (start > 0 ? '…' : '') + src.slice(start, end) + (end < src.length ? '…' : '')
+}
+
+/** 跨会话搜微信对话正文（只搜 user/assistant 的 content，不搜 tool 角色和 tool_calls JSON 噪音）。
+ *  按消息时间倒序，最多 limit 条。 */
+export function searchWeixinMessages(q: string, opts: { limit?: number } = {}): WeixinSearchHit[] {
+  const query = q.trim().slice(0, SEARCH_MAX_Q)
+  if (!query) return []
+  const limit = Math.min(100, Math.max(1, opts.limit ?? 50))
+  const like = `%${escapeLike(query)}%`
+  const db = openDb()
+  try {
+    const rows = db
+      .prepare(
+        `SELECT m.session_id, m.role, m.content, m.timestamp, s.title, s.started_at
+           FROM messages m JOIN sessions s ON s.id = m.session_id
+          WHERE s.source = ? AND m.active = 1
+            AND m.role IN ('user', 'assistant')
+            AND m.content LIKE ? ESCAPE '\\'
+          ORDER BY m.timestamp DESC LIMIT ?`,
+      )
+      .all(SOURCE, like, limit) as Array<Record<string, unknown>>
+    return rows.map((r) => {
+      const content = typeof r.content === 'string' ? r.content : ''
+      return {
+        sessionId: String(r.session_id ?? ''),
+        sessionTitle: strOrNull(r.title),
+        sessionStartedAt: toMs(r.started_at),
+        role: typeof r.role === 'string' ? r.role : '',
+        timestamp: toMs(r.timestamp),
+        snippet: snippetOf(content, query),
+      }
+    })
+  } finally {
+    db.close()
+  }
+}
+
+// ---- 行 → 摘要 / 小工具（续）----
+
 function toSummary(r: Record<string, unknown>): WeixinSessionSummary {
   return {
     id: String(r.id ?? ''),

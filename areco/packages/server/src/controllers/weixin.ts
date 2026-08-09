@@ -5,7 +5,7 @@
 // 故独立成模块，在 routes/api.ts 直接 import 注册（routes 文件仍是「URL → controller 映射，
 // 零业务」）。全部只读，不触发任何写库或重启。
 import type { Context } from 'koa'
-import { listWeixinSessions, readWeixinTranscript } from '../services/weixin-sessions'
+import { listWeixinSessions, readWeixinTranscript, searchWeixinMessages } from '../services/weixin-sessions'
 
 function ok(ctx: Context, data: unknown): void {
   ctx.body = { ok: true, data }
@@ -24,6 +24,18 @@ export function weixinList(ctx: Context): void {
     const offset = Number(ctx.query.offset ?? 0) || 0
     const q = typeof ctx.query.q === 'string' ? ctx.query.q : undefined
     ok(ctx, listWeixinSessions({ limit, offset, q }))
+  } catch (err) {
+    fail(ctx, 500, 'weixin_read_failed', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** GET /api/weixin/search?q=&limit=
+ *  跨会话全文搜微信消息（正文 + tool_calls），按消息时间倒序。空关键词返回空数组。 */
+export function weixinSearch(ctx: Context): void {
+  try {
+    const q = typeof ctx.query.q === 'string' ? ctx.query.q : ''
+    const limit = Number(ctx.query.limit ?? 50) || 50
+    ok(ctx, searchWeixinMessages(q, { limit }))
   } catch (err) {
     fail(ctx, 500, 'weixin_read_failed', err instanceof Error ? err.message : String(err))
   }

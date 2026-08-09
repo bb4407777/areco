@@ -13,7 +13,7 @@ import { useUiStore } from '../stores/ui'
 import { useMessage } from 'naive-ui'
 import { wsClient } from '../ws'
 
-const props = defineProps<{ message: TranscriptMessage; agentLabel?: string; sessionId?: string; interactive?: boolean }>()
+const props = defineProps<{ message: TranscriptMessage; agentLabel?: string; sessionId?: string; interactive?: boolean; highlight?: string; highlightActive?: boolean }>()
 const emit = defineEmits<{ preview: [path: string] }>()
 const ui = useUiStore()
 
@@ -170,7 +170,44 @@ const md = new MarkdownIt({
 const time = computed(() => (props.message.timestamp ? fmtFullTime(props.message.timestamp) : ''))
 
 function render(text: string): string {
-  return md.render(text)
+  let html = md.render(text)
+  const kw = props.highlight?.trim()
+  if (kw) html = highlightInHtml(html, kw, props.highlightActive)
+  return html
+}
+
+/**
+ * 在 markdown-it 渲染后的 HTML 里把关键词包进 <mark>。
+ * 安全前提：md 已 html:false 转义过原文，HTML 实体都在标签外纯文本里。
+ * 算法：按 < > 拆 token，标签内部（<>里）原样跳过，标签间的文本段做大小写不敏感替换。
+ */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+function highlightInHtml(html: string, kw: string, active: boolean): string {
+  const cls = active ? 'hl hl-now' : 'hl'
+  const re = new RegExp(escapeRegex(kw), 'gi')
+  let out = ''
+  // 逐字符扫描：标签内原样，标签外匹配关键词
+  for (let i = 0; i < html.length; ) {
+    const ch = html[i]
+    if (ch === '<') {
+      const close = html.indexOf('>', i)
+      if (close < 0) {
+        out += html.slice(i)
+        break
+      }
+      out += html.slice(i, close + 1)
+      i = close + 1
+    } else {
+      // 取到下一个 < 为止的纯文本段
+      const next = html.indexOf('<', i)
+      const seg = next < 0 ? html.slice(i) : html.slice(i, next)
+      out += seg.replace(re, (m) => `<mark class="${cls}">${m}</mark>`)
+      i = next < 0 ? html.length : next
+    }
+  }
+  return out
 }
 </script>
 
@@ -336,6 +373,18 @@ function render(text: string): string {
 }
 .md :deep(a) {
   color: var(--accent);
+}
+/* 查找命中关键词高亮（WeixinView 查找功能传入 highlight prop） */
+.md :deep(mark.hl) {
+  background: #fce8a6;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* 当前命中：红色醒目 */
+.md :deep(mark.hl-now) {
+  background: #ff4444;
+  color: #fff;
 }
 .md :deep(table) {
   /* GitHub 式：表格自带横向滚动，宽表不再凸出气泡（气泡无 overflow 裁剪，表格固有宽度会直接顶穿） */
