@@ -56,6 +56,11 @@
       "model_id": "kimi-code/k3",
       "description": "Kimi K3（kimi CLI）"
     },
+    "kimi-glm52": {
+      "provider": "kimi-code",
+      "model_id": "glm/glm-5.2",
+      "description": "GLM-5.2 经 Kimi Code CLI（智谱直连 ~/.kimi-code OAuth；kimi config.toml models 表 glm/glm-5.2 alias）"
+    },
     "gpt-5.6-sol": {
       "provider": "freemodel",
       "model_id": "gpt-5.6-sol",

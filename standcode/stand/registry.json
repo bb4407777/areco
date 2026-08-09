@@ -52,6 +52,11 @@
       "role": "thinker"
     },
     {
+      "id": "kimi-glm52",
+      "name": "Kimi Code GLM-5.2",
+      "role": "worker"
+    },
+    {
       "id": "claude-agnes25flash",
       "name": "Claude Code Agnes 2.5 Flash",
       "role": "worker"
