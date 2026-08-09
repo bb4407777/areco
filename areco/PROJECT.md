@@ -4,6 +4,13 @@
 
 ## 工作纪要
 
+### 2026-08-04 微信页气泡统一 + 跨会话查找（kimi CLI 会话起，08-05 Fable5 收尾核验；本条为终态，覆盖中途各版定调）
+- **气泡统一**：高律师令「微信界面气泡跟会话对话模式不一样，换好看的」。WeixinView.vue 删掉自绘 .bubble/.msg/.tool 约 90 行 CSS，改为直接复用会话对话模式同一个 `ChatMessage.vue` 组件（WxMsg→TranscriptMessage 映射：tool_use 的 text→input、秒/毫秒时间戳→ISO）。气泡样式从此单源，对话模式再调样式微信页自动跟上。容器间距对齐 TranscriptView `.stream`（padding 10px 0、无 gap）。
+- **查找（终态：跨会话、新→旧）**：头部搜索框**输入即搜**（防抖 300ms），服务端 `GET /api/weixin/search?q=` 跨全部微信会话搜正文——SQL 只搜 `role IN ('user','assistant')` 的 content，**不搜 tool 角色与 tool_calls**（初版双列 LIKE 命中 75% 是工具 JSON 噪音，按「搜索匹配不准确」反馈收窄；`%_` ESCAPE 字面化），按消息时间新→旧返回 ≤100 条。命中自动跳对应会话并滚动到关键词：全部命中黄底 `mark.hl`、当前命中红底白字 `mark.hl-now`；定位 = timestamp±1s + role + text 段含词三重匹配（只看 text part——工具折叠块不高亮、不参与定位）。**回车/↑ = 更早的命中，↓ = 更新的命中**（循环、n/N 计数；08-05 收尾时修正 ↑/↓ tooltip 与两处注释文案方向写反的笔误，行为未动）。ChatMessage.vue 新增可选 `highlight`/`highlightActive` prop（不传零影响其他页面），高亮在 md 渲染（html:false 已转义）之后做标签感知替换、只碰标签间纯文本。
+- **全量加载 + 分页 bug 根修**：打开会话即 `before=start` 链式向前翻完所有页（删「加载更早」按钮）。根因：前端原用 `cursor=N` 续页，而服务端 paginate 协议是首页 cursor=0、后续必须 `before=start`——cursor=132 时 slice(132)=空数组，132 条永远只显示尾页 80 条。修后实测 132/132 全量可见。
+- **验证**：`npm run build`（vue-tsc+vite+server）全过；tsx 直调服务实测角色过滤/通配符字面化/空词空返回。08-05 收尾线上核验：8790 已于 13:47 重启（携新端点，无重启遗留）——工具专属词 `tbliXPMNN3`/`DatabaseSync` 实测 0 命中、正文词正常命中；dist server bundle 含 `/weixin/search`、client chunk 含 `hl-now`。
+- **改动 5 文件，deploy 树与 dev 仓 `/Users/gao/Code/StandCode/areco/` 已逐字同步、均未 commit**：WeixinView.vue、ChatMessage.vue、services/weixin-sessions.ts、controllers/weixin.ts、routes/api.ts。**下次向 deploy rsync/部署前先在 dev 仓 commit 这 5 个文件，否则搜索功能会被旧产物覆盖。**
+
 ### 2026-08-01 Hermes：角色统一 + 新建会话固定模板 + 自动保存
 - 高律师令：角色统一为 Caller/Thinker/Worker（快速/重活 Worker 退役，重活并入 Thinker=kimi-k3）；新建会话去掉角色模式只留模板；角色设置改完自动保存（删保存按钮）
 - 改动（dev 仓 commit）：SpawnDialog.vue 重写为纯模板；SettingsView.vue 角色砍 3 行+@update:value 自动保存+删新建会话模式选项；ui.ts 默认 spawnMode=template 且不再读服务端残留键+删 setSpawnMode；useSpawnWorker.ts HANDOFF_ROLES 砍两档
