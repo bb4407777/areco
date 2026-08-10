@@ -254,7 +254,8 @@ export class SessionManager extends EventEmitter {
     })
     // 官方 WorkBuddy harness 支持 --session-id：启动前钉死原生 UUID，彻底取消新会话的
     // “同 cwd + 时间窗 + 首句”事后认亲。桥接 GPT-5.6 未声明 harness，仍由 PTY 输出直绑。
-    const nativeWorkbuddyId = template.harness === 'workbuddy'
+    // workbuddy-stand 适配层同款（2026-08-10 加：codebuddy-stand 内部消费同款身份参数）。
+    const nativeWorkbuddyId = template.harness === 'workbuddy' || template.harness === 'workbuddy-stand'
       ? resumeAgentId || crypto.randomUUID()
       : null
     // 非 workbuddy 的原生恢复（kimi -S 经 extraArgs）续写的是旧会话文件，birth 远在本卡

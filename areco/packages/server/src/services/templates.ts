@@ -127,7 +127,8 @@ export function buildSpawnSpec(
   const identityArgs: string[] = []
   // WorkBuddy CLI 原生支持确定性 UUID。只按显式 harness 注入：GPT-5.6 bridge 虽也叫 codebuddy，
   // 但使用自己的 --resume 协议且会从 PTY 输出回报 UUID，不能误塞官方 CLI 的 --session-id。
-  if (template.harness === 'workbuddy' && opts.agentSessionId) {
+  // workbuddy-stand 适配层同款支持（2026-08-10 加：TUI 直挂与 procvis 薄适配层双 harness 并存）。
+  if ((template.harness === 'workbuddy' || template.harness === 'workbuddy-stand') && opts.agentSessionId) {
     identityArgs.push(opts.resumeAgent ? '--resume' : '--session-id', opts.agentSessionId)
   }
   const args = [...baseArgs, ...identityArgs, ...(opts.extraArgs ?? [])]
