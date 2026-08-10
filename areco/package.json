@@ -1,11 +1,11 @@
 {
   "name": "areco",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "private": false,
   "publishConfig": {
     "access": "public"
   },
-  "repository": "github:bb4407777/standcode",
+  "repository": "github:bb4407777/areco",
   "homepage": "https://github.com/bb4407777/areco#readme",
   "bugs": "https://github.com/bb4407777/areco/issues",
   "license": "Apache-2.0",
