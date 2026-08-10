@@ -22,6 +22,13 @@ const STOP_GRACE_MS = 5000
 const DEFAULT_COLS = 100
 const DEFAULT_ROWS = 30
 
+/**
+ * 按 stdin 行切任务的 stand 适配器 harness：一条任务必须是「一行」，多行正文会被切碎成
+ * 多次独立派发（2026-08-10 hy3 长输入被切成 3 段实证）。sendline 对这类 harness 把内部
+ * 换行压成「；」——与房间注入的「多行→单行」口径一致。
+ */
+const LINE_DISPATCH_HARNESSES = new Set(['workbuddy-stand', 'openclaw'])
+
 export interface SessionSnapshot {
   epoch: number
   data: string
@@ -292,7 +299,13 @@ export class Session extends EventEmitter {
     // 尾部 CR/LF 一律剥掉，回车由本方法统一补一个：否则文本带尾回车时 write() 的尾回车
     // 拆分分支（见下）会再补一个，两个 \r 前后脚到达——codex 表现为"要按两次 enter"，
     // 或两回车并帧被 TUI 当粘贴、后一个沦为换行（2026-07-23 维护者报障 #1/#2 同源）。
-    const body = text.replace(/[\r\n]+$/, '')
+    let body = text.replace(/[\r\n]+$/, '')
+    // 行派发 stand 适配器（codebuddy-stand/qclaw-stand）按 stdin 行切任务：内部换行会切成
+    // 多次独立派发（2026-08-10 hy3 长输入切成 3 段实证）。压成「；」保持「一条 sendline =
+    // 一条任务」；官方 TUI（claude/workbuddy 等）自带多行编辑器，不动。
+    if (body && LINE_DISPATCH_HARNESSES.has(this.harness ?? '')) {
+      body = body.replace(/\s*\r?\n\s*/g, '；')
+    }
     // markWorking:false —— working 态本方法已显式置好，且 body 已无尾回车不触发 write 拆分
     if (body) this.write(body, { markWorking: false })
     this.writeEnterWhenSettled()
