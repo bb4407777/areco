@@ -101,6 +101,14 @@ async function loadOlder() {
   }
 }
 
+// 滚近顶部自动翻「加载更早」免手点（loadOlder 内有 hasMore/loadingOlder 双闸，prepend 后视口复位天然防连环触发）
+const NEAR_TOP_PX = 80
+function onScroll() {
+  const el = scroller.value
+  if (!el || loading.value) return
+  if (el.scrollTop < NEAR_TOP_PX && hasMore.value) void loadOlder()
+}
+
 // 「继续 ▾」：原生 resume（无损，同 agent）+ 跨 agent 接续（交接档案，任选模板）
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 // 各源原生恢复的按钮文案（命令形态不同：claude --resume / kimi -S / codex resume / reasonix 选择器）
@@ -153,7 +161,7 @@ function onContinue(key: string) {
       </n-dropdown>
     </div>
 
-    <div ref="scroller" class="stream">
+    <div ref="scroller" class="stream" @scroll.passive="onScroll">
       <n-spin v-if="loading" class="center" />
       <template v-else>
         <!-- .more 固定高度常驻：空态/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->

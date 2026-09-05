@@ -124,6 +124,8 @@ const scroller = ref<HTMLElement | null>(null)
 // 离底超过该阈值显示「回到最新」悬浮按钮（不做贴底自动跟滚，追新一律手动点按钮）
 const NEAR_BOTTOM_PX = 160
 const showJump = ref(false)
+// 滚近顶部自动翻「加载更早」免手点（loadOlder 内有 hasMore/loadingOlder 双闸，prepend 后视口复位天然防连环触发）
+const NEAR_TOP_PX = 80
 let cursor = 0 // 向前增量续读点（字节）；0 = 尚未拿到尾页（服务端按尾页响应）
 let start = 0 // 最早已载页的起始字节，「加载更早」传 before=start
 // 向前翻页时 firstIndex 后退，保证已渲染消息的 key 稳定不漂移
@@ -325,11 +327,12 @@ async function loadOlder() {
   }
 }
 
-// 滚动时同步「回到最新」按钮可见性；程序化 scrollTo 也触发 scroll 事件，状态自然对账
+// 滚动时同步「回到最新」按钮可见性；滚近顶部自动加载更早。程序化 scrollTo 也触发 scroll 事件，状态自然对账
 function onScroll() {
   const el = scroller.value
   if (!el) return
   showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
+  if (el.scrollTop < NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
 }
 
 function jumpToLatest() {
@@ -369,7 +372,7 @@ onBeforeUnmount(() => {
       <div ref="scroller" class="stream" @scroll.passive="onScroll">
         <n-spin v-if="loading" class="center" />
         <template v-else>
-          <!-- .more 固定高度常驻：空态/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
+          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳（滚近顶部已自动翻页，按钮仅兜底） -->
           <div class="more">
             <template v-if="exists && messages.length">
               <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
