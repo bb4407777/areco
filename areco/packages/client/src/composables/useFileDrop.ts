@@ -1,11 +1,19 @@
 // 文件拖放/选件：document 级拖放监听 + 路径回填输入框。会话页/项目页共用。
-// 散文件 → 先 Spotlight 反查源路径（name+size 精确匹配），命中零复制直填源路径；
-//          查不到（手机端拍照/网盘/未索引位置）才上传副本落盘 data/uploads；
-// 文件夹 → 不上传内容：只报目录名+首层子项名，服务端 Spotlight 反查（零命中再实扫常用目录，
-//          兜住新建目录的索引滞后）源目录路径回填，agent 直读源目录（零复制，空文件夹/iCloud 占位也秒回）
+// Electron 壳 → preload 桥（window.arecoShell）直接拿拖入项的真实绝对路径，零网络零复制；
+// 浏览器    → 散文件先 Spotlight 反查源路径（name+size 精确匹配），命中零复制直填源路径；
+//             查不到（手机端拍照/网盘/未索引位置）才上传副本落盘 data/uploads；
+//             文件夹不上传内容：只报目录名+首层子项名，服务端 Spotlight 反查（零命中再实扫常用目录，
+//             兜住新建目录的索引滞后）源目录路径回填，agent 直读源目录（零复制，空文件夹/iCloud 占位也秒回）
 import { nextTick, onMounted, onUnmounted, ref, type Ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { api } from '../api'
+
+// Electron 壳 preload（packages/app/preload.js）暴露的桥；纯浏览器环境不存在
+declare global {
+  interface Window {
+    arecoShell?: { getPathForFile: (file: File) => string }
+  }
+}
 
 type InputEl = HTMLTextAreaElement | HTMLInputElement
 
@@ -151,8 +159,28 @@ export function useFileDrop({ text, inputEl, afterFill }: Options) {
     dragging.value = false
     if (!e.dataTransfer) return
     e.preventDefault() // 必须在任何 await 之前同步调，否则浏览器打开文件/文件夹
-    // webkitGetAsEntry 必须在 drop 事件同步阶段全部取出（items 列表事件一过就失效）
     const dt = e.dataTransfer
+    // Electron 壳：拖入的文件/文件夹（含文件夹，Chromium 以 File 形式给出）直接取真实绝对路径，
+    // 跳过 Spotlight 反查/上传副本；取不到路径的（网页拖来的虚拟 File）退回原流程
+    const getPathForFile = window.arecoShell?.getPathForFile
+    if (getPathForFile && dt.files?.length) {
+      const paths: string[] = []
+      const rest: File[] = []
+      for (const file of Array.from(dt.files)) {
+        let p = ''
+        try {
+          p = getPathForFile(file)
+        } catch {
+          // 单个取路径失败按虚拟文件处理
+        }
+        if (p) paths.push(p)
+        else rest.push(file)
+      }
+      if (paths.length) await fillPaths(paths.join(' '))
+      if (rest.length) await handleFiles(rest)
+      return
+    }
+    // webkitGetAsEntry 必须在 drop 事件同步阶段全部取出（items 列表事件一过就失效）
     const dirs: FileSystemDirectoryEntry[] = []
     const fileEntries: FileSystemFileEntry[] = []
     if (dt.items?.length) {

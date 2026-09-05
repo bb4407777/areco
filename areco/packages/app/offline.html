@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>areco - 连接中</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: #101418;
+      color: #c9d1d9;
+      font-family: -apple-system, "PingFang SC", sans-serif;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    h1 { font-size: 28px; margin: 0; color: #fff; letter-spacing: 2px; }
+    p { font-size: 13px; color: #8b949e; margin: 0; }
+    .spin {
+      width: 18px; height: 18px; margin-top: 10px;
+      border: 2px solid #30363d; border-top-color: #58a6ff;
+      border-radius: 50%; animation: r 0.8s linear infinite;
+    }
+    @keyframes r { to { transform: rotate(360deg); } }
+    button {
+      -webkit-app-region: no-drag;
+      margin-top: 14px; padding: 6px 18px; font-size: 13px;
+      color: #c9d1d9; background: #21262d; border: 1px solid #30363d;
+      border-radius: 6px; cursor: pointer;
+    }
+    button:hover { background: #30363d; }
+  </style>
+</head>
+<body>
+  <h1>areco</h1>
+  <p id="tip">正在连接 areco 服务…</p>
+  <div class="spin"></div>
+  <button id="retry">立即重试</button>
+  <script>
+    const target = new URLSearchParams(location.search).get('url') || 'http://127.0.0.1:8790'
+    document.getElementById('tip').textContent = `正在连接 areco 服务（${target}）…`
+
+    async function tryConnect() {
+      try {
+        // no-cors：只探测服务是否可达，不在乎响应内容
+        await fetch(target, { mode: 'no-cors', cache: 'no-store' })
+        location.replace(target)
+      } catch {
+        setTimeout(tryConnect, 2000)
+      }
+    }
+    document.getElementById('retry').addEventListener('click', tryConnect)
+    tryConnect()
+  </script>
+</body>
+</html>

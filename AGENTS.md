@@ -30,6 +30,9 @@
 - shell 脚本：macOS 系统 bash 3.2 下 `$VAR` 后紧跟中文/全角字符会把首字节
   粘进变量名（set -u 直接炸）——变量后接 CJK 一律写 `${VAR}`。
 - `config.json`、`data/`、`bin/` 是 gitignore 的本机私有物，不入仓。
+- 桌面壳 `packages/app/`（2026-08-13 新增，独立 package）：Electron 壳，只 loadURL
+  到 areco server（默认 8790，`ARECO_URL` 覆盖），不打包前端、无 IPC；改 server 端口
+  或部署形态时同步看它。档案：`data/handoff/2026-08-13-areco-desktop-shell.md`。
 
 ## 复用模式清单（2026-07-24 高律师定：一套更换，改一处必同步）
 

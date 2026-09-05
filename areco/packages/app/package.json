@@ -1,0 +1,17 @@
+{
+  "name": "areco-app",
+  "productName": "areco",
+  "version": "0.1.0",
+  "private": true,
+  "description": "areco 桌面壳（Electron，加载本机/远程 areco server）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac --arm64"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0",
+    "electron-builder": "^26.0.12"
+  }
+}

@@ -182,26 +182,11 @@ function forceUpdate() {
   cursor: pointer;
 }
 
-/* 小屏（iPhone SE3 375px 等）：导航栏压成一行，tab 不竖排不裁切 */
+/* 小屏与桌面同款样式；375px 等窄屏放不下 6 个 tab 时导航横向滚动兜底，
+   tab 不竖排不裁切（nowrap 在基础样式里） */
 @media (max-width: 520px) {
-  .app-header {
-    padding: 8px 10px;
-    padding-top: calc(8px + env(safe-area-inset-top, 0px));
-  }
-  .brand {
-    font-size: 13px;
-    gap: 6px;
-  }
   .nav {
-    gap: 2px;
     overflow-x: auto;
-  }
-  .nav-link {
-    padding: 5px 7px;
-    font-size: 12.5px;
-  }
-  .theme-btn {
-    padding: 5px 5px;
   }
 }
 </style>
