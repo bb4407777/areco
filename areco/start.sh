@@ -169,7 +169,22 @@ if launchd_active; then
       elif [ -f "$LAUNCHD_PLIST" ] && plutil -lint "$LAUNCHD_PLIST" >/dev/null 2>&1; then
         echo "launchd 已接管（${LAUNCHD_TARGET}），bootout+bootstrap 重载（重读 plist）…"
         launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null
-        launchctl bootstrap "$LAUNCHD_DOMAIN" "$LAUNCHD_PLIST"
+        # bootout 异步返回：本服务优雅退出（落快照→停会话→关服务）要好几秒，作业没注销完就
+        # bootstrap 会撞「Bootstrap failed: 5: Input/output error」（2026-09-05 实锤，服务躺尸）。
+        # 等 print 确认注销完成，再带重试；仍失败退 legacy load，绝不让服务停在注销态。
+        for _ in $(seq 1 15); do
+          launchctl print "$LAUNCHD_TARGET" >/dev/null 2>&1 || break
+          sleep 1
+        done
+        boot_ok=0
+        for _ in $(seq 1 5); do
+          if launchctl bootstrap "$LAUNCHD_DOMAIN" "$LAUNCHD_PLIST" >/dev/null 2>&1; then boot_ok=1; break; fi
+          sleep 1
+        done
+        if [ "$boot_ok" != 1 ]; then
+          echo "bootstrap 重试仍失败，退回 launchctl load（legacy）…"
+          launchctl load "$LAUNCHD_PLIST" 2>/dev/null || echo "拉起失败！请手动：launchctl bootstrap $LAUNCHD_DOMAIN $LAUNCHD_PLIST"
+        fi
       else
         echo "launchd 已接管（${LAUNCHD_TARGET}），plist 缺失或 lint 未过，退回 kickstart -k（不重读 plist）…"
         launchctl kickstart -k "$LAUNCHD_TARGET"
