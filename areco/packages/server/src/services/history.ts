@@ -2,14 +2,14 @@
 // 列表 = 扫 projects/ 只 stat + 封顶头部扫描提元信息（按 path+mtime+size 缓存）；
 // 正文 = 字节块从尾部倒序分页，永不整文件灌给手机端。
 // 数据源：~/.claude/projects 与 ~/.reasonix/projects（reasonix 是 claude-code 同构，jsonl 同格式）；
-// kimi 走本文件原生层（三层布局独立扫描）；codex/workbuddy 等在 chatlog 统一层。
+// kimi/pi 走本文件原生层（布局塞不进 scanRaw 两层假设，独立扫描）；codex/workbuddy 等在 chatlog 统一层。
 import fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
 import type { HistoryEntry, HistoryListPage, HistoryTranscriptPage, TranscriptMessage } from '../../../shared/protocol'
 import { parseTranscriptLine } from './transcript'
-import { parseKimi } from './agent-transcript'
+import { parseKimi, parsePi } from './agent-transcript'
 import { chatlogEntries, isChatlogSource } from './chatlog'
 
 // 头部扫描上限：cwd/首条用户输入/首个时间戳都落在文件头部，但 file-history-snapshot
@@ -170,6 +170,118 @@ export function kimiWorkDirOf(wirePath: string): string {
 /** kimi 行解析适配器：wire 每行至多产一条消息（parseKimi 吃多行串，喂单行取首条） */
 export function kimiParseLine(line: string): TranscriptMessage | null {
   return parseKimi(line)[0] ?? null
+}
+
+// ---- pi 原生层 ----
+// pi 落盘两层布局：~/.pi/agent/sessions/<--cwd-slug-->/<本地时间戳>_<uuid>.jsonl。
+// 不进 scanRaw：① id 要取文件名 uuid 段（裸文件名不是 --session 恢复凭据）；
+// ② 标题取头部首条用户消息，行形状 type=message + message.role 与 claude 系不同。
+// 首行 type=session 头自带 cwd/id/timestamp，列表元信息不碰正文（头部封顶扫描 + 缓存）。
+const PI_SESSION_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+export function piSessionsRoot(): string {
+  return path.join(os.homedir(), '.pi', 'agent', 'sessions')
+}
+
+/** pi source/project/id → 校验后的会话文件绝对路径（防路径穿越） */
+export function resolvePiSessionFile(project: string, id: string, root = piSessionsRoot()): string {
+  if (!SAFE_SEGMENT.test(project) || project.includes('..')) throw new Error('项目名不合法')
+  if (!PI_SESSION_ID.test(id)) throw new Error('会话 id 不合法')
+  for (const name of safeReaddir(path.join(root, project))) {
+    if (!name.endsWith(`_${id}.jsonl`)) continue
+    const filePath = path.join(root, project, name)
+    if (!filePath.startsWith(root + path.sep)) throw new Error('路径不合法')
+    if (fs.existsSync(filePath)) return filePath
+  }
+  throw new Error('历史会话不存在')
+}
+
+interface PiHeadMeta {
+  cwd: string
+  createdMs: number
+  title: string
+}
+
+/** 头部元信息缓存：mtime+size 一致即命中（同 claude 层 metaCache 口径） */
+const piHeadCache = new Map<string, PiHeadMeta & { mtimeMs: number; size: number }>()
+
+function piHeadMetaFor(filePath: string, stat: fs.Stats): PiHeadMeta {
+  const hit = piHeadCache.get(filePath)
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit
+  const meta: PiHeadMeta = { cwd: '', createdMs: 0, title: '' }
+  for (const line of readHead(filePath, stat.size).split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    let row: Record<string, unknown>
+    try {
+      row = JSON.parse(trimmed) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    if (row.type === 'session') {
+      if (!meta.cwd && typeof row.cwd === 'string') meta.cwd = row.cwd
+      if (!meta.createdMs && typeof row.timestamp === 'string') {
+        const ms = Date.parse(row.timestamp)
+        if (!Number.isNaN(ms)) meta.createdMs = ms
+      }
+    }
+    if (!meta.title && row.type === 'message') {
+      const msg = row.message as { role?: unknown; content?: unknown } | undefined
+      if (msg?.role === 'user' && Array.isArray(msg.content)) {
+        const text = userText(msg.content)
+        if (text.trim()) meta.title = text
+      }
+    }
+    if (meta.cwd && meta.createdMs && meta.title) break
+  }
+  piHeadCache.set(filePath, { ...meta, mtimeMs: stat.mtimeMs, size: stat.size })
+  return meta
+}
+
+/** pi 历史条目：扫 sessions/<slug>/<时间戳>_<uuid>.jsonl，标题回退 id 前 8 位 */
+export function piEntries(root = piSessionsRoot()): HistoryEntry[] {
+  const entries: HistoryEntry[] = []
+  for (const slug of safeReaddir(root)) {
+    const dir = path.join(root, slug)
+    for (const name of safeReaddir(dir)) {
+      if (!name.endsWith('.jsonl')) continue
+      const underscore = name.lastIndexOf('_')
+      const id = underscore >= 0 ? name.slice(underscore + 1, -'.jsonl'.length) : ''
+      if (!PI_SESSION_ID.test(id)) continue
+      const filePath = path.join(dir, name)
+      let stat: fs.Stats
+      try {
+        stat = fs.statSync(filePath)
+      } catch {
+        continue
+      }
+      if (!stat.isFile() || stat.size === 0) continue
+      const meta = piHeadMetaFor(filePath, stat)
+      entries.push({
+        source: 'pi',
+        project: slug,
+        id,
+        title: promptLabel(meta.title) || id.slice(0, 8),
+        cwd: meta.cwd,
+        mtimeMs: stat.mtimeMs,
+        createdMs: meta.createdMs,
+        size: stat.size,
+        liveSessionId: null,
+        resumable: false, // 由 controller 按有无启用的 pi 模板填
+      })
+    }
+  }
+  return entries
+}
+
+/** pi 会话工作目录：首行 session 头的 cwd（--session 恢复必须回原 cwd 才能找到会话） */
+export function piWorkDirOf(filePath: string): string {
+  return piHeadMetaFor(filePath, fs.statSync(filePath)).cwd
+}
+
+/** pi 行解析适配器：session jsonl 每行至多产一条消息（parsePi 吃多行串，喂单行取首条） */
+export function piParseLine(line: string): TranscriptMessage | null {
+  return parsePi(line)[0] ?? null
 }
 
 
@@ -398,6 +510,14 @@ export function listHistory(
   }
   // kimi 原生层：扫 ~/.kimi-code/sessions（三层布局，不进 scanRaw）
   for (const entry of kimiEntries()) {
+    if (q) {
+      const hay = `${entry.title}\n${entry.cwd}\n${entry.id}`.toLowerCase()
+      if (!hay.includes(q)) continue
+    }
+    matched.push(entry)
+  }
+  // pi 原生层：扫 ~/.pi/agent/sessions（两层布局，不进 scanRaw）
+  for (const entry of piEntries()) {
     if (q) {
       const hay = `${entry.title}\n${entry.cwd}\n${entry.id}`.toLowerCase()
       if (!hay.includes(q)) continue

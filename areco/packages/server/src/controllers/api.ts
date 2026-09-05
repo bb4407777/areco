@@ -18,10 +18,13 @@ import {
   kimiParseLine,
   kimiWorkDirOf,
   listHistory,
+  piParseLine,
+  piWorkDirOf,
   readHistoryAllMessages,
   readHistoryPage,
   resolveHistoryFile,
   resolveKimiWire,
+  resolvePiSessionFile,
 } from '../services/history'
 import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/chatlog'
 import { sweepForDir } from '../services/dir-sweep'
@@ -527,6 +530,7 @@ export class ApiControllers {
       const resumableSources = new Map(this.historyRoots.map((r) => [r.source, Boolean(this.resumeTemplateFor(r.source))]))
       const reasonixOk = Boolean(this.reasonixTemplate())
       const kimiOk = Boolean(this.templateByCommand('kimi'))
+      const piOk = Boolean(this.templateByCommand('pi'))
       const codexOk = Boolean(this.templateByCommand('codex'))
       const workbuddyOk = Boolean(this.templateByCommand('codebuddy'))
       for (const entry of page.entries) {
@@ -535,6 +539,7 @@ export class ApiControllers {
         entry.liveSessionId = live.get(entry.id) ?? liveAgent.get(rawEntryId) ?? null
         if (entry.source === 'reasonix') entry.resumable = reasonixOk
         else if (entry.source === 'kimi') entry.resumable = kimiOk
+        else if (entry.source === 'pi') entry.resumable = piOk
         else if (entry.source === 'codex') entry.resumable = codexOk
         // workbuddy 会话按 cwd-slug 归档，缺 cwd（旧数据）恢复会找不到会话，不给恢复
         else if (entry.source === 'workbuddy') entry.resumable = workbuddyOk && Boolean(entry.cwd)
@@ -624,6 +629,14 @@ export class ApiControllers {
         ok(ctx, readHistoryPage(filePath, before, kimiParseLine))
         return
       }
+      // pi 原生层：session jsonl 字节游标分页（piParseLine 行解析）
+      if (source === 'pi') {
+        const filePath = resolvePiSessionFile(project, id)
+        const beforeRaw = Number(ctx.query.before)
+        const before = Number.isFinite(beforeRaw) && beforeRaw >= 0 ? beforeRaw : undefined
+        ok(ctx, readHistoryPage(filePath, before, piParseLine))
+        return
+      }
       const filePath = resolveHistoryFile(this.historyRoots, source, project, id)
       const beforeRaw = Number(ctx.query.before)
       const before = Number.isFinite(beforeRaw) && beforeRaw >= 0 ? beforeRaw : undefined
@@ -654,6 +667,27 @@ export class ApiControllers {
           cwd,
           name: body.name,
           extraArgs: ['-S', id],
+          resumeAgentSessionId: id,
+        }))
+        return
+      }
+      // pi 原生恢复：--session <uuid> 回原 cwd 续写同一 session 文件（实测同文件追加）。
+      // resumeAgentSessionId 必传：续写的旧文件 birth 在本卡启动前，时间窗认亲永远排除它，
+      // 不钉死 id 卡片就永远定位不到 transcript——对话模式一直空白。
+      if (source === 'pi') {
+        const cwd = piWorkDirOf(resolvePiSessionFile(project, id))
+        if (!cwd) throw new Error('该会话未记录工作目录，无法恢复')
+        const body = (ctx.request.body ?? {}) as { templateId?: string; name?: string }
+        const template = body.templateId ? this.templates.get(body.templateId) : this.templateByCommand('pi')
+        if (!template) throw new Error('没有可用的 pi 模板')
+        const existing = this.manager.list().find((s) => s.agentSessionId === id)
+        if (existing) {
+          throw new Error(`该历史会话已属于看板会话「${existing.name}」，请在原卡片恢复，不能重复绑定`)
+        }
+        ok(ctx, this.manager.spawn(template.id, {
+          cwd,
+          name: body.name,
+          extraArgs: ['--session', id],
           resumeAgentSessionId: id,
         }))
         return
@@ -726,6 +760,10 @@ export class ApiControllers {
         const filePath = resolveKimiWire(project, id)
         messages = readHistoryAllMessages(filePath, undefined, kimiParseLine)
         cwd = kimiWorkDirOf(filePath)
+      } else if (source === 'pi') {
+        const filePath = resolvePiSessionFile(project, id)
+        messages = readHistoryAllMessages(filePath, undefined, piParseLine)
+        cwd = piWorkDirOf(filePath)
       } else {
         const filePath = resolveHistoryFile(this.historyRoots, source, project, id)
         messages = readHistoryAllMessages(filePath)

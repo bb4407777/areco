@@ -44,20 +44,21 @@ Apache-2.0 · [GitHub](https://github.com/bb4407777/standcode)（main repo）· 
 - **多 agent 多会话**：模板（claude / codex / reasonix / shell / 自定义）→ 随开随关多个会话，各带独立 cwd
 - **pty 活在服务端**：手机上开个任务、锁屏关浏览器，晚点回来画面无缝接上（影子终端快照 + offset 续流，alt-screen TUI 也不花屏）
 - **换设备接管**：手机开的会话，电脑浏览器打开就是同一现场
-- **Transcript 对话视图**：座舱头部「⌨️ 终端 / 💬 对话」分段切换——对话模式直读 agent 自己的会话落盘重建聊天气泡（markdown + 代码高亮，手机上比 TUI 可读得多）：claude 系读 `~/.claude/projects/**.jsonl`（字节游标尾载分页）；codex / workbuddy(codebuddy) / reasonix / kimi 直读各自落盘（`~/.codex/sessions` rollout、`~/.workbuddy/projects` jsonl、`~/.reasonix/sessions` replace 帧、`~/.kimi-code/sessions` wire.jsonl，消息级游标，文件按 cwd(-slug) + 启动时刻自动关联——不解析终端流，去 agent 数据层拿结构化对话）。尾部先载 + 「加载更早」向前翻页，2.5s 增量追新，底部可直接续问；默认对话模式、切换偏好记忆在本机，看板点卡片按偏好进入（shell 等无落盘会话始终进终端；新建会话落点可在设置页「对话模式」里选，默认先进终端看启动画面）
+- **Transcript 对话视图**：座舱头部「⌨️ 终端 / 💬 对话」分段切换——对话模式直读 agent 自己的会话落盘重建聊天气泡（markdown + 代码高亮，手机上比 TUI 可读得多）：claude 系读 `~/.claude/projects/**.jsonl`（字节游标尾载分页）；codex / workbuddy(codebuddy) / reasonix / kimi / pi 直读各自落盘（`~/.codex/sessions` rollout、`~/.workbuddy/projects` jsonl、`~/.reasonix/sessions` replace 帧、`~/.kimi-code/sessions` wire.jsonl、`~/.pi/agent/sessions` session jsonl，消息级游标，文件按 cwd(-slug) + 启动时刻自动关联——不解析终端流，去 agent 数据层拿结构化对话）。尾部先载 + 「加载更早」向前翻页，2.5s 增量追新，底部可直接续问；默认对话模式、切换偏好记忆在本机，看板点卡片按偏好进入（shell 等无落盘会话始终进终端；新建会话落点可在设置页「对话模式」里选，默认先进终端看启动画面）
 - **历史对话浏览**（顶栏「历史」）：翻本机全部落盘会话，双层数据源——
   ① 原生层：`~/.claude/projects` + 各隔离 HOME 分身（`~/.homes/*/.claude/projects`，如 c5/fable）自动发现，
-  另有 kimi（`~/.kimi-code/sessions/<wd>/<session_*>/agents/main/wire.jsonl`，元信息读 state.json）与 qclaw；
+  另有 kimi（`~/.kimi-code/sessions/<wd>/<session_*>/agents/main/wire.jsonl`，元信息读 state.json）、pi（`~/.pi/agent/sessions/<--cwd-slug-->/<时间戳>_<uuid>.jsonl`，元信息读首行 session 头）与 qclaw；
   全文展示，正文尾部先载、「加载更早」字节游标向前翻，超大 transcript 也不卡手机；
   claude 源可一键「继续会话」（`--resume` 回原 cwd 拉起新座舱会话；已在看板运行的直接跳转/409）；
   kimi 源同样可恢复（`-S <session_id>` 回原 cwd，需启用 kimi 模板）；
+  pi 源同样可恢复（`--session <uuid>` 回原 cwd 同文件续写，需启用 pi 模板）；
   ② chatlog 统一层（可选）：codex / reasonix / cc-connect / workbuddy 的会话读 chatlog 提取产物
   （`~/skills/chatlog/conversations-data.json`，全文+脱敏；该文件存在才启用，kimi 由原生层覆盖不进这层）；
   reasonix 的「继续会话」= 座舱里拉起原生 `--resume` 选择器（其 CLI 无按 id 非交互恢复）；
   codex / workbuddy 也可恢复（`codex resume <uuid>` / codebuddy `--resume <uuid>` 回原 cwd，cwd 由提取器补录，
   旧数据缺 cwd 时 workbuddy 不给恢复）；cc-connect 是渠道桥接副本，只读；
   数据超 10 分钟自动异步刷新（提取端点由 `ARECO_CHATLOG_REFRESH_URL` 指定）。列表按最后活动倒序、搜标题/目录/会话 id
-- **服务重启不丢现场**：运行中会话标记 `server-restart`，最后画面落盘可回看；「重新启动（恢复对话）」按 agent 能力原生续上——claude 系 `--resume <id>`（无 id 的存量会话按定位文件自动回填转正）、codex `resume <session_id>`、codebuddy `--resume <uuid>`、kimi `-S <session_id>`、reasonix 拉起原生选择器
+- **服务重启不丢现场**：运行中会话标记 `server-restart`，最后画面落盘可回看；「重新启动（恢复对话）」按 agent 能力原生续上——claude 系 `--resume <id>`（无 id 的存量会话按定位文件自动回填转正）、codex `resume <session_id>`、codebuddy `--resume <uuid>`、kimi `-S <session_id>`、pi `--session <uuid>`、reasonix 拉起原生选择器
 - **TUI 注入可靠性**（PromptBar / 历史接续 / 恢复重启共用）：`sendline` 文本与回车拆帧发送，提交回车等 pty 输出安静一拍（120ms、上限 2s）再补——同帧「文本+回车」会被 codebuddy/kimi 等 TUI 按粘贴处理、回车沦为换行不提交（表现为要按两次发送或 enter 变换行）；codebuddy 每个新进程弹的「信任目录」确认页由服务端从 pty 输出检测（剥 ANSI 匹配文案）自动回车过页，新建/重启/恢复全生效，每次启动只答一次且限启动后 2 分钟内（防对话正文同款文字误触发）
 - **归档 vs 删除**：卡片菜单「归档」把已停止会话移出看板（看板底部「已归档」折叠区可查看/恢复，重启即自动回看板），元数据、终端快照、agent 对话日志全保留；「删除」清掉卡片与终端快照——但 agent 自身的对话日志（`~/.claude/projects` / chatlog 层）本就不归看板管，删除后仍在「历史」页
 - **移动端**：底部快捷键条（Esc/Tab/方向/^C…）、单行 prompt 输入、PWA 添加到主屏幕

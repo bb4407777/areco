@@ -10,6 +10,7 @@ import {
   handoffTitleFromPrompt,
   parseCodex,
   parseKimi,
+  parsePi,
   parseQclaw,
   parseReasonix,
   parseWorkbuddy,
@@ -90,7 +91,9 @@ function userTextsOfLine(line: string, kind: AgentKind): string[] {
           ? parseQclaw(line)
           : kind === 'reasonix'
             ? parseReasonix(line)
-            : parseWorkbuddy(line)
+            : kind === 'pi'
+              ? parsePi(line)
+              : parseWorkbuddy(line)
   const texts: string[] = []
   for (const m of messages) {
     if (m.role !== 'user') continue

@@ -19,6 +19,7 @@ import {
   kimiTitleOf,
   locateAgentFile,
   locateClaudeTranscript,
+  piSessionIdOf,
   readAgentTrafficState,
   registerOccupancyProvider,
   registerUniqueFallbackProvider,
@@ -306,6 +307,7 @@ export class SessionManager extends EventEmitter {
    *  - codex → `codex resume <session_id>`（rollout 首行 meta）
    *  - workbuddy(codebuddy) → `--resume <文件名 uuid>`
    *  - kimi → `-S <session_x>`（wire.jsonl 路径提取，须放命令行最后——走 extraArgs 天然在最后）
+   *  - pi → `--session <uuid>`（文件名 uuid 段，回原 cwd 同文件续写）
    *  - reasonix → `--resume` 原生选择器（其 CLI 无按 id 非交互恢复）
    * 恢复凭据找不到时退化为全新重启（不报错——能起来比报错有用）。
    */
@@ -353,6 +355,15 @@ export class SessionManager extends EventEmitter {
           // 同 codex：-S 续写的是旧 wire 文件，新 epoch 的时间窗认不上它，必须钉死 id
           session.bindAgentSession(sid)
           extraArgs = ['-S', sid]
+          didResume = true
+        }
+      } else if (kind === 'pi') {
+        const file = locateAgentFile(session, kind)
+        const sid = session.agentSessionId || (file ? piSessionIdOf(file) : '')
+        if (sid) {
+          // 同 codex/kimi：--session 续写旧 jsonl（实测同文件追加），新 epoch 时间窗认不上，钉死 id
+          session.bindAgentSession(sid)
+          extraArgs = ['--session', sid]
           didResume = true
         }
       } else {

@@ -188,6 +188,9 @@ onMounted(() => void load(true))
 .src.kimi {
   color: #4f7dff;
 }
+.src.pi {
+  color: #a78bfa;
+}
 .path {
   flex: 1;
   min-width: 0;

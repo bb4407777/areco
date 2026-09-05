@@ -8,6 +8,8 @@
 //   qclaw     ~/.qclaw/agents/main/sessions/<uuid>.jsonl（type=message 行，role=user/assistant/toolResult）
 //   kimi      ~/.kimi-code/sessions/<wd_xxx>/session_<uuid>/agents/main/wire.jsonl
 //             （turn.prompt/steer 用户输入 + context.append_loop_event 事件流；标题在同会话目录 state.json）
+//   pi        ~/.pi/agent/sessions/<--cwd-slug-->/<本地时间戳>_<uuid>.jsonl（type=message 行，
+//             message.role=user/assistant/toolResult；首行 type=session 头含 cwd/id/timestamp）
 // 游标语义：消息序号（claude 路径是字节）——两者对客户端都是不透明的单调游标；
 // reasonix 的 replace 帧可能整体收缩，total < cursor 时回尾页（带 start，客户端按整页替换）。
 import fs from 'node:fs'
@@ -31,19 +33,21 @@ const HANDOFF_DIR = path.join(DATA_DIR, 'handoff')
 // 会话启动到 agent 建文件的宽限（agent 初始化有延迟；时钟粒度留余量）
 const BIRTH_SLACK_MS = 60_000
 
-export type AgentKind = 'codex' | 'workbuddy' | 'reasonix' | 'qclaw' | 'kimi'
+export type AgentKind = 'codex' | 'workbuddy' | 'reasonix' | 'qclaw' | 'kimi' | 'pi'
 
 export function agentKindOf(command: string, harness?: string | null): AgentKind | null {
   if (harness === 'codex') return 'codex'
   if (harness === 'workbuddy') return 'workbuddy'
   if (harness === 'reasonix') return 'reasonix'
   if (harness === 'kimi') return 'kimi'
+  if (harness === 'pi') return 'pi'
   if (harness === 'hermes') return 'qclaw'
   const base = path.basename(command)
   if (base === 'codex') return 'codex'
   if (base === 'codebuddy') return 'workbuddy'
   if (base === 'reasonix') return 'reasonix'
   if (base === 'kimi') return 'kimi'
+  if (base === 'pi') return 'pi'
   if (base.startsWith('qclaw')) return 'qclaw'
   if (base === 'hermes') return 'qclaw'
   return null
@@ -127,6 +131,22 @@ export function workbuddyProjectSlugs(cwd: string): string[] {
       ]),
     ),
   ]
+}
+
+/**
+ * pi 会话目录 slug（pi 自家规则，session-manager.js getDefaultSessionDirPath）：
+ * `--${resolvedCwd 去首个斜杠、[/\: 替换为 -}--`。pi 落盘前对 cwd 做过 realpath（/tmp → /private/tmp），
+ * 与 WorkBuddy 同款双覆盖：原值 + realpath 各算一个 slug。
+ */
+export function piSessionSlugs(cwd: string): string[] {
+  const encode = (value: string) => `--${value.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
+  const paths = [cwd]
+  try {
+    paths.push(fs.realpathSync(cwd))
+  } catch {
+    /* cwd 已不存在时只用原值，恢复仍可走 agentSessionId + 历史目录兜底 */
+  }
+  return [...new Set(paths.map(encode))]
 }
 
 /**
@@ -254,7 +274,9 @@ function firstUserText(file: string, kind: AgentKind): string {
             ? parseReasonix(raw)
             : kind === 'kimi'
               ? parseKimi(raw)
-              : parseQclaw(raw)
+              : kind === 'pi'
+                ? parsePi(raw)
+                : parseQclaw(raw)
     const first = messages.find((m) => m.role === 'user')
     return (
       first?.parts
@@ -272,10 +294,16 @@ export function kimiSessionIdOf(file: string): string {
   return /(session_[0-9a-fA-F-]+)/.exec(file)?.[1] ?? ''
 }
 
+/** pi 原生恢复用（`--session <id>`，实测同文件续写）：文件名 <本地时间戳>_<uuid>.jsonl 的 uuid 段 */
+export function piSessionIdOf(file: string): string {
+  return /_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/.exec(file)?.[1] ?? ''
+}
+
 function nativeSessionId(file: string, kind: AgentKind): string {
   if (kind === 'codex') return codexSessionIdOf(file)
   if (kind === 'reasonix') return path.basename(file, '.events.jsonl')
   if (kind === 'kimi') return kimiSessionIdOf(file)
+  if (kind === 'pi') return piSessionIdOf(file)
   return path.basename(file, '.jsonl')
 }
 
@@ -353,8 +381,8 @@ export function legacyAgentTitleMatches(sessionName: string, agentTitle: string)
 
 function exactAgentFile(session: { agentSessionId: string | null }, kind: AgentKind, files: string[]): string | null {
   if (!session.agentSessionId) return null
-  // codex/kimi 的文件名都不是原生 id（rollout 时间戳 / 固定 wire.jsonl），按文件内/路径里的原生 id 比对
-  if (kind === 'codex' || kind === 'kimi') {
+  // codex/kimi/pi 的文件名都不是裸原生 id（rollout 时间戳 / 固定 wire / 时间戳_uuid），按文件内/路径里的原生 id 比对
+  if (kind === 'codex' || kind === 'kimi' || kind === 'pi') {
     return files.find((file) => nativeSessionId(file, kind) === session.agentSessionId) ?? null
   }
   const suffix = kind === 'reasonix' ? '.events.jsonl' : '.jsonl'
@@ -651,6 +679,11 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
     )
   } else if (kind === 'kimi') {
     files = kimiWireFiles(session.cwd)
+  } else if (kind === 'pi') {
+    // pi 按 cwd-slug 归档：<root>/<--slug-->/<时间戳>_<uuid>.jsonl；slug 双覆盖原值与 realpath。
+    // 文件名自带 uuid（原生 id），exactAgentFile 可精确恢复；首行 session 头也含 cwd（历史层用）。
+    const root = path.join(os.homedir(), '.pi', 'agent', 'sessions')
+    files = piSessionSlugs(session.cwd).flatMap((slug) => listFiles(path.join(root, slug), '.jsonl'))
   } else {
     files = listFiles(path.join(os.homedir(), '.reasonix', 'sessions'), '.events.jsonl')
   }
@@ -1050,6 +1083,74 @@ export function parseKimi(raw: string): TranscriptMessage[] {
   return out
 }
 
+/**
+ * pi（pi coding agent）session jsonl v3：每行 JSON，顶层 type + ISO timestamp。
+ * 对话主体 type=message：message.role = user / assistant / toolResult。
+ *   user      content 块 {type:text}；assistant 块 thinking / text / toolCall（id/name/arguments）；
+ *   toolResult 独立 role 行（toolCallId/toolName/isError，正文在 content 块）。
+ * session/model_change/thinking_level_change 等元数据行一律忽略；未知块类型跳过。
+ */
+export function parsePi(raw: string): TranscriptMessage[] {
+  const out: TranscriptMessage[] = []
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    let obj: Record<string, unknown>
+    try {
+      obj = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    if (obj.type !== 'message') continue
+    const msg = (obj.message ?? {}) as Record<string, unknown>
+    const role = msg.role
+    const ts = typeof obj.timestamp === 'string' ? obj.timestamp : null
+    const blocks = Array.isArray(msg.content) ? (msg.content as Array<Record<string, unknown>>) : []
+    if (role === 'user') {
+      let text = ''
+      for (const block of blocks) {
+        if (block?.type === 'text' && typeof block.text === 'string') text += block.text
+      }
+      if (text.trim()) out.push(msgOf('user', [textPart(text)], ts))
+      continue
+    }
+    if (role === 'assistant') {
+      // 一行 message 的多个块合成一条消息（thinking/text/toolCall 保持原顺序）
+      const parts: TranscriptPart[] = []
+      for (const block of blocks) {
+        if (block?.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
+          parts.push({ kind: 'thinking', text: block.thinking.slice(0, MAX_PART_TEXT) })
+        } else if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+          parts.push(textPart(block.text))
+        } else if (block?.type === 'toolCall') {
+          const name = String(block.name ?? 'tool')
+          let input = ''
+          try {
+            input = typeof block.arguments === 'string' ? block.arguments : JSON.stringify(block.arguments ?? '', null, 2)
+          } catch {
+            input = String(block.arguments)
+          }
+          parts.push({ kind: 'tool_use', name, input: input.slice(0, MAX_TOOL_TEXT) })
+        }
+      }
+      if (parts.length) out.push(msgOf('assistant', parts, ts))
+      continue
+    }
+    if (role === 'toolResult') {
+      let text = ''
+      for (const block of blocks) {
+        if (block?.type === 'text' && typeof block.text === 'string') text += block.text
+      }
+      out.push(
+        msgOf('user', [
+          { kind: 'tool_result', text: (text || '（空结果）').slice(0, MAX_TOOL_TEXT), isError: Boolean(msg.isError) },
+        ], ts)
+      )
+      continue
+    }
+  }
+  return out
+}
+
 /** reasonix：取最后一个完整行的 replace 帧（全量），前面的旧帧全部忽略 */
 export function parseReasonix(raw: string): TranscriptMessage[] {
   const lines = raw.split('\n').filter((l) => l.trim())
@@ -1111,7 +1212,9 @@ function parseAgentRaw(raw: string, kind: AgentKind): TranscriptMessage[] {
         ? parseQclaw(raw)
         : kind === 'kimi'
           ? parseKimi(raw)
-          : parseReasonix(raw)
+          : kind === 'pi'
+            ? parsePi(raw)
+            : parseReasonix(raw)
 }
 
 function loadMessages(sessionId: string, filePath: string, kind: AgentKind): TranscriptMessage[] {
@@ -1167,7 +1270,7 @@ export function dropAgentTranscriptCache(sessionId: string) {
  * 内容骤减、浏览器把视口钳到顶、再被拉回底，iOS 上肉眼可见），不动游标空答一轮等恢复；
  * 大亏空（真截断/文件轮换）才回尾页。reasonix replace 帧是真收缩，不在此列。
  */
-const APPEND_ONLY_KINDS: ReadonlySet<AgentKind> = new Set(['kimi', 'codex', 'qclaw', 'workbuddy'])
+const APPEND_ONLY_KINDS: ReadonlySet<AgentKind> = new Set(['kimi', 'codex', 'qclaw', 'workbuddy', 'pi'])
 const JITTER_TOLERANCE = 4
 
 export function paginateMessages(

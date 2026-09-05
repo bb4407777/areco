@@ -125,7 +125,7 @@ export function sourceColor(
 }
 
 /** 座舱有对话视图的会话：claude 系（结构化 transcript），或直读自家落盘的 agent */
-const CHAT_CAPABLE_COMMANDS = new Set(['codex', 'codebuddy', 'reasonix', 'kimi'])
+const CHAT_CAPABLE_COMMANDS = new Set(['codex', 'codebuddy', 'reasonix', 'kimi', 'pi'])
 
 export function chatCapable(
   session: { claudeSessionId: string | null; transcriptDir?: string | null; command: string; templateId: string },

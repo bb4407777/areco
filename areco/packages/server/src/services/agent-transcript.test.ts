@@ -632,3 +632,72 @@ test('尾屏对话框检出：claude 权限框/信任页 → 黄灯兜底；普�
   assert.equal(screenHasPendingChoice(['整理完成，共 12 条流水', '──────────────']), false)
   assert.equal(screenHasPendingChoice([]), false)
 })
+
+// ---- pi ----
+
+import { agentKindOf as kindOf, parsePi, piSessionIdOf, piSessionSlugs } from './agent-transcript'
+
+test('pi kind：harness 与命令名双识别，slug 按 pi 自家规则且双覆盖 realpath', () => {
+  assert.equal(kindOf('', 'pi'), 'pi')
+  assert.equal(agentKindOf('/Users/gao/.npm-global/bin/pi'), 'pi')
+  // pi 规则：去首个斜杠、[/\: → -，两端 -- 包裹
+  assert.deepEqual(piSessionSlugs('/Users/gao'), ['--Users-gao--'])
+  assert.deepEqual(piSessionSlugs('/private/tmp'), ['--private-tmp--'])
+  const slugs = piSessionSlugs('/tmp')
+  assert.ok(slugs.includes('--tmp--'))
+  assert.ok(slugs.includes('--private-tmp--'))
+})
+
+test('piSessionIdOf 取文件名 uuid 段', () => {
+  assert.equal(
+    piSessionIdOf('/root/--private-tmp--/2026-09-05T02-41-57-923Z_01a06f71-b4a3-7b59-a5d4-bad748fdc4ab.jsonl'),
+    '01a06f71-b4a3-7b59-a5d4-bad748fdc4ab'
+  )
+  assert.equal(piSessionIdOf('/root/wire.jsonl'), '')
+})
+
+test('parsePi：user/assistant/toolResult 行 → 气泡消息，元数据行忽略', () => {
+  const raw = [
+    JSON.stringify({ type: 'session', version: 3, id: '01a06f71-b4a3-7b59-a5d4-bad748fdc4ab', timestamp: '2026-09-05T02:41:57.923Z', cwd: '/private/tmp' }),
+    JSON.stringify({ type: 'model_change', id: 'e93cb10b', parentId: null, timestamp: '2026-09-05T02:41:57.951Z', provider: 'kimi', modelId: 'k3-256k' }),
+    JSON.stringify({
+      type: 'message', id: 'm1', parentId: 'e93cb10b', timestamp: '2026-09-05T02:41:57.959Z',
+      message: { role: 'user', content: [{ type: 'text', text: '只回复两个字母ok' }], timestamp: 1788576117959 },
+    }),
+    JSON.stringify({
+      type: 'message', id: 'm2', parentId: 'm1', timestamp: '2026-09-05T02:42:02.384Z',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '用户想要 ok', thinkingSignature: 'reasoning_content' },
+          { type: 'toolCall', id: 'call_00', name: 'bash', arguments: { command: 'echo hi' } },
+          { type: 'text', text: 'ok' },
+        ],
+        stopReason: 'stop',
+      },
+    }),
+    JSON.stringify({
+      type: 'message', id: 'm3', parentId: 'm2', timestamp: '2026-09-05T02:42:03.100Z',
+      message: { role: 'toolResult', toolCallId: 'call_00', toolName: 'bash', isError: true, content: [{ type: 'text', text: 'boom' }] },
+    }),
+    '{"type":"message","broken',
+  ].join('\n')
+  const messages = parsePi(raw)
+  assert.equal(messages.length, 3)
+  assert.deepEqual(
+    messages.map((m) => m.role),
+    ['user', 'assistant', 'user']
+  )
+  assert.equal(messages[0].parts[0].kind, 'text')
+  assert.deepEqual(
+    messages[1].parts.map((p) => p.kind),
+    ['thinking', 'tool_use', 'text']
+  )
+  const toolUse = messages[1].parts[1] as { kind: 'tool_use'; name: string; input: string }
+  assert.equal(toolUse.name, 'bash')
+  assert.ok(toolUse.input.includes('echo hi'))
+  const toolResult = messages[2].parts[0] as { kind: 'tool_result'; text: string; isError: boolean }
+  assert.equal(toolResult.text, 'boom')
+  assert.equal(toolResult.isError, true)
+  assert.equal(messages[0].timestamp, '2026-09-05T02:41:57.959Z')
+})
