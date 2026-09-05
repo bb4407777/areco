@@ -465,7 +465,8 @@ function clearLog() {
       </template>
     </n-card>
 
-    <n-card size="small" class="block">
+    <!-- 2026-08-11 高律师定：设置页隐藏 StandCode 默认角色卡片，逻辑保留（standcodeInput/saveStandcode 仍在 script 中） -->
+    <n-card v-if="false" size="small" class="block">
       <template #header>StandCode 默认角色</template>
 
       <div v-for="role in STANDCODE_ROLES" :key="role.key" class="pref-row">
