@@ -17,15 +17,26 @@
 //   - 坑4 大量 assistant 消息 content 为空、正文在 tool_calls 里，需展开成 tool_use part；
 //   - session_meta 角色丢弃（weixin active 12 条，无 areco 对应概念）。
 import { DatabaseSync } from 'node:sqlite'
+import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { TranscriptMessage, TranscriptPage, TranscriptPart } from '../../../shared/protocol'
 
 // DB 路径解析（与 hermes-handoff.ts 的 hermesHomeOf 同口径）：
-//   ARECO_WEIXIN_STATE_DB 直指文件 > HERMES_HOME 目录 > 默认 ~/.qclaw-hermes（微信 gateway 实际落盘处）
+//   ARECO_WEIXIN_STATE_DB 直指文件 > HERMES_HOME 目录 > ~/.hermes（微信 gateway 现落盘处）
+//   > ~/.qclaw-hermes（2026-09 前旧名，仅存即回落，防老机器/旧数据静默失联）
 const STATE_DB =
   process.env.ARECO_WEIXIN_STATE_DB ||
-  path.join((process.env.HERMES_HOME && process.env.HERMES_HOME.trim()) || path.join(os.homedir(), '.qclaw-hermes'), 'state.db')
+  path.join(hermesHomeDir(), 'state.db')
+
+function hermesHomeDir(): string {
+  const env = process.env.HERMES_HOME?.trim()
+  if (env) return env
+  const home = os.homedir()
+  const current = path.join(home, '.hermes')
+  if (fs.existsSync(path.join(current, 'state.db'))) return current
+  return path.join(home, '.qclaw-hermes')
+}
 
 const SOURCE = 'weixin'
 const PAGE_MESSAGES = 80 // 与 agent-transcript.ts 同口径：每页消息条数
