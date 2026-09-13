@@ -1,17 +1,14 @@
-# StandCode
+# Areco
 
-> 替身使者不亲自战斗——它召唤替身。
-> **StandCode 为主**：Caller / Thinker / Worker 三层 agent 编排框架——让一个常驻入口 agent（比如接微信的 Hermes）指挥任意 CLI agent 干活，任务全程看板可见，结果落收信箱，零轮询零多余 token。
-> **areco 为辅**：承载 Stand 的会话看板底座（网页远程座舱），StandCode 的执行场。
+> **2026-09-13 起 StandCode 组件退役**：本仓回归单一 areco 项目（源码扁平化至仓根，
+> standcode/ 已移除，历史在 git 里）。两个 GitHub 仓
+> [bb4407777/standcode](https://github.com/bb4407777/standcode) 与
+> [bb4407777/areco](https://github.com/bb4407777/areco) 内容恒等，
+> 推送用 `scripts/sync-areco-mirror.sh`（先主后镜像，双仓同推）。
 
-本仓是两者的 monorepo（主仓 [bb4407777/standcode](https://github.com/bb4407777/standcode)，[bb4407777/areco](https://github.com/bb4407777/areco) 为每日自动同步的全量镜像）：
-
-| 组件 | 位置 | 是什么 | npm |
-|---|---|---|---|
-| **StandCode**（主） | `standcode/` | 三层编排框架：派单 CLI `caller.py` + 收信箱 + 角色/harness/preset 配置 | [`standcode`](https://www.npmjs.com/package/standcode) |
-| **areco**（辅·底座） | `packages/` | 多 agent 会话座舱：pty 服务端、transcript、项目房间、设备接管 | [`areco`](https://www.npmjs.com/package/areco) |
-
-StandCode 的用法见 [standcode/README.md](standcode/README.md)；以下为底座 areco 的文档。
+| 是什么 | npm |
+|---|---|
+| 多 agent 会话座舱：pty 服务端、transcript、项目房间、设备接管 | [`areco`](https://www.npmjs.com/package/areco) |
 
 ---
 

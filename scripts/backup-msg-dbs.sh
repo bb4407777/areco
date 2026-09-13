@@ -8,7 +8,7 @@
 # 每库保留最近 7 份。挂 cc-connect cron 每日执行由高律师定（本脚本幂等，随时手跑）。
 set -euo pipefail
 
-DATA_DIR="${ARECO_DATA_DIR:-/Users/gao/Code/StandCode-deploy/areco/data}"
+DATA_DIR="${ARECO_DATA_DIR:-/Users/gao/Code/areco/data}"
 DEST="${ARECO_DB_BACKUP_DIR:-/Users/gao/.backups/areco-db}"
 KEEP=7
 STAMP=$(date +%Y%m%d-%H%M)
