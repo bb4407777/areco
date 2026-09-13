@@ -520,6 +520,20 @@ function clearLog() {
         </div>
         <n-switch :value="ui.showToolResult" @update:value="ui.setShowToolResult" />
       </div>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">导航栏「任务」入口</div>
+          <div class="pref-hint">默认显示，关掉后顶栏不再出现「任务」；直连 /tasks 仍可达。保存在服务端，跨浏览器/设备生效</div>
+        </div>
+        <n-switch :value="ui.showTasks" @update:value="ui.setShowTasks" />
+      </div>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">导航栏「项目」入口</div>
+          <div class="pref-hint">默认显示，关掉后顶栏不再出现「项目」；直连 /projects 仍可达。保存在服务端，跨浏览器/设备生效</div>
+        </div>
+        <n-switch :value="ui.showProjects" @update:value="ui.setShowProjects" />
+      </div>
     </n-card>
 
     <n-card size="small" class="block">

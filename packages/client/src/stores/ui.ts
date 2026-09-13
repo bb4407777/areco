@@ -23,12 +23,16 @@ interface UiPrefs {
   showToolUse: boolean
   /** 对话模式：显示工具结果 tool_result（默认关，勾选才显示） */
   showToolResult: boolean
+  /** 顶栏导航「任务」入口（默认显示，关掉隐藏；直连 /tasks 仍可达）。服务端 SoT */
+  showTasks: boolean
+  /** 顶栏导航「项目」入口（默认显示，关掉隐藏；直连 /projects 仍可达）。服务端 SoT */
+  showProjects: boolean
   /** 新建会话表单形态：role = 只选 Worker/Thinker（默认）；template = 旧模板下拉。
    *  服务端 SoT（GET/PUT /api/ui/prefs），跨浏览器/设备生效；缺省回落 'role' */
   spawnMode: 'role' | 'template'
 }
 
-const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false, spawnMode: 'template' }
+const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false, showTasks: true, showProjects: true, spawnMode: 'template' }
 
 function load(): UiPrefs {
   try {
@@ -54,8 +58,8 @@ export const useUiStore = defineStore('ui', {
   },
   actions: {
     persist() {
-      const { fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, spawnMode } = this
-      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, spawnMode }))
+      const { fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, showTasks, showProjects, spawnMode } = this
+      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, showTasks, showProjects, spawnMode }))
     },
     setSessionView(mode: SessionViewMode) {
       this.sessionView = mode
@@ -76,8 +80,18 @@ export const useUiStore = defineStore('ui', {
       this.persist()
       this.pushShowPrefs({ showToolResult: v })
     },
+    setShowTasks(v: boolean) {
+      this.showTasks = v
+      this.persist()
+      this.pushShowPrefs({ showTasks: v })
+    },
+    setShowProjects(v: boolean) {
+      this.showProjects = v
+      this.persist()
+      this.pushShowPrefs({ showProjects: v })
+    },
     /** fire-and-forget 把显示开关写回服务端（SoT）；失败静默——localStorage 已是完整缓存 */
-    pushShowPrefs(prefs: Partial<Record<'showThinking' | 'showToolUse' | 'showToolResult', boolean | null>>) {
+    pushShowPrefs(prefs: Partial<Record<'showThinking' | 'showToolUse' | 'showToolResult' | 'showTasks' | 'showProjects', boolean | null>>) {
       putUiPrefs(prefs).catch(() => { /* 静默：旧版服务端无此端点/网络不可达时行为与纯 localStorage 一致 */ })
     },
     /** 启动时与服务端同步显示开关：服务端有显式值的键覆盖本地并 persist；
@@ -86,13 +100,13 @@ export const useUiStore = defineStore('ui', {
     async syncFromServer() {
       try {
         const remote = await getUiPrefs()
-        const keys = ['showThinking', 'showToolUse', 'showToolResult'] as const
+        const keys = ['showThinking', 'showToolUse', 'showToolResult', 'showTasks', 'showProjects'] as const
         const explicit = keys.filter((k) => typeof remote[k] === 'boolean')
         if (explicit.length) {
           for (const k of explicit) this[k] = remote[k]!
           this.persist()
         } else if (keys.some((k) => this[k] !== DEFAULT_PREFS[k])) {
-          this.pushShowPrefs({ showThinking: this.showThinking, showToolUse: this.showToolUse, showToolResult: this.showToolResult })
+          this.pushShowPrefs({ showThinking: this.showThinking, showToolUse: this.showToolUse, showToolResult: this.showToolResult, showTasks: this.showTasks, showProjects: this.showProjects })
         }
         // 2026-08-01 高律师定：新建会话模式已取消（固定模板），服务端残留 spawnMode 键不再应用
       } catch { /* 静默：见上 */ }

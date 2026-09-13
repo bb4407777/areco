@@ -80,6 +80,10 @@ export interface UiPrefs {
   showThinking?: boolean
   showToolUse?: boolean
   showToolResult?: boolean
+  /** 顶栏导航「任务」入口（缺省 = 显示；false = 隐藏，直连 /tasks 仍可达） */
+  showTasks?: boolean
+  /** 顶栏导航「项目」入口（缺省 = 显示；false = 隐藏，直连 /projects 仍可达） */
+  showProjects?: boolean
   /** 新建会话表单形态：role = 只选 Worker/Thinker（默认，模板下沉为实现层）；
    *  template = 旧模板下拉。设置页「StandCode 默认角色」卡片可切回。 */
   spawnMode?: 'role' | 'template'

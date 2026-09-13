@@ -252,7 +252,7 @@ export class ApiControllers {
   updateUiPrefs = (ctx: Context) =>
     guard(ctx, () => {
       const body = (ctx.request.body ?? {}) as Partial<Record<keyof UiPrefs, unknown>>
-      const keys = ['showThinking', 'showToolUse', 'showToolResult', 'spawnMode'] as const
+      const keys = ['showThinking', 'showToolUse', 'showToolResult', 'showTasks', 'showProjects', 'spawnMode'] as const
       const provided = keys.filter((k) => body[k] !== undefined)
       if (!provided.length) throw new Error(`未提供可更新字段（${keys.join('/')}）`)
       const ui: UiPrefs = { ...(this.config.ui ?? {}) }

@@ -181,12 +181,12 @@ export function loadConfig(): AppConfig {
       }
       return Object.keys(sc).length ? { standcode: sc } : {}
     })(),
-    // ui 同 standcode 口径：白名单拷贝只收三个显示开关（布尔）+ spawnMode（role/template），
+    // ui 同 standcode 口径：白名单拷贝只收五个显示开关（布尔）+ spawnMode（role/template），
     // 漏掉 = 重启剥字段 + 下次保存回写永久丢失
     ...(() => {
       const rawUi = (raw.ui ?? {}) as Partial<UiPrefs>
       const ui: UiPrefs = {}
-      for (const k of ['showThinking', 'showToolUse', 'showToolResult'] as const) {
+      for (const k of ['showThinking', 'showToolUse', 'showToolResult', 'showTasks', 'showProjects'] as const) {
         const v = rawUi[k]
         if (typeof v === 'boolean') ui[k] = v
       }
