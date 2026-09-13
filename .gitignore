@@ -28,3 +28,10 @@ config.json
 # Understand-Anything 图谱输出(23MB 生成物,重跑可再生)
 /.ua/
 __pycache__/
+
+# StandCode 退役后运行配置迁居仓根 config/（含凭证/本机路径，只入 *.example.json）
+/config/harnesses.json
+/config/providers.json
+/config/local.json
+/config/models.json
+/config/presets.json
