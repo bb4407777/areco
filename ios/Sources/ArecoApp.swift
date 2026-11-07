@@ -4,6 +4,9 @@ import SwiftUI
 @main
 struct ArecoApp: App {
     @StateObject private var store = ServerStore()
+    /// 网页当前主题：前端 applyTheme 经 arecoTheme 桥回传。原生外观（状态栏、键盘、设置页、底色）
+    /// 一律跟网页走——壳里曾硬编码 .dark，网页浅色时顶部状态栏和键盘却是黑的（2026-11-07 报障）
+    @State private var webTheme = "light"
 
     init() {
         // WKWebView 里的 WebAudio 默认走 ambient，iPhone 侧边静音开关一拨就没声；
@@ -15,9 +18,9 @@ struct ArecoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(webTheme: $webTheme)
                 .environmentObject(store)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(webTheme == "dark" ? .dark : .light)
                 .task { await store.resolve() }
         }
     }
@@ -25,22 +28,27 @@ struct ArecoApp: App {
 
 struct ContentView: View {
     @EnvironmentObject private var store: ServerStore
+    @Binding var webTheme: String
     @State private var showSettings = false
+
+    /// 与前端 --bar 同色（浅 #ffffff / 深 #141419）：状态栏那条缝隙与网页顶栏无缝
+    private var shellBackground: Color {
+        webTheme == "dark" ? Color(red: 0.078, green: 0.078, blue: 0.098) : .white
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            Color(red: 0.06, green: 0.06, blue: 0.08).ignoresSafeArea()
+            shellBackground.ignoresSafeArea()
 
             switch store.phase {
             case .probing:
                 ProgressView("正在连接…")
-                    .tint(.white)
                     .foregroundStyle(.secondary)
             case .failed(let message):
                 failureView(message)
             case .ready:
                 if let endpoint = store.active {
-                    WebAppView(url: endpoint.url) {
+                    WebAppView(url: endpoint.url, theme: $webTheme) {
                         store.handlePageFailure(of: endpoint)
                     }
                     .id(endpoint.url)

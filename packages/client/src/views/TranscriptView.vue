@@ -129,6 +129,10 @@ const scroller = ref<HTMLElement | null>(null)
 // 离底超过该阈值显示「回到最新」悬浮按钮（不做贴底自动跟滚，追新一律手动点按钮）
 const NEAR_BOTTOM_PX = 160
 const showJump = ref(false)
+// 是否贴底：iOS 壳弹键盘时 WebView 变矮（容器 resize），scrollTop 不变 → 末条被输入栏切掉。
+// 记住用户是否贴底，高度变化时贴底的跟回底部，上翻中的不打扰（与「不自动跟滚」同口径）
+let stickBottom = true
+let streamObserver: ResizeObserver | null = null
 let cursor = 0 // 向前增量续读点（字节）；0 = 尚未拿到尾页（服务端按尾页响应）
 let start = 0 // 最早已载页的起始字节，「加载更早」传 before=start
 // 向前翻页时 firstIndex 后退，保证已渲染消息的 key 稳定不漂移
@@ -160,7 +164,25 @@ watch(sessionId, (newId, oldId) => {
 
 function scrollToBottom(behavior?: ScrollBehavior) {
   const el = scroller.value
-  el?.scrollTo({ top: el.scrollHeight, behavior })
+  if (!el) return
+  stickBottom = true
+  el.scrollTo({ top: el.scrollHeight, behavior })
+}
+
+// 流高度变化（键盘弹收、附件条展开、窗口缩放）：贴底的跟到底，否则只对账「回到最新」按钮
+function onStreamResize() {
+  if (stickBottom) scrollToBottom()
+  else onScroll()
+}
+
+// 键盘弹出前（focus 先于 WebView 变矮）先把输入框拉进视野：一屏内视为在看最新，直接贴底；
+// 之后容器被键盘压矮由 onStreamResize 继续跟，避免只跟半截、末条被输入栏切掉
+function onFocusIn(e: FocusEvent) {
+  const target = e.target as HTMLElement | null
+  if (!target?.classList?.contains('prompt-input')) return
+  const el = scroller.value
+  if (!el) return
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < el.clientHeight) scrollToBottom()
 }
 
 // 终端尾屏面板：TUI 的选择框/确认提示只画在终端屏幕上、不进 transcript——
@@ -382,6 +404,7 @@ function onScroll() {
     const el = scroller.value
     if (!el) return
     showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
+    stickBottom = !showJump.value
     if (el.scrollTop < NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
   })
 }
@@ -403,11 +426,19 @@ function switchMode(mode: SessionViewMode) {
 onMounted(() => {
   void poll()
   timer = window.setInterval(() => void poll(), POLL_MS)
+  if (scroller.value) {
+    streamObserver = new ResizeObserver(() => onStreamResize())
+    streamObserver.observe(scroller.value)
+  }
+  document.addEventListener('focusin', onFocusIn)
 })
 onBeforeUnmount(() => {
   if (timer !== null) clearInterval(timer)
   if (scrollFrame) cancelAnimationFrame(scrollFrame)
   if (olderUnlock !== null) clearTimeout(olderUnlock)
+  streamObserver?.disconnect()
+  streamObserver = null
+  document.removeEventListener('focusin', onFocusIn)
 })
 </script>
 
