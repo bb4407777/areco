@@ -158,7 +158,7 @@ onUnmounted(() => {
     <section class="block done-block">
       <div class="block-head">
         <h3>今日已完成</h3>
-        <span class="hint">今天 {{ runsOk.length }} 单 · 换轨的显示 轨1→轨2</span>
+        <span class="hint">今天 {{ runsOk.length }} 单</span>
       </div>
       <div v-if="!ui.isMobile" class="table-wrap">
         <table>
@@ -178,8 +178,7 @@ onUnmounted(() => {
               <td>{{ r.dept }}</td>
               <td class="title" :title="r.title">{{ r.title }}</td>
               <td class="mono track-cell">
-                {{ r.tracks || r.track }}
-                <span v-if="r.fallback" class="tag fallback">换轨</span>
+                {{ r.track }}
               </td>
               <td class="mono">{{ r.model }}</td>
               <td class="num">{{ fmtDur(r.durS) }}</td>
@@ -195,8 +194,7 @@ onUnmounted(() => {
             <span class="tag ok">成</span>
           </div>
           <div class="card-meta">
-            <span class="mono card-track">{{ r.tracks || r.track }}</span>
-            <span v-if="r.fallback" class="tag fallback">换轨</span>
+            <span class="mono card-track">{{ r.track }}</span>
             <span class="mono">{{ r.model }}</span>
           </div>
           <div class="card-meta">
@@ -266,7 +264,7 @@ onUnmounted(() => {
     <section v-if="runsBad.length" class="block">
       <div class="block-head">
         <h3>今天失败</h3>
-        <span class="hint">{{ runsBad.length }} 单 · 换轨单显示 轨1→轨2</span>
+        <span class="hint">{{ runsBad.length }} 单</span>
       </div>
       <div v-if="!ui.isMobile" class="table-wrap">
         <table>
@@ -288,8 +286,7 @@ onUnmounted(() => {
               <td>{{ r.dept }}</td>
               <td class="title" :title="r.title">{{ r.title }}</td>
               <td class="mono track-cell">
-                {{ r.tracks || r.track }}
-                <span v-if="r.fallback" class="tag fallback">换轨</span>
+                {{ r.track }}
               </td>
               <td class="mono">{{ r.model }}</td>
               <td class="num">{{ fmtDur(r.durS) }}</td>
@@ -309,8 +306,7 @@ onUnmounted(() => {
             <span class="tag" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成' : r.errKind || '败' }}</span>
           </div>
           <div class="card-meta">
-            <span class="mono card-track">{{ r.tracks || r.track }}</span>
-            <span v-if="r.fallback" class="tag fallback">换轨</span>
+            <span class="mono card-track">{{ r.track }}</span>
             <span class="mono">{{ r.model }}</span>
           </div>
           <div class="card-meta">
@@ -567,11 +563,6 @@ tbody tr.bad {
 .tag.bad {
   border-color: var(--danger);
   color: var(--danger);
-}
-.tag.fallback {
-  margin-left: 4px;
-  border-color: #e8a33d;
-  color: #e8a33d;
 }
 .empty {
   padding: 24px;
