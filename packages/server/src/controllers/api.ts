@@ -10,7 +10,7 @@ import type { SessionManager } from '../services/session-manager'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
 import { DATA_DIR, saveConfig } from '../config'
-import { readTranscriptFile, transcriptPath } from '../services/transcript'
+import { parseTranscriptLine, readTranscriptFile, transcriptPath } from '../services/transcript'
 import { agentKindOf, codexSessionIdOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseCodex, parseQclaw, parseWorkbuddy, readAgentTranscript } from '../services/agent-transcript'
 import {
   defaultHistoryRoots,
@@ -22,11 +22,13 @@ import {
   piWorkDirOf,
   readHistoryAllMessages,
   readHistoryPage,
+  readVisibleHistoryPage,
   resolveHistoryFile,
   resolveKimiWire,
   resolvePiSessionFile,
 } from '../services/history'
 import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/chatlog'
+import { parseHideParam } from '../services/transcript-visibility'
 import { sweepForDir } from '../services/dir-sweep'
 
 // 与 history.ts 的 SAFE_SEGMENT 同规则：单段路径只允许安全字符（本地副本，history.ts 未导出该常量）
@@ -453,9 +455,12 @@ export class ApiControllers {
       // 同名目录（codebuddy → ~/.codebuddy/projects 是 codebuddy 自家格式，按 claude 布局
       // 解析必得 0 条，2026-07-27 workbuddy 对话模式空白报障）；其余 claude 布局衍生 CLI
       //（qoder 等）走 transcriptDir，缺 claudeSessionId 的 claude 包装器按时间窗兜底
+      // 对话模式默认隐藏思考/工具块（ChatMessage 侧过滤）：hide=thinking,tool_use,tool_result
+      // 传进来后服务端先剔掉整条不可见的消息、再按可见条数向前补页，免得一页过滤完只剩空屏
+      const visible = parseHideParam(ctx.query.hide) ?? undefined
       const kind = agentKindOf(session.command, this.templates.get(session.templateId)?.harness)
       if (kind && !session.claudeSessionId) {
-        ok(ctx, readAgentTranscript(session, kind, { cursor, before }))
+        ok(ctx, readAgentTranscript(session, kind, { cursor, before, visible }))
         return
       }
       let filePath: string | null = null
@@ -475,13 +480,16 @@ export class ApiControllers {
       // claude 格式：首载（cursor=0）与「加载更早」（before）走尾部倒序字节分页；
       // cursor>0 是既有的向前增量轮询（实时追新）
       if (before !== undefined || cursor === 0) {
-        const page = readHistoryPage(filePath, before)
+        const page = visible
+          ? readVisibleHistoryPage(filePath, before, parseTranscriptLine, visible)
+          : readHistoryPage(filePath, before)
         ok(ctx, {
           exists: true,
           messages: page.messages,
           cursor: page.end,
           start: page.start,
           hasMore: page.hasMore,
+          hiddenOnly: page.hiddenOnly,
         } satisfies TranscriptPage)
         return
       }

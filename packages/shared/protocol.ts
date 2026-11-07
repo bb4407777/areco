@@ -313,6 +313,8 @@ export interface TranscriptPage {
   start?: number
   /** start 之前还有更早内容 */
   hasMore?: boolean
+  /** 这一段翻到的都是被隐藏的类别（思考/工具），过滤后没剩内容；前端给个提示别停在空屏 */
+  hiddenOnly?: boolean
 }
 
 // ---- 历史对话（Phase 3）：读盘浏览 ~/.claude/projects（reasonix 同构）的既往会话 ----
@@ -342,6 +344,8 @@ export interface HistoryTranscriptPage {
   start: number
   end: number
   hasMore: boolean
+  /** 本页过滤后为空：翻到的都是隐藏类别（思考/工具） */
+  hiddenOnly?: boolean
 }
 
 export interface StatsSummary {
