@@ -41,6 +41,9 @@ test('分类：服务/后台/CLI/其他', () => {
   assert.equal(classify('/x/skills/cc-connect/bin/cc-connect').kind, 'service')
   assert.equal(classify('node /x/skills/opc/scripts/pi-worker.py').kind, 'worker')
   assert.equal(classify('node /x/cli/bin/codebuddy --acp').kind, 'cli')
+  // OPC 轨道池的另两条引擎二进制也要认出轨名，别落到「其他」
+  assert.equal(classify('/Users/gao/bin/qodercli-fixed --model Qwen3.8-Flash').label, 'qoder 轨 CLI')
+  assert.equal(classify('/Users/gao/.npm-global/bin/mcode exec --permission full').label, 'MiniMax mcode 轨')
   assert.equal(classify('/usr/bin/vim foo.txt').kind, 'other')
 })
 

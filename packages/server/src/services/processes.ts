@@ -36,6 +36,8 @@ const RULES: Rule[] = [
   { re: /ego-browser/, kind: 'service', label: 'ego 浏览器' },
   { re: /hindsight/, kind: 'service', label: 'hindsight' },
   { re: /skills\/opc\/(scripts|lib)\/|pi-worker|chat-dispatch\.py|kanban|orchestrat/, kind: 'worker', label: 'OPC 后台' },
+  { re: /bin\/qodercli(?:cn)?-fixed|bin\/qodercli$|qodercli/, kind: 'cli', label: 'qoder 轨 CLI' },
+  { re: /npm-global\/bin\/mcode|@minimax-ai\/code\//, kind: 'cli', label: 'MiniMax mcode 轨' },
   { re: /cli\/bin\/codebuddy/, kind: 'cli', label: 'CodeBuddy CLI' },
 ]
 
