@@ -25,6 +25,8 @@ import { createHostOriginGuard, createApiKeyGuard, createSessionGuard } from './
 import { Gateway } from './ws/gateway'
 import { FileService } from './services/files'
 import { ProjectFileService } from './services/project-files'
+import { TtsService } from './services/tts'
+import { TtsController } from './controllers/tts'
 
 declare const __APP_VERSION__: string | undefined
 
@@ -92,6 +94,8 @@ async function main() {
     humanRelayAgents: config.humanRelayAgents ?? [],
   })
   const roomControllers = new RoomControllers(rooms, roomRelay, manager, templates, projectFiles)
+  const tts = new TtsService()
+  const ttsController = new TtsController(tts)
 
   const app = new Koa()
   app.proxy = false
@@ -138,7 +142,7 @@ async function main() {
   app.use(createApiKeyGuard(config))
   // protected：以下全部需要登录（cookie 登录，或已被 apiKeyGuard 标记的 X-API-Key）
   app.use(createSessionGuard(auth))
-  const apiRouter = createApiRouter(controllers, roomControllers)
+  const apiRouter = createApiRouter(controllers, roomControllers, ttsController)
   app.use(apiRouter.routes()).use(apiRouter.allowedMethods())
   // Hermes webhook 事件只读查询（F2）：会话守卫之后 = 吃 cookie/X-API-Key 既有鉴权；
   // 独立模块自带路由（同 weixin.ts 独立控制器风格），X-API-Key 放行面在 middleware/auth.ts isApiKeyScope
@@ -200,6 +204,7 @@ async function main() {
       .then(() => stopBridgeRuntime()) // bridge sidecar 是 server 子进程，级联停掉
       .catch(() => undefined)
       .then(() => {
+        tts.stop()
         roomRelay.stop()
         gateway.shutdown()
         server.close(() => {

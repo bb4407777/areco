@@ -12,10 +12,21 @@ import { isTaskNotification, parseTaskNotification } from '../utils/notify'
 import { useUiStore } from '../stores/ui'
 import { useMessage } from 'naive-ui'
 import { wsClient } from '../ws'
+import { transcriptSpeechId, transcriptSpeechText } from '../utils/speechText'
+import { useSpeechStore } from '../stores/speech'
 
-const props = defineProps<{ message: TranscriptMessage; agentLabel?: string; sessionId?: string; interactive?: boolean; highlight?: string; highlightActive?: boolean }>()
+const props = defineProps<{ message: TranscriptMessage; agentLabel?: string; sessionId?: string; interactive?: boolean; highlight?: string; highlightActive?: boolean; speakable?: boolean }>()
 const emit = defineEmits<{ preview: [path: string] }>()
+
+const speechText = computed(() => props.speakable ? transcriptSpeechText(props.message) : '')
+const speechId = computed(() => transcriptSpeechId(props.sessionId ?? 'history', props.message))
+function toggleSpeech() {
+  if (!speechText.value) return
+  if (speech.playingId === speechId.value) speech.stop()
+  else speech.playManual({ messageId: speechId.value, text: speechText.value })
+}
 const ui = useUiStore()
+const speech = useSpeechStore()
 
 // 任务通知兜底归类：服务端旧版把 <task-notification> 合成行当 text 段（解析层已改产 notice，
 // 待重启生效），前端按内容再归一次——重启前立即生效，重启后此分支自然空转
@@ -295,6 +306,12 @@ function highlightInHtml(html: string, kw: string, active: boolean): string {
         </div>
       </div>
       <div class="msg-foot">
+        <button
+          v-if="speechText"
+          type="button"
+          class="copy-btn speech-btn"
+          @click="toggleSpeech"
+        >{{ speech.playingId === speechId ? '停止' : '播报' }}</button>
         <button
           v-if="copyText"
           type="button"

@@ -5,11 +5,13 @@ import { NConfigProvider, NDialogProvider, NMessageProvider, darkTheme, zhCN, da
 import type { GlobalThemeOverrides } from 'naive-ui'
 import { useSessionsStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
+import { useSpeechStore } from './stores/speech'
 import { wsClient } from './ws'
 import { frontendUpdateAvailable, frontendUpdateBlocked, reloadFrontendNow } from './utils/frontendUpdate'
 
 const store = useSessionsStore()
 const ui = useUiStore()
+const speech = useSpeechStore()
 const route = useRoute()
 
 const darkOverrides: GlobalThemeOverrides = {
@@ -40,6 +42,10 @@ const overrides = computed(() => (ui.theme === 'light' ? lightOverrides : darkOv
 const inSession = computed(() => ui.isMobile && (route.path.startsWith('/session/') || route.path.startsWith('/history/')))
 const connected = wsClient.connected
 
+function onAutoSpeechChange(event: Event) {
+  speech.setAutoEnabled((event.target as HTMLInputElement).checked)
+}
+
 function forceUpdate() {
   if (frontendUpdateBlocked.value && !window.confirm('当前有未发送内容，立即更新会丢失这些文字。仍要更新吗？')) return
   reloadFrontendNow(true)
@@ -63,11 +69,22 @@ function forceUpdate() {
               <router-link to="/history" class="nav-link" :class="{ active: route.path.startsWith('/history') }">历史</router-link>
               <router-link to="/weixin" class="nav-link" :class="{ active: route.path.startsWith('/weixin') }">微信</router-link>
               <router-link to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">设置</router-link>
+              <label class="speech-auto" title="只播新完成的 Agent 正式文本；刷新后仍关闭">
+                <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />
+                自动播报
+              </label>
+              <button v-if="speech.playingId" class="nav-link" type="button" @click="speech.stop()">停止播报</button>
               <button class="nav-link theme-btn" type="button" :title="ui.theme === 'dark' ? '切到浅色' : '切到深色'" @click="ui.toggleTheme()">
                 {{ ui.theme === 'dark' ? '☀️' : '🌙' }}
               </button>
             </nav>
           </header>
+          <Transition name="fade">
+            <div v-if="speech.blocked" class="speech-banner">
+              <button type="button" @click="speech.resumeAudio()">点击恢复声音</button>
+            </div>
+          </Transition>
+          <div v-if="speech.error" class="speech-banner error">语音播报失败：{{ speech.error }}</div>
           <Transition name="fade">
             <div v-if="!connected && store.ready" class="conn-banner">连接已断开，正在重连…</div>
           </Transition>
@@ -139,6 +156,36 @@ function forceUpdate() {
 .nav-link.active {
   color: var(--text);
   background: var(--chip-bg);
+}
+.speech-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.speech-auto input {
+  margin: 0;
+}
+.speech-banner {
+  padding: 6px 16px;
+  background: var(--chip-bg);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+}
+.speech-banner button {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.speech-banner.error {
+  color: var(--danger);
 }
 .theme-btn {
   font-size: 14px;

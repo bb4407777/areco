@@ -1,0 +1,10 @@
+{
+  "port": 8792,
+  "tts_backend": "edge",
+  "tts_voice": "zh-CN-XiaoxiaoNeural",
+  "tts_rate": "+0%",
+  "kokoro_model": "",
+  "kokoro_voices": "",
+  "kokoro_voice": "zf_001",
+  "kokoro_speed": 1.0
+}

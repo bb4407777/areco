@@ -14,6 +14,7 @@
     "dist",
     "scripts/areco-msg.mjs",
     "config.example.json",
+    "voice",
     "NOTICE"
   ],
   "bin": {
@@ -45,7 +46,8 @@
     "start": "node dist/server/index.cjs",
     "prepublishOnly": "npm run build",
     "hash": "tsx packages/server/src/services/password.ts",
-    "test": "tsx --test \"packages/**/*.test.ts\""
+    "test": "tsx --test \"packages/**/*.test.ts\"",
+    "test:voice": "PYTHONPATH=. python3 -m unittest voice.tests.test_sentencer voice.tests.test_server"
   },
   "dependencies": {
     "node-pty": "^1.1.0",
