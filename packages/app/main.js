@@ -1,5 +1,5 @@
 // areco 桌面壳主进程：一个窗口加载 areco server，连不上时显示重试页
-const { app, BrowserWindow, shell } = require('electron')
+const { app, BrowserWindow, shell, Menu } = require('electron')
 const { join } = require('path')
 
 const ARECO_URL = (process.env.ARECO_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '')
@@ -49,6 +49,28 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Electron 默认没有右键菜单，壳里右键一片空白（选中的文字没法复制）。
+  // 按命中区域给原生角色项：可编辑处给剪切/复制/粘贴，有选中文本给复制，其余给全选。
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    const template = []
+    if (params.linkURL) {
+      template.push({ label: '在浏览器打开链接', click: () => shell.openExternal(params.linkURL) }, { type: 'separator' })
+    }
+    if (params.isEditable) {
+      template.push({ role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' })
+    } else {
+      if (params.selectionText.trim()) template.push({ role: 'copy', label: '复制' })
+      if (params.misspelledWord) {
+        for (const suggestion of params.dictionarySuggestions.slice(0, 4)) {
+          template.push({ label: suggestion, click: () => mainWindow.webContents.replaceMisspelling(suggestion) })
+        }
+        if (params.dictionarySuggestions.length) template.push({ type: 'separator' })
+      }
+    }
+    template.push({ type: 'separator' }, { role: 'selectAll', label: '全选' })
+    Menu.buildFromTemplate(template).popup({ window: mainWindow })
   })
 
   // 服务不可达（没启动/重启中）时进重试页，由它轮询恢复后自动跳回
