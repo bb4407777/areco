@@ -320,37 +320,70 @@ async function poll() {
   }
 }
 
+// 「加载更早」：照 weSaw 的做法——滚动离顶 48px 内自动补页，带锁防连环，插完按绝对位置复位
+const NEAR_TOP_PX = 48
+let olderLock = false
+let olderUnlock: number | null = null
+
+function nextFrame() {
+  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+}
+
 async function loadOlder() {
-  if (loadingOlder.value || !hasMore.value) return
+  if (olderLock || loadingOlder.value || !hasMore.value) return
+  olderLock = true
+  loadingOlder.value = true
   const gen = sessionGen
   const id = sessionId.value
   const before = start
-  loadingOlder.value = true
   try {
     const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${before}`)
     if (gen !== sessionGen) return
     speechTracker.addBaseline(id, page.messages)
-    const el = scroller.value
-    const prevHeight = el?.scrollHeight ?? 0
-    firstIndex.value -= page.messages.length
-    messages.value = [...page.messages, ...messages.value]
     hasMore.value = page.hasMore ?? false
     start = page.start ?? 0
+    if (!page.messages.length) return
+    // 请求期间用户还在滑：插入前现量一次，按此刻的位置复位，不会被请求耗时带偏
+    const el = scroller.value
+    const prevTop = el?.scrollTop ?? 0
+    const prevHeight = el?.scrollHeight ?? 0
+    const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
+    firstIndex.value -= page.messages.length
+    messages.value = [...page.messages, ...messages.value]
     await nextTick()
-    // 维持视口停在原内容处
-    if (el) el.scrollTop += el.scrollHeight - prevHeight
+    if (!el) return
+    // 绝对赋值而不是累加：浏览器自己的滚动锚定若已补过，这里也不会补第二次
+    const added = el.scrollHeight - prevHeight
+    if (added > 0) el.scrollTop = prevTop + added
+    else if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+    // 图片/折叠块可能晚一帧才量准，再校一次，确保视口仍停在原来那条消息上
+    await nextFrame()
+    if (el.scrollTop < NEAR_TOP_PX && anchor) {
+      el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+    }
   } catch {
     /* 下次点再试 */
   } finally {
     if (gen === sessionGen) loadingOlder.value = false
+    if (olderUnlock !== null) clearTimeout(olderUnlock)
+    olderUnlock = window.setTimeout(() => {
+      olderLock = false
+    }, 250)
   }
 }
 
-// 滚动时只同步「回到最新」按钮可见性；「加载更早」只由按钮触发
+// 滚动事件每帧只处理一次，避免每个 scroll 都同步量 scrollHeight（长会话里这是主要卡顿源）
+let scrollFrame = 0
 function onScroll() {
-  const el = scroller.value
-  if (!el) return
-  showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
+  if (scrollFrame) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0
+    const el = scroller.value
+    if (!el) return
+    showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
+    if (el.scrollTop < NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
+  })
 }
 
 function jumpToLatest() {
@@ -373,6 +406,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (timer !== null) clearInterval(timer)
+  if (scrollFrame) cancelAnimationFrame(scrollFrame)
+  if (olderUnlock !== null) clearTimeout(olderUnlock)
 })
 </script>
 
@@ -398,7 +433,7 @@ onBeforeUnmount(() => {
       <div ref="scroller" class="stream" @scroll.passive="onScroll">
         <n-spin v-if="loading" class="center" />
         <template v-else>
-          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳（滚近顶部已自动翻页，按钮仅兜底） -->
+          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳（滑到顶会自动补页，按钮兜底） -->
           <div class="more">
             <template v-if="exists && messages.length">
               <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>

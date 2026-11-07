@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 历史会话正文：尾部先载 + 「加载更早」向前翻页（字节 before 游标，保持滚动位置）。
 // 只读视图；claude/kimi/codex/workbuddy 源可一键原生 resume 拉回看板继续（reasonix 拉选择器）。
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, NEmpty, NSpin, useMessage } from 'naive-ui'
 import type { HistoryTranscriptPage, SessionSummary, TranscriptMessage } from '../../../shared/protocol'
@@ -75,30 +75,69 @@ async function fetchTranscript() {
 }
 
 onMounted(() => void fetchTranscript())
+onBeforeUnmount(() => {
+  if (scrollFrame) cancelAnimationFrame(scrollFrame)
+  if (olderUnlock !== null) clearTimeout(olderUnlock)
+})
+
+// 与对话页同一套：离顶 48px 内自动补页，插完按绝对位置复位（weSaw 做法）
+const NEAR_TOP_PX = 48
+let olderLock = false
+let olderUnlock: number | null = null
+
+function nextFrame() {
+  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+}
 
 async function loadOlder() {
-  if (loadingOlder.value || !hasMore.value) return
+  if (olderLock || loadingOlder.value || !hasMore.value) return
+  olderLock = true
+  loadingOlder.value = true
   const gen = routeGen
   const url = `${baseUrl.value}/transcript?before=${start}`
-  loadingOlder.value = true
   try {
     const page = await api.get<HistoryTranscriptPage>(url)
     if (gen !== routeGen) return
+    // 插入前现量，按此刻的位置复位（请求期间用户还在滑也不受影响）
     const el = scroller.value
+    const prevTop = el?.scrollTop ?? 0
     const prevHeight = el?.scrollHeight ?? 0
+    const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
     firstIndex.value -= page.messages.length
     messages.value = [...page.messages, ...messages.value]
     hasMore.value = page.hasMore
     start = page.start
     await nextTick()
-    // 维持视口停在原内容处
-    if (el) el.scrollTop += el.scrollHeight - prevHeight
+    if (!el) return
+    const added = el.scrollHeight - prevHeight
+    if (added > 0) el.scrollTop = prevTop + added
+    else if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+    await nextFrame()
+    if (el.scrollTop < NEAR_TOP_PX && anchor) {
+      el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+    }
   } catch (err) {
     if (gen !== routeGen) return
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
     if (gen === routeGen) loadingOlder.value = false
+    if (olderUnlock !== null) clearTimeout(olderUnlock)
+    olderUnlock = window.setTimeout(() => {
+      olderLock = false
+    }, 250)
   }
+}
+
+// 滚动每帧处理一次：滑到顶自动补页，不靠手点
+let scrollFrame = 0
+function onScroll() {
+  if (scrollFrame) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0
+    const el = scroller.value
+    if (el && el.scrollTop < NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
+  })
 }
 
 // 「继续 ▾」：原生 resume（无损，同 agent）+ 跨 agent 接续（交接档案，任选模板）
@@ -153,7 +192,7 @@ function onContinue(key: string) {
       </n-dropdown>
     </div>
 
-    <div ref="scroller" class="stream">
+    <div ref="scroller" class="stream" @scroll.passive="onScroll">
       <n-spin v-if="loading" class="center" />
       <template v-else>
         <!-- .more 固定高度常驻：空态/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
