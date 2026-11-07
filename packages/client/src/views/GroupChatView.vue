@@ -311,6 +311,14 @@ function toggleRoomSpeech(m: RoomMessage) {
   if (speech.playingId === messageId) speech.stop()
   else speech.playManual({ messageId, text })
 }
+/** 点气泡播报、再点停止；划选文字或点链接/按钮时不触发。 */
+function onRoomBubbleClick(m: RoomMessage, event: MouseEvent) {
+  if (!speakableRoomText(m)) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('a, button, summary, input, label, select, textarea')) return
+  if (window.getSelection()?.toString().trim()) return
+  toggleRoomSpeech(m)
+}
 
 function fmtTs(ts: string): string {
   const d = new Date(ts)
@@ -1032,14 +1040,13 @@ onMounted(async () => {
                 <span class="from">{{ m.from === human ? `${m.from}（我）` : m.from }}</span>
                 <span v-if="m.humanRelay" class="relay-tag" title="白名单 agent 转述人类成员原话，按人类语义投递">转述</span>
               </div>
-              <div class="bubble">{{ m.body }}</div>
+              <div
+                class="bubble"
+                :class="{ speakable: !!speakableRoomText(m), speaking: speech.playingId === roomSpeechId(m) }"
+                @click="onRoomBubbleClick(m, $event)"
+              >{{ m.body }}</div>
               <div class="msg-foot">
-                <button
-                  v-if="speakableRoomText(m)"
-                  type="button"
-                  class="copy-btn speech-btn"
-                  @click="toggleRoomSpeech(m)"
-                >{{ speech.playingId === roomSpeechId(m) ? '停止' : '播报' }}</button>
+                <div v-if="speech.playingId === roomSpeechId(m)" class="speaking-hint">🔊 播报中，点击消息停止</div>
                 <button type="button" class="copy-btn" :title="copiedMsgId === m.id ? '已复制' : '复制正文'" @click="copyMsg(m)">
                   {{ copiedMsgId === m.id ? '✓ 已复制' : '📋 复制' }}
                 </button>
@@ -1738,6 +1745,17 @@ onMounted(async () => {
   background: var(--bubble-user-bg);
   border: 1px solid var(--bubble-user-border);
   border-left: 1px solid var(--bubble-user-border);
+}
+.bubble.speakable {
+  cursor: pointer;
+}
+.bubble.speaking {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.speaking-hint {
+  font-size: 11px;
+  color: var(--accent);
+  align-self: center;
 }
 
 /* ---- 输入区 ---- */

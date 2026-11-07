@@ -20,10 +20,20 @@ const emit = defineEmits<{ preview: [path: string] }>()
 
 const speechText = computed(() => props.speakable ? transcriptSpeechText(props.message) : '')
 const speechId = computed(() => transcriptSpeechId(props.sessionId ?? 'history', props.message))
+const speaking = computed(() => speech.playingId === speechId.value)
 function toggleSpeech() {
   if (!speechText.value) return
-  if (speech.playingId === speechId.value) speech.stop()
+  if (speaking.value) speech.stop()
   else speech.playManual({ messageId: speechId.value, text: speechText.value })
+}
+
+/** 点气泡播报、再点停止；划选文字或点链接/按钮/折叠块时不触发。 */
+function onBubbleClick(event: MouseEvent) {
+  if (!speechText.value) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('a, button, summary, input, label, select, textarea')) return
+  if (window.getSelection()?.toString().trim()) return
+  toggleSpeech()
 }
 const ui = useUiStore()
 const speech = useSpeechStore()
@@ -229,7 +239,11 @@ function highlightInHtml(html: string, kw: string, active: boolean): string {
       <div v-if="agentLabel && displayRole === 'assistant'" class="msg-meta">
         <span class="from">{{ agentLabel }}</span>
       </div>
-      <div class="bubble">
+      <div
+        class="bubble"
+        :class="{ speakable: !!speechText, speaking }"
+        @click="onBubbleClick"
+      >
         <template v-for="(part, i) in visibleParts" :key="i">
           <!-- eslint-disable-next-line vue/no-v-html — markdown-it html:false 已转义原始 HTML -->
           <div v-if="part.kind === 'text'" class="md" v-html="render(part.text)" />
@@ -306,12 +320,7 @@ function highlightInHtml(html: string, kw: string, active: boolean): string {
         </div>
       </div>
       <div class="msg-foot">
-        <button
-          v-if="speechText"
-          type="button"
-          class="copy-btn speech-btn"
-          @click="toggleSpeech"
-        >{{ speech.playingId === speechId ? '停止' : '播报' }}</button>
+        <div v-if="speaking" class="speaking-hint">🔊 播报中，点击消息停止</div>
         <button
           v-if="copyText"
           type="button"
@@ -362,6 +371,17 @@ function highlightInHtml(html: string, kw: string, active: boolean): string {
 .msg.assistant .bubble {
   background: var(--bubble-ai-bg);
   border: 1px solid var(--bubble-ai-border);
+}
+.bubble.speakable {
+  cursor: pointer;
+}
+.bubble.speaking {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.speaking-hint {
+  font-size: 11px;
+  color: var(--accent);
+  align-self: center;
 }
 .md :deep(p) {
   margin: 0.35em 0;
