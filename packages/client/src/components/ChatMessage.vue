@@ -9,7 +9,6 @@ import { copyPlainText } from '../utils/clipboard'
 import { extractFileLinks, iconFor, type FileLink } from '../utils/filelinks'
 import { fmtFullTime } from '../utils/format'
 import { isTaskNotification, parseTaskNotification } from '../utils/notify'
-import { useUiStore } from '../stores/ui'
 import { useMessage } from 'naive-ui'
 import { wsClient } from '../ws'
 import { transcriptSpeechId, transcriptSpeechText } from '../utils/speechText'
@@ -35,7 +34,6 @@ function onBubbleClick(event: MouseEvent) {
   if (window.getSelection()?.toString().trim()) return
   toggleSpeech()
 }
-const ui = useUiStore()
 const speech = useSpeechStore()
 
 // 任务通知兜底归类：服务端旧版把 <task-notification> 合成行当 text 段（解析层已改产 notice，
@@ -70,18 +68,11 @@ async function copyReply() {
   }, 1200)
 }
 
-// 设置开关：思考/工具调用/工具结果默认全关，勾选才显示；过滤后无可见段则整条不渲染
+// 思考/工具调用/工具结果一律照常渲染（折叠成 <details>，只占一行摘要，不撑版面）：
+// 默认藏起来时一页几十条只剩两三行可见，翻页动不动就空屏，收益也看不出来。
+// 只有 AskUserQuestion 这类询问单独渲染成选项卡片，不在工具折叠里重复显示。
 const visibleParts = computed(() =>
-  parts.value.filter((p) => {
-    if (p.kind === 'thinking') return ui.showThinking
-    if (p.kind === 'tool_use') {
-      // AskUserQuestion 等多选询问单独渲染为可点击选项卡片，不在工具折叠里重复显示
-      if (isAskName(p.name) && !showRawAsk.value) return false
-      return ui.showToolUse
-    }
-    if (p.kind === 'tool_result') return ui.showToolResult
-    return true
-  }),
+  parts.value.filter((p) => !(p.kind === 'tool_use' && isAskName(p.name) && !showRawAsk.value)),
 )
 
 // AskUserQuestion / request_user_input 等多选询问：解析成可点击选项卡片。
@@ -337,9 +328,9 @@ function highlightInHtml(html: string, kw: string, active: boolean): string {
 .msg {
   display: flex;
   padding: 3px 12px;
-  /* 长对话滚动优化：屏外气泡跳过排版与绘制（iOS 滑动卡顿主因），估高供滚动条定位 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 96px;
+  /* 不用 content-visibility：屏外气泡按 contain-intrinsic-size 估值，顶部插入旧消息时
+     高度会突然从估值塌成真实值，滚动位置算不准，视口停在还没渲染的区域就是一片空白
+     （2026-11-07 报障「加载更早后有时空白」）。列表已有分页，量真实高度更稳。 */
 }
 .msg.user {
   justify-content: flex-end;

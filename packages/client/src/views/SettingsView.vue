@@ -501,27 +501,6 @@ function clearLog() {
       </div>
       <div class="pref-row">
         <div>
-          <div class="pref-label">显示思考过程</div>
-          <div class="pref-hint">默认关闭，勾选后才展开思考块；运行中最新思考以打字机实时滚动。保存在服务端，跨浏览器/设备生效</div>
-        </div>
-        <n-switch :value="ui.showThinking" @update:value="ui.setShowThinking" />
-      </div>
-      <div class="pref-row">
-        <div>
-          <div class="pref-label">显示工具调用</div>
-          <div class="pref-hint">默认关闭，勾选后才展示工具调用及入参。保存在服务端，跨浏览器/设备生效</div>
-        </div>
-        <n-switch :value="ui.showToolUse" @update:value="ui.setShowToolUse" />
-      </div>
-      <div class="pref-row">
-        <div>
-          <div class="pref-label">显示工具结果</div>
-          <div class="pref-hint">默认关闭，勾选后才展示工具返回结果。保存在服务端，跨浏览器/设备生效</div>
-        </div>
-        <n-switch :value="ui.showToolResult" @update:value="ui.setShowToolResult" />
-      </div>
-      <div class="pref-row">
-        <div>
           <div class="pref-label">导航栏「任务」入口</div>
           <div class="pref-hint">默认显示，关掉后顶栏不再出现「任务」；直连 /tasks 仍可达。保存在服务端，跨浏览器/设备生效</div>
         </div>
