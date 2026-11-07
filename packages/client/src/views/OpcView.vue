@@ -112,7 +112,7 @@ function trackState(t: OpcTrackRow): string {
     return `冷却 ${left}s`
   }
   if (t.status === 'error') return t.lastErrorKind || '异常'
-  if (t.status === 'missing') return '未用'
+  if (t.status === 'missing') return '未探测'
   return '正常'
 }
 
