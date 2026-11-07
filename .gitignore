@@ -35,3 +35,7 @@ __pycache__/
 /config/local.json
 /config/models.json
 /config/presets.json
+
+# TTS sidecar 本机环境与配置（config.example.json 入仓）
+voice/.venv/
+voice/config.json

@@ -3,6 +3,8 @@
 import { defineStore } from 'pinia'
 import type { RoomDispatchInfo, RoomInfo, RoomKind, RoomMessage, ServerMsg } from '../../../shared/protocol'
 import { api } from '../api'
+import { roomSpeechId, roomSpeechText } from '../utils/speechText'
+import { useSpeechStore } from './speech'
 
 interface RoomsPayload {
   rooms: RoomInfo[]
@@ -51,7 +53,12 @@ export const useRoomsStore = defineStore('rooms', {
         this.rooms = msg.rooms
       } else if (msg.type === 'roomMessage') {
         const list = (this.messages[msg.roomId] ??= [])
-        if (!list.some((m) => m.id === msg.message.id)) list.push(msg.message)
+        const isNew = !list.some((m) => m.id === msg.message.id)
+        if (isNew) {
+          list.push(msg.message)
+          const text = roomSpeechText(msg.message, this.humanName)
+          if (text) useSpeechStore().enqueueAuto({ messageId: roomSpeechId(msg.message), text })
+        }
         this.lastMsgAt[msg.roomId] = Date.now()
       } else if (msg.type === 'roomDispatches') {
         this.dispatches[msg.roomId] = msg.dispatches

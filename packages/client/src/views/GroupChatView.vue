@@ -4,7 +4,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NEmpty, NInput, NModal, NPopconfirm, NSelect, NSpin, useMessage } from 'naive-ui'
-import type { DeliveryStatus, DispatchMode, ProjectCatalogEntry, ProjectCatalogGroup, RoomInfo, RoomKind, RoomMember, SessionSummary } from '../../../shared/protocol'
+import type { DeliveryStatus, DispatchMode, ProjectCatalogEntry, ProjectCatalogGroup, RoomInfo, RoomKind, RoomMember, RoomMessage, SessionSummary } from '../../../shared/protocol'
 import type { TrafficState } from '../../../shared/traffic'
 import { useRoomsStore } from '../stores/rooms'
 import { useSessionsStore } from '../stores/sessions'
@@ -18,6 +18,8 @@ import FilePreview from '../components/FilePreview.vue'
 import ProjectArtifactsBar from '../components/ProjectArtifactsBar.vue'
 import ProjectFilesPanel from '../components/ProjectFilesPanel.vue'
 import TypingIndicator from '../components/TypingIndicator.vue'
+import { roomSpeechId, roomSpeechText } from '../utils/speechText'
+import { useSpeechStore } from '../stores/speech'
 
 const HUMAN_FALLBACK = 'Owner'
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
@@ -25,6 +27,7 @@ const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish'])
 const rooms = useRoomsStore()
 const sessionsStore = useSessionsStore()
 const ui = useUiStore()
+const speech = useSpeechStore()
 const message = useMessage()
 const route = useRoute()
 const router = useRouter()
@@ -296,6 +299,17 @@ function copyMsg(m: { id: number; body: string }) {
     copiedMsgId.value = null
     copyMsgTimer = null
   }, 1200)
+}
+
+function speakableRoomText(m: RoomMessage): string {
+  return roomSpeechText(m, human.value)
+}
+function toggleRoomSpeech(m: RoomMessage) {
+  const text = roomSpeechText(m, human.value)
+  if (!text) return
+  const messageId = roomSpeechId(m)
+  if (speech.playingId === messageId) speech.stop()
+  else speech.playManual({ messageId, text })
 }
 
 function fmtTs(ts: string): string {
@@ -1020,6 +1034,12 @@ onMounted(async () => {
               </div>
               <div class="bubble">{{ m.body }}</div>
               <div class="msg-foot">
+                <button
+                  v-if="speakableRoomText(m)"
+                  type="button"
+                  class="copy-btn speech-btn"
+                  @click="toggleRoomSpeech(m)"
+                >{{ speech.playingId === roomSpeechId(m) ? '停止' : '播报' }}</button>
                 <button type="button" class="copy-btn" :title="copiedMsgId === m.id ? '已复制' : '复制正文'" @click="copyMsg(m)">
                   {{ copiedMsgId === m.id ? '✓ 已复制' : '📋 复制' }}
                 </button>

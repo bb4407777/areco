@@ -2,10 +2,14 @@
 import Router from '@koa/router'
 import type { ApiControllers } from '../controllers/api'
 import type { RoomControllers } from '../controllers/rooms'
+import type { TtsController } from '../controllers/tts'
 import { weixinList, weixinSearch, weixinTranscript } from '../controllers/weixin'
 
-export function createApiRouter(c: ApiControllers, rc: RoomControllers): Router {
+export function createApiRouter(c: ApiControllers, rc: RoomControllers, tc: TtsController): Router {
   const router = new Router({ prefix: '/api' })
+
+  // 浏览器同源 + cookie 会话由全局 Host/Origin 与 sessionGuard 保证；API key 不在此端点放行。
+  router.post('/tts', tc.synthesize)
 
   router.get('/system', c.system)
   router.put('/settings', c.updateSettings)

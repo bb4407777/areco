@@ -20,6 +20,8 @@ import TypingIndicator from '../components/TypingIndicator.vue'
 import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
 import { useSpawnWorker, HANDOFF_ROLES } from '../composables/useSpawnWorker'
+import { TranscriptSpeechTracker } from '../utils/speechText'
+import { useSpeechStore } from '../stores/speech'
 
 const POLL_MS = 2500
 
@@ -28,6 +30,9 @@ const router = useRouter()
 const store = useSessionsStore()
 const ui = useUiStore()
 const message = useMessage()
+const speech = useSpeechStore()
+const speechTracker = new TranscriptSpeechTracker()
+let speechCompletionPending = false
 const { openRename } = useRenameDialog()
 const { isRoleMode, handoffRole } = useSpawnWorker()
 
@@ -142,6 +147,8 @@ watch(sessionId, (newId, oldId) => {
   start = 0
   firstIndex.value = 0
   messages.value = []
+  speechTracker.invalidate()
+  speechCompletionPending = false
   exists.value = true
   loading.value = true
   loadingOlder.value = false
@@ -203,7 +210,17 @@ const lastAskMessageIndex = computed(() => {
 })
 // agent 正在干活：对话流尾部挂「正在输入中…」动效（对话模式没有终端滚屏的活感）
 const working = computed(() => session.value?.status === 'running' && session.value?.trafficState === 'working')
-watch(working, async (w) => {
+function flushSpeechCompletion() {
+  if (!speechCompletionPending) return
+  speechCompletionPending = false
+  for (const item of speechTracker.complete(sessionId.value, messages.value)) speech.enqueueAuto(item)
+}
+watch(working, async (w, wasWorking) => {
+  if (w && !wasWorking) speechTracker.begin(sessionId.value, messages.value)
+  if (!w && wasWorking) {
+    // 等下一轮 transcript 拉取后再收口，避免 traffic 已结束但最终正文尚未到前端。
+    speechCompletionPending = true
+  }
   // 指示气泡刚出现时若本就贴底，跟滚一下让它入镜；用户在上翻则不打扰。
   // 贴底判定必须现场量（showJump 靠 scroll 事件对账，内容变长不触发事件，可能是旧值）
   if (!w) return
@@ -270,6 +287,7 @@ async function poll() {
     // 只有首载或用户本就贴底才滚到底，否则条数一波动就把正在上翻的用户拽回底部
     //（2026-07-23 维护者报障"发送后跳回会话开头"）。与增量分支「不自动跟滚」同口径。
     const isTailPage = page.start !== undefined
+    if (isFirstLoad) speechTracker.reset(id, page.messages)
     cursor = page.cursor
     if (isTailPage) {
       start = page.start ?? 0
@@ -290,6 +308,8 @@ async function poll() {
       await nextTick()
       onScroll()
     }
+    // working 已结束时等本轮 transcript 增量落齐，再只播新增正式文本。
+    flushSpeechCompletion()
     // 面板开着时顺轮询节拍刷新终端尾屏
     if (showScreen.value) void fetchScreen()
   } catch {
@@ -311,6 +331,7 @@ async function loadOlder() {
   try {
     const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${before}`)
     if (gen !== sessionGen) return
+    speechTracker.addBaseline(id, page.messages)
     const el = scroller.value
     const prevHeight = el?.scrollHeight ?? 0
     firstIndex.value -= page.messages.length
@@ -340,6 +361,10 @@ function jumpToLatest() {
   scrollToBottom(reduce ? 'auto' : 'smooth')
 }
 
+function onAutoSpeechChange(event: Event) {
+  speech.setAutoEnabled((event.target as HTMLInputElement).checked)
+}
+
 function switchMode(mode: SessionViewMode) {
   // 只换本次路由，不写回默认（默认显示模式由设置页统一管，重进按默认，2026-07-24 维护者定）
   if (mode === 'terminal') router.push(`/session/${sessionId.value}`)
@@ -362,6 +387,10 @@ onBeforeUnmount(() => {
       <span class="name">{{ session?.name ?? '…' }}</span>
       <n-tag v-if="session" size="small" :bordered="false" class="status-tag">{{ statusTagText(session) }}</n-tag>
       <span class="spacer" />
+      <label class="auto-speech" title="只播新完成的正式文本；刷新后仍关闭">
+        <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />自动
+      </label>
+      <n-button v-if="speech.playingId" quaternary size="small" @click="speech.stop()">停止播报</n-button>
       <ViewModeSwitch mode="chat" @switch="switchMode" />
       <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
         <n-button quaternary size="small">操作 ▾</n-button>
@@ -384,6 +413,7 @@ onBeforeUnmount(() => {
             v-for="(msg, i) in messages"
             :key="firstIndex + i"
             :message="msg"
+            speakable
             :agent-label="artifactAgent"
             :session-id="sessionId"
             :interactive="isLive && i === lastAskMessageIndex"
@@ -462,6 +492,17 @@ onBeforeUnmount(() => {
 }
 .spacer {
   flex: 1;
+}
+.auto-speech {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.auto-speech input {
+  margin: 0;
 }
 .stream-wrap {
   flex: 1;

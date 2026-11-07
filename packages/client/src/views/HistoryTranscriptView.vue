@@ -177,6 +177,7 @@ function onContinue(key: string) {
             v-for="(msg, i) in messages"
             :key="firstIndex + i"
             :message="msg"
+            speakable
             @preview="previewPath = $event"
           />
           <div class="stream-tail" />

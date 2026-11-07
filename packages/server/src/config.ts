@@ -102,6 +102,9 @@ export const MSG_CLI_PATH = nearEntry('scripts', 'areco-msg.mjs')
 /** 前端构建产物目录（npm 安装时在包内，不在数据根） */
 export const CLIENT_DIR = nearEntry('dist', 'client')
 
+/** 独立 TTS sidecar 源码目录；不读取 areco/hermes-live 的配置或模型。 */
+export const VOICE_DIR = nearEntry('voice')
+
 function normalizeTemplate(raw: Partial<Template>, index: number): Template {
   return {
     id: String(raw.id || `tpl-${index}`),

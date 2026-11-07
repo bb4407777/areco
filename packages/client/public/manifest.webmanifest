@@ -2,7 +2,7 @@
   "name": "Areco",
   "short_name": "Areco",
   "id": "/?areco",
-  "description": "CLI Agent 网页远程座舱",
+  "description": "CLI Agent 网页远程座舱与语音播报",
   "start_url": "/",
   "display": "standalone",
   "scope": "/",

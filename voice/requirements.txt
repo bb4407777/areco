@@ -1,0 +1,5 @@
+aiohttp>=3.9,<4
+av>=12,<17
+edge-tts>=7,<8
+numpy>=1.26,<3
+# 可选本地 Kokoro：kokoro-onnx>=0.4,<1
