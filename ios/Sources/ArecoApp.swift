@@ -4,9 +4,6 @@ import SwiftUI
 @main
 struct ArecoApp: App {
     @StateObject private var store = ServerStore()
-    /// 网页当前主题：前端 applyTheme 经 arecoTheme 桥回传。原生外观（状态栏、键盘、设置页、底色）
-    /// 一律跟网页走——壳里曾硬编码 .dark，网页浅色时顶部状态栏和键盘却是黑的（2026-11-07 报障）
-    @State private var webTheme = "light"
 
     init() {
         // WKWebView 里的 WebAudio 默认走 ambient，iPhone 侧边静音开关一拨就没声；
@@ -18,9 +15,10 @@ struct ArecoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(webTheme: $webTheme)
+            ContentView()
                 .environmentObject(store)
-                .preferredColorScheme(webTheme == "dark" ? .dark : .light)
+                // 固定浅色：原先是硬编码 .dark，网页浅色时状态栏、键盘、设置页却全黑（2026-11-07 报障）
+                .preferredColorScheme(.light)
                 .task { await store.resolve() }
         }
     }
@@ -28,17 +26,12 @@ struct ArecoApp: App {
 
 struct ContentView: View {
     @EnvironmentObject private var store: ServerStore
-    @Binding var webTheme: String
     @State private var showSettings = false
-
-    /// 与前端 --bar 同色（浅 #ffffff / 深 #141419）：状态栏那条缝隙与网页顶栏无缝
-    private var shellBackground: Color {
-        webTheme == "dark" ? Color(red: 0.078, green: 0.078, blue: 0.098) : .white
-    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            shellBackground.ignoresSafeArea()
+            // 与前端 --bar 同色（#ffffff）：状态栏那条缝隙与网页顶栏无缝
+            Color.white.ignoresSafeArea()
 
             switch store.phase {
             case .probing:
@@ -48,7 +41,7 @@ struct ContentView: View {
                 failureView(message)
             case .ready:
                 if let endpoint = store.active {
-                    WebAppView(url: endpoint.url, theme: $webTheme) {
+                    WebAppView(url: endpoint.url) {
                         store.handlePageFailure(of: endpoint)
                     }
                     .id(endpoint.url)

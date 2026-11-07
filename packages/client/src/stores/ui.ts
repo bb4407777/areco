@@ -111,15 +111,11 @@ export const useUiStore = defineStore('ui', {
         // 2026-08-01 高律师定：新建会话模式已取消（固定模板），服务端残留 spawnMode 键不再应用
       } catch { /* 静默：见上 */ }
     },
-    /** 应用主题到文档（CSS 变量作用域 + iOS 状态栏色 + 通知 iOS 壳） */
+    /** 应用主题到文档（CSS 变量作用域 + iOS 状态栏色） */
     applyTheme() {
       document.documentElement.dataset.theme = this.theme
       const meta = document.querySelector('meta[name="theme-color"]')
       if (meta) meta.setAttribute('content', this.theme === 'light' ? '#f5f6f8' : '#101014')
-      // iOS 壳（WKWebView）靠这个桥同步原生外观：键盘、状态栏、设置页跟随网页主题；
-      // 浏览器/PWA 里没有该 handler，可选链静默跳过
-      const bridge = (window as unknown as { webkit?: { messageHandlers?: Record<string, { postMessage(v: unknown): void }> } }).webkit
-      bridge?.messageHandlers?.arecoTheme?.postMessage(this.theme)
     },
     toggleTheme() {
       this.theme = this.theme === 'dark' ? 'light' : 'dark'
