@@ -18,8 +18,10 @@
 
 ## 手机端使用
 
-- 默认地址是公网 `https://areco.gaochengbin.com`，点右下角齿轮可改。
-- 同一 Wi-Fi 填局域网地址最快：Mac 上 `ipconfig getifaddr en0` 查，形如 `http://192.168.5.152:8790`（不写协议头时，IP 按 http 处理）。
+- **不用填地址**：启动按「局域网 → 公网」自动选通。局域网第一条是 mDNS 名
+  `gaodeMacBook-Pro.local:8790`（Mac 换 IP 也不失效），第二条固定 IP `192.168.5.152:8790` 兜底，
+  都不通才走 `https://areco.gaochengbin.com`。上回连的是公网，这次就先试公网，免得在外面干等。
+- 右下角齿轮只在自动连不上、或要连别的机器时才用：可手动指定地址，也可切回「自动」。
 - 首次会弹「本地网络」授权，局域网访问必须允许。
 - 登录一次后 cookie 落盘，杀掉 App 再开仍是登录态；会话/终端数据都在 Mac 上，换手机不影响。
 - 地址栏与浏览器 UI 不出现，全屏即座舱。
@@ -38,8 +40,8 @@
 ios/
   project.yml          # xcodegen 定义（改这里再 generate）
   Info.plist
-  Sources/ArecoApp.swift    # 入口、ContentView、设置页
-  Sources/WebAppView.swift  # WKWebView 封装、弹窗/新窗口处理
-  Sources/ServerStore.swift # 服务器地址记忆与规范化
+  Sources/ArecoApp.swift    # 入口、连接中/失败态、设置页
+  Sources/WebAppView.swift  # WKWebView 封装、加载失败回调、弹窗/新窗口处理
+  Sources/ServerStore.swift # 局域网→公网自动探测、地址规范化、上次可用模式
   Assets.xcassets/AppIcon.appiconset/icon-1024.png
 ```

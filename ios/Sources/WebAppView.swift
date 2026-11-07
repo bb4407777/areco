@@ -2,13 +2,15 @@ import SwiftUI
 import WebKit
 
 /// areco 座舱的 WebView 壳：前端本身就是完整 PWA（会话/终端/微信/进程），
-/// 原生端只负责装它、记住服务器地址、处理登录 cookie 与弹窗，不重写业务 UI。
+/// 原生端只负责装它、自动选服务器、处理登录 cookie 与弹窗，不重写业务 UI。
 struct WebAppView: UIViewRepresentable {
     let url: URL
-    /// 自增即重载（设置页换地址后由 ContentView 递增）
-    let reloadToken: Int
+    /// 首次加载失败（局域网不通 / 服务没起）时回调，由 ServerStore 决定退公网还是报错
+    let onLoadFailure: () -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onLoadFailure: onLoadFailure)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -22,18 +24,41 @@ struct WebAppView: UIViewRepresentable {
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.load(URLRequest(url: url))
-        context.coordinator.syncedToken = reloadToken
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.syncedToken != reloadToken else { return }
-        context.coordinator.syncedToken = reloadToken
-        webView.load(URLRequest(url: url))
-    }
+    func updateUIView(_ webView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        var syncedToken = -1
+        private let onLoadFailure: () -> Void
+        /// 同一次加载只回调一次：didFailProvisional 之后还会来 didFail，避免连退两次
+        private var reportedFailure = false
+
+        init(onLoadFailure: @escaping () -> Void) {
+            self.onLoadFailure = onLoadFailure
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            reportedFailure = false
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            reportFailure()
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            reportFailure()
+        }
+
+        private func reportFailure() {
+            guard !reportedFailure else { return }
+            reportedFailure = true
+            onLoadFailure()
+        }
 
         /// target=_blank / window.open：笼统地在当前 WebView 打开，避免点了没反应
         func webView(
@@ -55,9 +80,9 @@ struct WebAppView: UIViewRepresentable {
             initiatedByFrame frame: WKFrameInfo,
             completionHandler: @escaping () -> Void
         ) {
-            present(title: nil, message: message, webView: webView) {
-                completionHandler()
-            }
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "好", style: .default) { _ in completionHandler() })
+            present(alert)
         }
 
         func webView(
@@ -69,7 +94,7 @@ struct WebAppView: UIViewRepresentable {
             let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completionHandler(false) })
             alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in completionHandler(true) })
-            topViewController()?.present(alert, animated: true)
+            present(alert)
         }
 
         func webView(
@@ -85,22 +110,16 @@ struct WebAppView: UIViewRepresentable {
             alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
                 completionHandler(alert.textFields?.first?.text)
             })
-            topViewController()?.present(alert, animated: true)
+            present(alert)
         }
 
-        private func present(title: String?, message: String, webView: WKWebView, done: @escaping () -> Void) {
-            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "好", style: .default) { _ in done() })
-            topViewController()?.present(alert, animated: true)
-        }
-
-        private func topViewController() -> UIViewController? {
+        private func present(_ alert: UIAlertController) {
             let scene = UIApplication.shared.connectedScenes
                 .compactMap { $0 as? UIWindowScene }
                 .first { $0.activationState == .foregroundActive }
             var top = scene?.windows.first { $0.isKeyWindow }?.rootViewController
             while let presented = top?.presentedViewController { top = presented }
-            return top
+            top?.present(alert, animated: true)
         }
     }
 }

@@ -9,6 +9,7 @@ struct ArecoApp: App {
             ContentView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark)
+                .task { await store.resolve() }
         }
     }
 }
@@ -16,33 +17,47 @@ struct ArecoApp: App {
 struct ContentView: View {
     @EnvironmentObject private var store: ServerStore
     @State private var showSettings = false
-    @State private var reloadToken = 0
-    @State private var webKey = UUID()
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             Color(red: 0.06, green: 0.06, blue: 0.08).ignoresSafeArea()
 
-            if let url = store.url {
-                WebAppView(url: url, reloadToken: reloadToken)
-                    .id(webKey)
-                    .ignoresSafeArea(.container, edges: .bottom)
-            } else {
-                Text("服务器地址无效，点右下角设置")
+            switch store.phase {
+            case .probing:
+                ProgressView("正在连接…")
+                    .tint(.white)
                     .foregroundStyle(.secondary)
+            case .failed(let message):
+                failureView(message)
+            case .ready:
+                if let endpoint = store.active {
+                    WebAppView(url: endpoint.url) {
+                        store.handlePageFailure(of: endpoint)
+                    }
+                    .id(endpoint.url)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                }
             }
 
             settingsButton
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView { applied in
-                if applied {
-                    reloadToken += 1
-                    webKey = UUID()
-                }
-                showSettings = false
+            SettingsView()
+                .environmentObject(store)
+        }
+    }
+
+    private func failureView(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 32))
+                .foregroundStyle(.secondary)
+            Text(message)
+                .foregroundStyle(.secondary)
+            Button("重试") {
+                Task { await store.resolve() }
             }
-            .environmentObject(store)
+            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -68,46 +83,52 @@ struct SettingsView: View {
     @State private var draft: String = ""
     @State private var errorText: String?
 
-    let onApply: (Bool) -> Void
-
     var body: some View {
         NavigationView {
             Form {
+                Section {
+                    HStack {
+                        Text("当前连接")
+                        Spacer()
+                        Text(currentText)
+                            .foregroundStyle(.secondary)
+                            .font(.footnote)
+                    }
+                }
+
+                Section {
+                    Button("自动（局域网优先，不通走公网）") {
+                        store.useAuto()
+                        Task { await store.resolve() }
+                        dismiss()
+                    }
+                    Button("重连") {
+                        Task { await store.resolve() }
+                        dismiss()
+                    }
+                } footer: {
+                    Text("默认就是自动：先连同一 Wi-Fi 下的 Mac（\(ServerStore.lanCandidates[0].host ?? "")），不通再走公网域名。正常情况下不用打开这个页面。")
+                }
+
                 Section {
                     TextField("https://areco.gaochengbin.com", text: $draft)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.system(.body, design: .monospaced))
-                } header: {
-                    Text("服务器地址")
-                } footer: {
-                    Text("同一 Wi-Fi 填局域网地址（如 http://192.168.5.152:8790），外网填公网域名。不写协议头时，IP 地址按 http、域名按 https。")
-                }
-
-                Section {
-                    Button("保存并重载") {
+                    Button("使用这个地址") {
                         guard ServerStore.normalize(draft) != nil else {
                             errorText = "地址格式不对"
                             return
                         }
-                        store.baseURL = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onApply(true)
+                        store.saveCustom(draft)
+                        Task { await store.resolve() }
+                        dismiss()
                     }
-                    Button("恢复默认（公网域名）") {
-                        store.baseURL = ServerStore.fallback
-                        draft = ServerStore.fallback
-                        onApply(true)
-                    }
-                    Button("仅重载当前页面") {
-                        onApply(true)
-                    }
-                }
-
-                Section {
-                    Text("当前生效：\(store.baseURL)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("手动指定（压过自动）")
+                } footer: {
+                    Text("只在自动连不上、或要连别的机器时填。不写协议头时 IP 按 http、域名按 https。")
                 }
             }
             .navigationTitle("设置")
@@ -122,7 +143,19 @@ struct SettingsView: View {
             )) {
                 Button("好", role: .cancel) { errorText = nil }
             }
+            .onAppear { draft = store.customURL }
         }
-        .onAppear { draft = store.baseURL }
+    }
+
+    private var currentText: String {
+        switch store.phase {
+        case .probing:
+            return "连接中…"
+        case .failed:
+            return "未连接"
+        case .ready:
+            guard let active = store.active else { return "未连接" }
+            return "\(active.mode.label) · \(active.url.host ?? "")"
+        }
     }
 }
