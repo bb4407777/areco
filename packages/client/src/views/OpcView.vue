@@ -12,7 +12,6 @@ const message = useMessage()
 const ui = useUiStore()
 
 const snap = ref<OpcSnapshot | null>(null)
-const loading = ref(false)
 const auto = ref(true)
 const q = ref('')
 const logShow = ref(false)
@@ -86,14 +85,11 @@ function trackState(t: OpcTrackRow): string {
 }
 
 async function refresh(): Promise<void> {
-  loading.value = true
   try {
     snap.value = await api.get<OpcSnapshot>('/api/opc')
     if (snap.value.warning) message.warning(snap.value.warning)
   } catch (e) {
     message.error((e as Error).message)
-  } finally {
-    loading.value = false
   }
 }
 
@@ -140,7 +136,7 @@ onUnmounted(() => {
           <n-switch v-model:value="auto" size="small" @update:value="restartTimer" />
           <span class="auto-text">自动刷新</span>
         </span>
-        <n-button size="small" :loading="loading" @click="refresh">刷新</n-button>
+        <n-button size="small" @click="refresh">刷新</n-button>
       </div>
     </div>
 
