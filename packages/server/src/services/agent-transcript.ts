@@ -755,6 +755,17 @@ export function workbuddyUserQuery(text: string): string {
   return query || text
 }
 
+/**
+ * WorkBuddy 自动压缩摘要行：type=message role=user，正文以 <cb_summary> 开头、内部裹着历史
+ * <user_query>。它不是真人指令，混进来会被 workbuddyUserQuery 抽出一条历史提问 → 同一句话在
+ * 转录里出现两次（2026-11-07 余建峰案复现）。按 providerData 标记与正文标记双保险排除。
+ */
+function isWorkbuddyCompactSummary(obj: Record<string, unknown>, text: string): boolean {
+  const meta = obj.providerData as { isCompactInternal?: unknown; isCompacted?: unknown } | undefined
+  if (meta?.isCompactInternal === true || meta?.isCompacted === true) return true
+  return text.trimStart().startsWith('<cb_summary>')
+}
+
 function isoOf(ms: unknown): string | null {
   return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null
 }
@@ -779,6 +790,7 @@ export function parseWorkbuddy(raw: string): TranscriptMessage[] {
           const t = block?.type
           if (t === 'input_text' || t === 'output_text' || t === 'text') text += String(block.text ?? '')
         }
+        if (role === 'user' && isWorkbuddyCompactSummary(obj, text)) break
         if (role === 'user') text = workbuddyUserQuery(text)
         if (text.trim()) out.push(msgOf(role, [textPart(text)], ts))
         break

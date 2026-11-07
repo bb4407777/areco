@@ -66,6 +66,38 @@ test('WorkBuddy desktop envelope exposes only the final user_query', () => {
   assert.equal(messages[0]?.parts[0]?.kind === 'text' ? messages[0].parts[0].text : '', '真正指令\n第二行')
 })
 
+test('WorkBuddy compact summary line is not a user message (no duplicate bubble)', () => {
+  const question = '主要他这个金额的问题就是，退赔是退赔，额外补偿是额外补偿。你查一下'
+  const summary = [
+    '<cb_summary>',
+    'Summary of the conversation so far:',
+    '<previous_user_message>',
+    `<user_query>\n${question}\n</user_query>`,
+    '</previous_user_message>',
+    '</cb_summary>',
+  ].join('\n')
+  const raw = [
+    JSON.stringify({ type: 'message', role: 'user', content: [{ type: 'input_text', text: question }] }),
+    JSON.stringify({
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: summary }],
+      providerData: { compactType: 'pre-message-auto', isCompacted: true, isCompactInternal: true, isSummary: false },
+    }),
+  ].join('\n')
+  const messages = parseWorkbuddy(raw)
+  const userTexts = messages.filter((m) => m.role === 'user').map((m) => (m.parts[0]?.kind === 'text' ? m.parts[0].text : ''))
+  assert.deepEqual(userTexts, [question], '压缩摘要不应再产出一条重复提问')
+
+  // 正文缺 providerData 标记时也按 <cb_summary> 前缀排除
+  const legacy = parseWorkbuddy(JSON.stringify({
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text: summary }],
+  }))
+  assert.equal(legacy.length, 0)
+})
+
 test('WorkBuddy bridge output exposes the exact created/resumed native session id across chunks', () => {
   const created = '[WorkBuddy] 已创建会话 b35a697e-abbc-419c-8d49-cb45e46bfac0\r\n'
   assert.equal(workbuddyNativeSessionIdFromOutput(created), 'b35a697e-abbc-419c-8d49-cb45e46bfac0')
