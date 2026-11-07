@@ -27,6 +27,8 @@ export const router = createRouter({
     { path: '/messages', redirect: '/tasks' },
     // 微信会话（只读）：读 Hermes state.db 的 source=weixin，消「微信↔areco 割裂」的看得见那一半
     { path: '/weixin', component: () => import('./views/WeixinView.vue') },
+    // 进程页（2026-11-07）：全机进程一屏，孤儿进程与 OPC 后台任务分色标出，可清孤儿
+    { path: '/processes', component: () => import('./views/ProcessesView.vue') },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

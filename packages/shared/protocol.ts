@@ -500,3 +500,44 @@ export interface FileMeta {
   preview: PreviewKind
   mtimeMs: number
 }
+
+// ---- 进程页（2026-11-07）----
+// 座舱新增的全机进程视图：孤儿（PPID=1 且非 launchd 托管）与 OPC 后台任务一屏可见。
+export type ProcessKind = 'service' | 'worker' | 'cli' | 'other'
+
+export interface ProcessRow {
+  pid: number
+  ppid: number
+  pgid: number
+  kind: ProcessKind
+  label: string
+  orphan: boolean
+  /** 孤儿才可从这里结束 */
+  killable: boolean
+  cpu: number
+  mem: number
+  /** 常驻内存，字节 */
+  rss: number
+  etime: string
+  ageSec: number
+  command: string
+}
+
+export interface ProcessSnapshot {
+  ts: number
+  total: number
+  orphanCount: number
+  orphanRss: number
+  rows: ProcessRow[]
+  warning?: string
+}
+
+export interface ProcessKillResult {
+  ok: boolean
+  message: string
+}
+
+export interface ProcessKillAllResult {
+  killed: number
+  failed: { pid: number; message: string }[]
+}
