@@ -71,6 +71,7 @@ function renderLoginPage(opts: { title: string; zh: boolean; nextPath: string; e
     background: #101014; color: #e6e6ea; font-size: 15px; box-sizing: border-box; outline: none; }
   input[type="password"]:focus { border-color: #63e2b7; }
   button { width: 100%; margin-top: 16px; padding: 12px 14px; border: 0; border-radius: 9px;
+    font-family: inherit; /* button 默认不继承 body 字体，iOS WebView 粗体中文会掉字形 */
     background: #63e2b7; color: #101014; font-size: 15px; font-weight: 700; cursor: pointer; }
   button:active { opacity: .85; }
 </style>
