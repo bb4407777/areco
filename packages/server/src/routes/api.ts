@@ -4,13 +4,15 @@ import type { ApiControllers } from '../controllers/api'
 import type { RoomControllers } from '../controllers/rooms'
 import type { TtsController } from '../controllers/tts'
 import type { ProcessControllers } from '../controllers/processes'
+import type { OpcControllers } from '../controllers/opc'
 import { weixinList, weixinSearch, weixinTranscript } from '../controllers/weixin'
 
 export function createApiRouter(
   c: ApiControllers,
   rc: RoomControllers,
   tc: TtsController,
-  pc: ProcessControllers
+  pc: ProcessControllers,
+  oc: OpcControllers
 ): Router {
   const router = new Router({ prefix: '/api' })
 
@@ -66,6 +68,10 @@ export function createApiRouter(
   router.get('/processes', pc.list)
   router.post('/processes/kill-orphans', pc.killOrphans)
   router.post('/processes/:pid/kill', pc.kill)
+
+  // OPC 后台页（2026-11-07）：轨道工单台账 + 看板在办 + 轨道健康；日志只读尾部
+  router.get('/opc', oc.list)
+  router.get('/opc/tasks/:id/log', oc.taskLog)
 
   // Hermes 微信会话只读视图（作业单 A，2026-08-04）：只读 state.db，不回填本地表。
   // 独立 controller 模块（不并入 ApiControllers），仅新增只读端点，不改既有路由/控制器。

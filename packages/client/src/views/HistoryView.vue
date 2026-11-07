@@ -191,6 +191,9 @@ onMounted(() => void load(true))
 .src.pi {
   color: #a78bfa;
 }
+.src.mcode {
+  color: #e05a5a;
+}
 .path {
   flex: 1;
   min-width: 0;

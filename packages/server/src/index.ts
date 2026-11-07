@@ -27,6 +27,7 @@ import { FileService } from './services/files'
 import { ProjectFileService } from './services/project-files'
 import { TtsService } from './services/tts'
 import { ProcessControllers } from './controllers/processes'
+import { OpcControllers } from './controllers/opc'
 import { TtsController } from './controllers/tts'
 
 declare const __APP_VERSION__: string | undefined
@@ -98,6 +99,7 @@ async function main() {
   const tts = new TtsService()
   const ttsController = new TtsController(tts)
   const processControllers = new ProcessControllers()
+  const opcControllers = new OpcControllers()
 
   const app = new Koa()
   app.proxy = false
@@ -144,7 +146,7 @@ async function main() {
   app.use(createApiKeyGuard(config))
   // protected：以下全部需要登录（cookie 登录，或已被 apiKeyGuard 标记的 X-API-Key）
   app.use(createSessionGuard(auth))
-  const apiRouter = createApiRouter(controllers, roomControllers, ttsController, processControllers)
+  const apiRouter = createApiRouter(controllers, roomControllers, ttsController, processControllers, opcControllers)
   app.use(apiRouter.routes()).use(apiRouter.allowedMethods())
   // Hermes webhook 事件只读查询（F2）：会话守卫之后 = 吃 cookie/X-API-Key 既有鉴权；
   // 独立模块自带路由（同 weixin.ts 独立控制器风格），X-API-Key 放行面在 middleware/auth.ts isApiKeyScope

@@ -11,6 +11,7 @@ import type { HistoryEntry, HistoryListPage, HistoryTranscriptPage, TranscriptMe
 import { parseTranscriptLine } from './transcript'
 import { parseKimi, parsePi } from './agent-transcript'
 import { chatlogEntries, isChatlogSource } from './chatlog'
+import { mcodeEntries } from './mcode-sessions'
 
 // 头部扫描上限：cwd/首条用户输入/首个时间戳都落在文件头部，但 file-history-snapshot
 // 行可能很大，给足余量；扫完仍无用户输入且文件更大时不下结论（保留条目、标题走兜底）
@@ -518,6 +519,14 @@ export function listHistory(
   }
   // pi 原生层：扫 ~/.pi/agent/sessions（两层布局，不进 scanRaw）
   for (const entry of piEntries()) {
+    if (q) {
+      const hay = `${entry.title}\n${entry.cwd}\n${entry.id}`.toLowerCase()
+      if (!hay.includes(q)) continue
+    }
+    matched.push(entry)
+  }
+  // mcode 原生层：读 MiniMax Code 本地 sqlite（mcode CLI 与 .app 共用），不进 scanRaw
+  for (const entry of mcodeEntries()) {
     if (q) {
       const hay = `${entry.title}\n${entry.cwd}\n${entry.id}`.toLowerCase()
       if (!hay.includes(q)) continue

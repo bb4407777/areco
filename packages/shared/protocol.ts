@@ -541,3 +541,76 @@ export interface ProcessKillAllResult {
   killed: number
   failed: { pid: number; message: string }[]
 }
+
+// ---- OPC 后台（轨道工单）：只读台账 ~/skills/opc/data/{track-runs.jsonl,track-health.json,kanban.db} ----
+
+export interface OpcRun {
+  ts: string
+  taskId: string
+  dept: string
+  title: string
+  /** 最终落地的轨（换轨后是最后一条） */
+  track: string
+  /** 本单走过的全部轨，换轨时形如 a→b→c */
+  tracks: string
+  engine: string
+  model: string
+  durS: number
+  ok: boolean
+  errKind: string
+  err: string
+  /** 是否因限流换过轨 */
+  fallback: number
+}
+
+export interface OpcTaskRow {
+  id: string
+  title: string
+  assignee: string
+  /** ready / claimed / running / in_progress / blocked */
+  status: string
+  priority: number
+  createdAt: number
+  startedAt: number | null
+  completedAt: number | null
+  failures: number
+  lastError: string
+  workerPid: number | null
+  /** ~/.hermes/kanban/logs/<id>.log 是否存在 */
+  hasLog: boolean
+}
+
+export type OpcTrackStatus = 'ok' | 'cooldown' | 'error' | 'missing'
+
+export interface OpcTrackRow {
+  id: string
+  label: string
+  engine: string
+  model: string
+  surface: string
+  used: number
+  fallback: number
+  failures: number
+  cooldownUntil: number
+  status: OpcTrackStatus
+  lastProbe: string
+  lastErrorKind: string
+  lastError: string
+}
+
+export interface OpcSnapshot {
+  ts: number
+  runs: OpcRun[]
+  tasks: OpcTaskRow[]
+  counts: Record<string, number>
+  tracks: OpcTrackRow[]
+  warning?: string
+}
+
+export interface OpcTaskLog {
+  id: string
+  path: string
+  lines: string[]
+  /** 日志超过读取窗口，lines 只是尾部 */
+  truncated: boolean
+}

@@ -29,6 +29,8 @@ export const router = createRouter({
     { path: '/weixin', component: () => import('./views/WeixinView.vue') },
     // 进程页（2026-11-07）：全机进程一屏，孤儿进程与 OPC 后台任务分色标出，可清孤儿
     { path: '/processes', component: () => import('./views/ProcessesView.vue') },
+    // OPC 后台（2026-11-07）：轨道健康 + 看板在办 + 最近跑单，只读
+    { path: '/opc', component: () => import('./views/OpcView.vue') },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

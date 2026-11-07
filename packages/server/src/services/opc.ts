@@ -1,0 +1,259 @@
+// OPC 后台只读视图：把轨道台账、看板工单、轨道健康表拼成一屏，不写任何 opc 数据。
+// SoT 仍在 ~/skills/opc：本服务只读取
+//   data/track-runs.jsonl  每单走过的轨（换轨后 tracks = a→b→c）
+//   data/track-health.json 各轨用量/冷却/最近错误
+//   config/tracks.json     轨的展示名与模型
+//   data/kanban.db         工单队列（ready/claimed/running/blocked）
+//   ~/.hermes/kanban/logs/<task_id>.log 每单工人日志（只在点开时读尾部）
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import type { OpcRun, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
+
+const RUN_LIMIT = 200
+const TASK_LIMIT = 120
+const TAIL_BYTES = 2 * 1024 * 1024
+const LOG_TAIL_BYTES = 256 * 1024
+const ACTIVE_STATUS = ['ready', 'claimed', 'running', 'in_progress', 'blocked']
+
+function opcRoot(): string {
+  return process.env.ARECO_OPC_ROOT || path.join(os.homedir(), 'skills', 'opc')
+}
+
+function logsDir(): string {
+  return process.env.ARECO_OPC_LOGS || path.join(os.homedir(), '.hermes', 'kanban', 'logs')
+}
+
+function readJson<T>(file: string): T | null {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as T
+  } catch {
+    return null
+  }
+}
+
+/** 读文件尾部窗口（台账会一直变长，不整文件进内存） */
+function readTail(file: string, maxBytes = TAIL_BYTES): { text: string; truncated: boolean } | null {
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(file)
+  } catch {
+    return null
+  }
+  if (!stat.isFile() || stat.size === 0) return null
+  const from = Math.max(0, stat.size - maxBytes)
+  const fd = fs.openSync(file, 'r')
+  try {
+    const buf = Buffer.alloc(stat.size - from)
+    fs.readSync(fd, buf, 0, buf.length, from)
+    return { text: buf.toString('utf8'), truncated: from > 0 }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+interface RawTrackHealth {
+  used?: number
+  fallback?: number
+  last_probe?: string
+  consecutive_failures?: number
+  last_error?: string
+  last_error_kind?: string
+  cooldown_until?: number
+}
+
+interface RawTrack {
+  engine?: string
+  model?: string
+  label?: string
+  surface?: string
+}
+
+interface RawTracksFile {
+  tracks?: Record<string, RawTrack>
+  default_prefs?: string[]
+}
+
+export function parseRun(value: unknown): OpcRun | null {
+  if (!value || typeof value !== 'object') return null
+  const row = value as Record<string, unknown>
+  const taskId = typeof row.task_id === 'string' ? row.task_id : ''
+  if (!taskId) return null
+  return {
+    ts: typeof row.ts === 'string' ? row.ts : '',
+    taskId,
+    dept: typeof row.dept === 'string' ? row.dept : '',
+    title: typeof row.title === 'string' ? row.title : '',
+    track: typeof row.track === 'string' ? row.track : '',
+    tracks: typeof row.tracks === 'string' ? row.tracks : String(row.track ?? ''),
+    engine: typeof row.engine === 'string' ? row.engine : '',
+    model: typeof row.model === 'string' ? row.model : '',
+    durS: Number(row.dur_s) || 0,
+    ok: row.ok === true,
+    errKind: typeof row.err_kind === 'string' ? row.err_kind : '',
+    err: typeof row.err === 'string' ? row.err : '',
+    fallback: Number(row.fallback) || 0,
+  }
+}
+
+/** 台账正文 → 最近 RUN_LIMIT 单，最新在前（逐行解析，坏行跳过） */
+export function parseRunsText(text: string, limit = RUN_LIMIT): OpcRun[] {
+  const runs: OpcRun[] = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      continue // 尾部半行
+    }
+    const run = parseRun(parsed)
+    if (run) runs.push(run)
+  }
+  return runs.reverse().slice(0, limit)
+}
+
+function readRuns(): { runs: OpcRun[]; warning?: string } {
+  const tail = readTail(path.join(opcRoot(), 'data', 'track-runs.jsonl'))
+  if (!tail) return { runs: [], warning: '轨道台账 track-runs.jsonl 不存在' }
+  let text = tail.text
+  if (tail.truncated) {
+    const nl = text.indexOf('\n')
+    if (nl >= 0) text = text.slice(nl + 1)
+  }
+  return { runs: parseRunsText(text) }
+}
+
+function readTracks(): OpcTrackRow[] {
+  const file = readJson<RawTracksFile>(path.join(opcRoot(), 'config', 'tracks.json'))
+  const health = readJson<Record<string, RawTrackHealth>>(path.join(opcRoot(), 'data', 'track-health.json')) ?? {}
+  const defs = file?.tracks ?? {}
+  const order = (file?.default_prefs ?? []).filter((id) => defs[id])
+  for (const id of Object.keys(defs)) if (!order.includes(id)) order.push(id)
+  const now = Date.now()
+  return order.map((id) => {
+    const def = defs[id] ?? {}
+    const h = health[id]
+    const cooldownUntil = Number(h?.cooldown_until) || 0
+    const lastErrorKind = h?.last_error_kind ?? ''
+    const status = !h
+      ? 'missing'
+      : cooldownUntil * 1000 > now
+        ? 'cooldown'
+        : lastErrorKind
+          ? 'error'
+          : 'ok'
+    return {
+      id,
+      label: def.label ?? id,
+      engine: def.engine ?? '',
+      model: def.model ?? '',
+      surface: def.surface ?? '',
+      used: Number(h?.used) || 0,
+      fallback: Number(h?.fallback) || 0,
+      failures: Number(h?.consecutive_failures) || 0,
+      cooldownUntil,
+      status,
+      lastProbe: h?.last_probe ?? '',
+      lastErrorKind,
+      lastError: h?.last_error ?? '',
+    }
+  })
+}
+
+interface TaskDbRow {
+  id: string
+  title: string
+  assignee: string | null
+  status: string
+  priority: number | null
+  created_at: number
+  started_at: number | null
+  completed_at: number | null
+  consecutive_failures: number | null
+  last_failure_error: string | null
+  worker_pid: number | null
+}
+
+function readTasks(): { tasks: OpcTaskRow[]; counts: Record<string, number>; warning?: string } {
+  const file = path.join(opcRoot(), 'data', 'kanban.db')
+  if (!fs.existsSync(file)) return { tasks: [], counts: {}, warning: '看板库 kanban.db 不存在' }
+  let db: DatabaseSync | null = null
+  try {
+    db = new DatabaseSync(file, { readOnly: true })
+    const counts: Record<string, number> = {}
+    for (const row of db.prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all() as unknown as {
+      status: string
+      n: number
+    }[]) {
+      counts[row.status] = Number(row.n) || 0
+    }
+    const placeholders = ACTIVE_STATUS.map(() => '?').join(',')
+    const rows = db
+      .prepare(
+        `SELECT id, title, assignee, status, priority, created_at, started_at, completed_at,
+                consecutive_failures, last_failure_error, worker_pid
+           FROM tasks
+          WHERE status IN (${placeholders})
+          ORDER BY priority DESC, created_at ASC
+          LIMIT ?`
+      )
+      .all(...ACTIVE_STATUS, TASK_LIMIT) as unknown as TaskDbRow[]
+    const tasks = rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      assignee: row.assignee ?? '',
+      status: row.status,
+      priority: Number(row.priority) || 0,
+      createdAt: Number(row.created_at) || 0,
+      startedAt: row.started_at ?? null,
+      completedAt: row.completed_at ?? null,
+      failures: Number(row.consecutive_failures) || 0,
+      lastError: row.last_failure_error ?? '',
+      workerPid: row.worker_pid ?? null,
+      hasLog: fs.existsSync(path.join(logsDir(), `${row.id}.log`)),
+    }))
+    return { tasks, counts }
+  } catch (err) {
+    return { tasks: [], counts: {}, warning: `看板库读取失败：${(err as Error).message}` }
+  } finally {
+    try {
+      db?.close()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function snapshot(): OpcSnapshot {
+  const { runs, warning: runWarn } = readRuns()
+  const { tasks, counts, warning: taskWarn } = readTasks()
+  return {
+    ts: Date.now(),
+    runs,
+    tasks,
+    counts,
+    tracks: readTracks(),
+    warning: runWarn ?? taskWarn,
+  }
+}
+
+/** 单张工单的工人日志尾部（只读，最多 400 行） */
+export function taskLog(id: string, maxLines = 400): OpcTaskLog {
+  if (!/^t_[A-Za-z0-9]+$/.test(id)) throw new Error('工单 id 不合法')
+  const file = path.join(logsDir(), `${id}.log`)
+  if (!fs.existsSync(file)) throw new Error('该工单没有工人日志')
+  const tail = readTail(file, LOG_TAIL_BYTES)
+  if (!tail) throw new Error('该工单日志为空')
+  let text = tail.text
+  if (tail.truncated) {
+    const nl = text.indexOf('\n')
+    if (nl >= 0) text = text.slice(nl + 1)
+  }
+  const lines = text.split('\n')
+  if (lines.length && lines[lines.length - 1] === '') lines.pop()
+  const truncated = tail.truncated || lines.length > maxLines
+  return { id, path: file, lines: lines.slice(-maxLines), truncated }
+}

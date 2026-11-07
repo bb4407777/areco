@@ -27,6 +27,7 @@ import {
   resolvePiSessionFile,
 } from '../services/history'
 import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/chatlog'
+import { readMcdeTranscript } from '../services/mcode-sessions'
 import { sweepForDir } from '../services/dir-sweep'
 
 // 与 history.ts 的 SAFE_SEGMENT 同规则：单段路径只允许安全字符（本地副本，history.ts 未导出该常量）
@@ -635,6 +636,11 @@ export class ApiControllers {
         const beforeRaw = Number(ctx.query.before)
         const before = Number.isFinite(beforeRaw) && beforeRaw >= 0 ? beforeRaw : undefined
         ok(ctx, readHistoryPage(filePath, before, piParseLine))
+        return
+      }
+      // mcode 原生层：MiniMax Code 本地 sqlite 一站读全（消息量小，不按字节分页）
+      if (source === 'mcode') {
+        ok(ctx, readMcdeTranscript(id))
         return
       }
       const filePath = resolveHistoryFile(this.historyRoots, source, project, id)

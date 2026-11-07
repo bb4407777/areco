@@ -69,6 +69,7 @@ function forceUpdate() {
               <router-link to="/history" class="nav-link" :class="{ active: route.path.startsWith('/history') }">历史</router-link>
               <router-link to="/weixin" class="nav-link" :class="{ active: route.path.startsWith('/weixin') }">微信</router-link>
               <router-link to="/processes" class="nav-link" :class="{ active: route.path.startsWith('/processes') }">进程</router-link>
+              <router-link to="/opc" class="nav-link" :class="{ active: route.path.startsWith('/opc') }">OPC</router-link>
               <router-link to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">设置</router-link>
               <label class="speech-auto" title="只播新完成的 Agent 正式文本；刷新后仍关闭">
                 <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />
