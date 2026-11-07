@@ -195,8 +195,17 @@ watch(
   }
 )
 
+// 程序化滚动（贴底、补页后复位）也会触发 scroll 事件：这段时间内不做「滑到顶就自动翻页」，
+// 否则一进会话 content 还没填满视口，scrollTop 恒为 0，会被自己的 scrollTo 反复触发、
+// 一路把更早的消息翻到底（2026-11-07 报障「一下子跳到最早的消息」）
+let programmaticUntil = 0
+function markProgrammatic(ms = 700) {
+  programmaticUntil = performance.now() + ms
+}
+
 function scrollToBottom(behavior?: ScrollBehavior) {
   const el = scroller.value
+  markProgrammatic()
   el?.scrollTo({ top: el.scrollHeight, behavior })
 }
 
@@ -366,6 +375,10 @@ async function loadOlder() {
   const id = sessionId.value
   loadingOlder.value = true
   const el = scroller.value
+  // 以「原来第一条消息」为锚：单元高度会因 markdown/图片异步变动，按新增高度补 scrollTop
+  // 容易补不准（补少了就停在更早的内容上，看着像跳到最早），直接按锚点位移校正
+  const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
+  const anchorTop = anchor?.getBoundingClientRect().top ?? 0
   const prevHeight = el?.scrollHeight ?? 0
   let batch: TranscriptMessage[] = []
   try {
@@ -386,9 +399,15 @@ async function loadOlder() {
     // 攒够一次并入再量高：逐页 prepend 会让整列重渲染多轮，上滑会一顿一顿
     firstIndex.value -= batch.length
     messages.value = [...batch, ...messages.value]
+    markProgrammatic()
     await nextTick()
-    // 维持视口停在原内容处
-    if (el) el.scrollTop += el.scrollHeight - prevHeight
+    if (el) {
+      // 维持视口停在原内容处：优先按锚点位移，锚点没了再退回高度差
+      const delta = anchor ? anchor.getBoundingClientRect().top - anchorTop : 0
+      if (anchor && Math.abs(delta) > 1) el.scrollTop += delta
+      else el.scrollTop += el.scrollHeight - prevHeight
+      markProgrammatic()
+    }
   } catch {
     /* 下次点再试 */
   } finally {
@@ -401,6 +420,9 @@ function onScroll() {
   const el = scroller.value
   if (!el) return
   showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
+  if (performance.now() < programmaticUntil) return
+  // 内容不足一屏时根本没得滑，自动翻页会把历史一路拉到最早
+  if (el.scrollHeight - el.clientHeight < 40) return
   if (el.scrollTop < prefetchDistance(el) && !loading.value && hasMore.value) void loadOlder()
 }
 
