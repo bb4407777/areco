@@ -5,11 +5,13 @@ import WebKit
 /// 原生端只负责装它、自动选服务器、处理登录 cookie 与弹窗，不重写业务 UI。
 struct WebAppView: UIViewRepresentable {
     let url: URL
+    /// 网页当前主题（前端 applyTheme 经 arecoTheme 桥上送），原生外观据此跟随
+    @Binding var theme: String
     /// 首次加载失败（局域网不通 / 服务没起）时回调，由 ServerStore 决定退公网还是报错
     let onLoadFailure: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onLoadFailure: onLoadFailure)
+        Coordinator(theme: $theme, onLoadFailure: onLoadFailure)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -17,27 +19,53 @@ struct WebAppView: UIViewRepresentable {
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.userContentController.add(context.coordinator, name: "arecoTheme")
         // 默认 websiteDataStore = .default()，登录 cookie 落盘，杀掉 App 再开仍是登录态
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        // 固定浅色：键盘/输入辅助条/表单控件不跟系统深色走，与网页浅色主题一致
-        webView.overrideUserInterfaceStyle = .light
+        // 键盘外观跟网页主题走，不跟系统（系统深色 + 网页浅色时键盘不会突兀变黑）
+        webView.overrideUserInterfaceStyle = theme == "dark" ? .dark : .light
         webView.load(URLRequest(url: url))
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {}
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.theme = $theme
+        webView.overrideUserInterfaceStyle = theme == "dark" ? .dark : .light
+    }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "arecoTheme")
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+        /// 网页主题回传，更新 App 级 colorScheme（状态栏文字、弹窗、设置页一起跟）
+        var theme: Binding<String>
         private let onLoadFailure: () -> Void
         /// 同一次加载只回调一次：didFailProvisional 之后还会来 didFail，避免连退两次
         private var reportedFailure = false
 
-        init(onLoadFailure: @escaping () -> Void) {
+        init(theme: Binding<String>, onLoadFailure: @escaping () -> Void) {
+            self.theme = theme
             self.onLoadFailure = onLoadFailure
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "arecoTheme", let raw = message.body as? String else { return }
+            let next = raw == "dark" ? "dark" : "light"
+            if theme.wrappedValue != next { theme.wrappedValue = next }
+        }
+
+        /// 首屏主题由前端 applyTheme 报上来前先把原生对齐（冷启动/刷新时同样不发黑）
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.evaluateJavaScript("document.documentElement.dataset.theme || 'light'") { [weak self] value, _ in
+                guard let self, let raw = value as? String else { return }
+                let next = raw == "dark" ? "dark" : "light"
+                if self.theme.wrappedValue != next { self.theme.wrappedValue = next }
+            }
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

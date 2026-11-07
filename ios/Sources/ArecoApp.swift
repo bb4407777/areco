@@ -5,6 +5,9 @@ import SwiftUI
 struct ArecoApp: App {
     @StateObject private var store = ServerStore()
     @Environment(\.scenePhase) private var scenePhase
+    /// 网页当前主题：前端 applyTheme 经 arecoTheme 桥回传。原生外观（状态栏、键盘、设置页、底色）
+    /// 一律跟网页走，默认浅色——壳里曾硬编码 .dark，网页浅色时顶部状态栏和键盘却是黑的（2026-11-07 报障）
+    @State private var webTheme = "light"
 
     init() {
         AppAudioSession.apply()
@@ -12,10 +15,9 @@ struct ArecoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(webTheme: $webTheme)
                 .environmentObject(store)
-                // 固定浅色：原先是硬编码 .dark，网页浅色时状态栏、键盘、设置页却全黑（2026-11-07 报障）
-                .preferredColorScheme(.light)
+                .preferredColorScheme(webTheme == "dark" ? .dark : .light)
                 .task { await store.resolve() }
                 .onChange(of: scenePhase) { phase in
                     // WebKit 播放媒体时可能把类别改回 ambient，回前台重设一次
@@ -37,12 +39,17 @@ enum AppAudioSession {
 
 struct ContentView: View {
     @EnvironmentObject private var store: ServerStore
+    @Binding var webTheme: String
     @State private var showSettings = false
+
+    /// 与前端 --bar 同色（浅 #ffffff / 深 #141419）：状态栏那条缝隙与网页顶栏无缝
+    private var shellBackground: Color {
+        webTheme == "dark" ? Color(red: 0.078, green: 0.078, blue: 0.098) : .white
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            // 与前端 --bar 同色（#ffffff）：状态栏那条缝隙与网页顶栏无缝
-            Color.white.ignoresSafeArea()
+            shellBackground.ignoresSafeArea()
 
             switch store.phase {
             case .probing:
@@ -52,7 +59,7 @@ struct ContentView: View {
                 failureView(message)
             case .ready:
                 if let endpoint = store.active {
-                    WebAppView(url: endpoint.url) {
+                    WebAppView(url: endpoint.url, theme: $webTheme) {
                         store.handlePageFailure(of: endpoint)
                     }
                     .id(endpoint.url)
