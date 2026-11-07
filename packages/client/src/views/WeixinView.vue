@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 微信会话（只读）：读 Hermes state.db 里 source=weixin 的会话。
+// 微信会话（只读）：读 cc-connect 会话存档里 user_sessions=weixin: 的会话。
 // 消「微信与 areco 割裂」的看得见那一半——此前微信侧能派活给 areco，
 // 反过来在座舱里看不到微信在聊什么、派活的上下文是什么。
 // 无侧栏（2026-08-04 高律师定「点微信直接就显示会话」）：微信那些「会话」不是不同的对话——
@@ -7,7 +7,7 @@
 // 列表隐喻本就不对。默认直接展开最近一段，顶部一个可搜索下拉切换旧时间片。
 // 气泡直接复用会话对话模式的 ChatMessage.vue（2026-08-04 高律师：微信界面气泡跟对话模式不一致，
 // 换成同款）——markdown 渲染、折叠工具块、复制按钮、配色变量全部单源，不再各画一份。
-// 只读纪律见服务端 services/weixin-sessions.ts：DatabaseSync({readOnly:true}) 驱动层强制。
+// 数据源沿革见服务端 services/weixin-sessions.ts（2026-11-07 由 Hermes state.db 改读 cc-connect）。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { NButton, NEmpty, NInput, NSelect, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
@@ -397,7 +397,7 @@ onMounted(() => void load())
         :class="{ 'hit-now': i === currentHitIdx }"
         :data-i="i"
       >
-        <ChatMessage :message="m" agent-label="Hermes" :highlight="lastQ && hasTextPart(m) ? lastQ : undefined" :highlight-active="i === currentHitIdx" />
+        <ChatMessage :message="m" :agent-label="current?.model || '微信'" :highlight="lastQ && hasTextPart(m) ? lastQ : undefined" :highlight-active="i === currentHitIdx" />
       </div>
     </div>
   </div>

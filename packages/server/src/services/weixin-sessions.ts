@@ -1,61 +1,47 @@
-// Hermes 微信会话只读视图（2026-08-04 作业单 A：areco 只读接入微信会话）
+// 微信会话只读视图（数据源：cc-connect 会话存档）
 //
-// 只做一件事：让 areco 座舱「看见」微信会话——只读 Hermes state.db 里的 source='weixin'
-// 会话与消息，按 areco transcript 形状（{role,parts[],timestamp}）返回，不改任何本地表。
+// 只做一件事：让 areco 座舱「看见」微信会话——读 ~/.cc-connect/sessions/<agent>_<suffix>.json
+// 里 user_sessions 以 weixin: 开头的会话与 history，按 areco transcript 形状
+// （{role,parts[],timestamp}）返回，不改任何本地文件。
 //
-// 纪律（对齐 hermes-studio session-sync.ts 与本仓 hermes-handoff.ts）：
-//   - Hermes state.db 永远只读、禁止回填。本服务经 node:sqlite DatabaseSync 的
-//     { readOnly: true } 在驱动层强制只读（写尝试抛 SQLITE_READONLY，已实测）；
-//   - 只发 SELECT，不 INSERT/UPDATE/DELETE/DDL，不建索引，不 VACUUM；
-//   - 微信会话只供查看，不写入 sessions.json、不并入看板卡片绑定（卡片绑定仍归
-//     hermes-handoff.ts，且其注释明示「微信 gateway 会话不参与座舱卡片绑定」，本服务
-//     与之互补：那边是绑定/交接，这边是纯只读浏览）。
+// 数据源沿革（2026-11-07）：原读 ~/.hermes/state.db 的 source='weixin'。Hermes gateway 停用后
+// 该库最后一条微信会话停在 2026-10-01（微信入站改由 cc-connect 承接），微信栏因此假死。
+// 改读 cc-connect：那边按「一微信号 = 一组 sN 会话」落盘，正好对上本栏「同一段对话被
+// session_reset 切成时间片」的展示隐喻，且 history 已是纯 role/content/timestamp，
+// 不再有 Hermes 的 tool_calls 解包、active=1 过滤那套坑。
 //
-// 与 hermes-handoff.ts 的差异（weixin 专属处理，CLI 会话不需要）：
-//   - 坑3 tool 消息 content 是 JSON 串 {"output":...,"exit_code":...}，需解包取 output、
-//     按 exit_code 判 isError（hermes-handoff 直接把原串当 text）；
-//   - 坑4 大量 assistant 消息 content 为空、正文在 tool_calls 里，需展开成 tool_use part；
-//   - session_meta 角色丢弃（weixin active 12 条，无 areco 对应概念）。
-import { DatabaseSync } from 'node:sqlite'
+// 纪律：
+//   - 全程只读，只 readFileSync，不写、不改、不建索引；
+//   - 只取 user_sessions 里 weixin: 前缀的会话，其他渠道（sms/telegram…）不混进来；
+//   - 会话 id 对外一律 `<agent>:<sN>`（如 CodeBuddy:s696），跨 agent 文件不撞号。
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { TranscriptMessage, TranscriptPage, TranscriptPart } from '../../../shared/protocol'
 
-// DB 路径解析（与 hermes-handoff.ts 的 hermesHomeOf 同口径）：
-//   ARECO_WEIXIN_STATE_DB 直指文件 > HERMES_HOME 目录 > ~/.hermes（微信 gateway 现落盘处）
-//   > ~/.qclaw-hermes（2026-09 前旧名，仅存即回落，防老机器/旧数据静默失联）
-const STATE_DB =
-  process.env.ARECO_WEIXIN_STATE_DB ||
-  path.join(hermesHomeDir(), 'state.db')
+// 会话存档目录：ARECO_CC_CONNECT_SESSIONS_DIR 直指目录 > ~/.cc-connect/sessions
+const SESSIONS_DIR =
+  process.env.ARECO_CC_CONNECT_SESSIONS_DIR?.trim() ||
+  path.join(os.homedir(), '.cc-connect', 'sessions')
 
-function hermesHomeDir(): string {
-  const env = process.env.HERMES_HOME?.trim()
-  if (env) return env
-  const home = os.homedir()
-  const current = path.join(home, '.hermes')
-  if (fs.existsSync(path.join(current, 'state.db'))) return current
-  return path.join(home, '.qclaw-hermes')
-}
-
-const SOURCE = 'weixin'
+const WEIXIN_PREFIX = 'weixin:'
 const PAGE_MESSAGES = 80 // 与 agent-transcript.ts 同口径：每页消息条数
 const MAX_PART_TEXT = 20_000
-const MAX_TOOL_TEXT = 2_000
+const TITLE_MAX = 30
 
-// hermes 会话 id 形如 20260802_104153_57fe8e86：8 位日期 _ 6 位时分秒 _ hex。
-// @koa/router 会 decodeURIComponent，必须显式校验，挡掉 ..%2F 之类路径穿越（同 controllers/api.ts SAFE_SEGMENT）。
-export const SESSION_ID_RE = /^\d{8}_\d{6}_[0-9a-f]+$/
+// 对外会话 id 形如 CodeBuddy:s696。@koa/router 会 decodeURIComponent，必须显式校验，
+// 挡掉 ..%2F 之类路径穿越（本服务不拿 id 拼路径，仍按纪律收窄字符集）。
+export const SESSION_ID_RE = /^[A-Za-z0-9_.-]{1,32}:s\d{1,6}$/
 
 export interface WeixinSessionSummary {
   id: string
   title: string | null
   model: string | null
-  /** epoch 毫秒（state.db 里是浮点秒，×1000） */
+  /** epoch 毫秒 */
   startedAt: number | null
   endedAt: number | null
   endReason: string | null
-  /** active 消息条数；= sessions.message_count（≠ 含 compacted 的总行数，见坑1） */
+  /** history 条数 */
   messageCount: number
   chatId: string | null
   chatType: string | null
@@ -68,121 +54,165 @@ export interface WeixinSessionListPage {
   hasMore: boolean
 }
 
-/** 只读打开 state.db。gateway 运行中也可读（WAL，实测无锁冲突）。每次调用开/关，不缓存连接。 */
-function openDb(): DatabaseSync {
-  return new DatabaseSync(STATE_DB, { readOnly: true })
+interface CcHistoryItem {
+  role?: unknown
+  content?: unknown
+  timestamp?: unknown
 }
 
-/** 列出有消息的微信会话（最近在前）。
- *  坑2：必须 message_count > 0，过滤掉 5 个 session_reset 空壳（message_count=0、model=None、
- *  生命周期仅数秒），否则它们按 started_at 倒序会排在最前。 */
-export function listWeixinSessions(opts: { limit?: number; offset?: number; q?: string } = {}): WeixinSessionListPage {
-  const limit = Math.min(100, Math.max(1, opts.limit ?? 30))
-  const offset = Math.max(0, opts.offset ?? 0)
-  const q = typeof opts.q === 'string' ? opts.q.trim() : ''
-  const db = openDb()
+/** cc-connect 单会话（只取本服务用到的字段）。 */
+interface CcSession {
+  id?: unknown
+  name?: unknown
+  agent_type?: unknown
+  history?: unknown
+  created_at?: unknown
+  updated_at?: unknown
+}
+
+interface CcFile {
+  sessions?: unknown
+  user_sessions?: unknown
+}
+
+/** 归一化后的一条微信消息。 */
+interface WxMessage {
+  role: 'user' | 'assistant'
+  text: string
+  /** epoch 毫秒 */
+  ts: number | null
+}
+
+/** 归一化后的一个微信会话（同一微信号被 session_reset 切开的一段）。 */
+interface WxSession {
+  id: string
+  agent: string
+  title: string | null
+  chatId: string | null
+  chatType: string | null
+  userId: string | null
+  startedAt: number | null
+  endedAt: number | null
+  messages: WxMessage[]
+}
+
+/** 读全部会话存档文件并归一化成微信会话（最近在前）。 */
+function loadSessions(): WxSession[] {
+  let files: string[]
   try {
-    const fields =
-      'id, title, model, started_at, ended_at, end_reason, message_count, chat_id, chat_type, user_id'
-    if (q) {
-      const like = `%${q}%`
-      // SOURCE 走占位符而非模板插值：当前它是模块常量不构成注入面，但
-      // `WHERE ${where}` 这个形状一旦有人往里拼请求值，注入就成立且极难看出（2026-08-04 加固）
-      const where = 'source = ? AND message_count > 0 AND (title LIKE ? OR id LIKE ?)'
-      const totalRow = db.prepare(`SELECT COUNT(*) c FROM sessions WHERE ${where}`).get(SOURCE, like, like) as
-        | { c?: unknown }
-        | undefined
-      const rows = db
-        .prepare(`SELECT ${fields} FROM sessions WHERE ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`)
-        .all(SOURCE, like, like, limit + 1, offset) as Array<Record<string, unknown>>
-      return pageOf(rows, limit, toCount(totalRow))
+    files = fs.readdirSync(SESSIONS_DIR)
+  } catch {
+    return [] // 目录不存在（没装 cc-connect / 换机器）：当作没有会话，不抛错
+  }
+  const out: WxSession[] = []
+  for (const file of files) {
+    if (!file.endsWith('.json') || file.includes('.bak')) continue
+    const agent = file.replace(/_[^_]+\.json$/, '') || file.replace(/\.json$/, '')
+    const parsed = readJson(path.join(SESSIONS_DIR, file))
+    if (!parsed) continue
+    const sessions = asRecord(parsed.sessions)
+    if (!sessions) continue
+    for (const [chatId, ids] of Object.entries(asRecord(parsed.user_sessions) ?? {})) {
+      if (!chatId.startsWith(WEIXIN_PREFIX) || !Array.isArray(ids)) continue
+      for (const sid of ids) {
+        if (typeof sid !== 'string') continue
+        const raw = sessions[sid] as CcSession | undefined
+        const s = raw ? normalize(agent, sid, chatId, raw) : null
+        if (s) out.push(s)
+      }
     }
-    const where = 'source = ? AND message_count > 0'
-    const totalRow = db.prepare(`SELECT COUNT(*) c FROM sessions WHERE ${where}`).get(SOURCE) as
-      | { c?: unknown }
-      | undefined
-    const rows = db
-      .prepare(`SELECT ${fields} FROM sessions WHERE ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`)
-      .all(SOURCE, limit + 1, offset) as Array<Record<string, unknown>>
-    return pageOf(rows, limit, toCount(totalRow))
-  } finally {
-    db.close()
+  }
+  return out.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
+}
+
+function readJson(file: string): CcFile | null {
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
+    return v && typeof v === 'object' ? (v as CcFile) : null
+  } catch {
+    return null // 半写坏 / 非本服务文件：跳过，不影响其余
   }
 }
 
-function pageOf(rows: Array<Record<string, unknown>>, limit: number, total: number): WeixinSessionListPage {
-  const hasMore = rows.length > limit // 多取 1 条判断 hasMore，省一次 COUNT
-  return { sessions: rows.slice(0, limit).map(toSummary), total, hasMore }
+function normalize(agent: string, sid: string, chatId: string, raw: CcSession): WxSession | null {
+  const history = Array.isArray(raw.history) ? (raw.history as CcHistoryItem[]) : []
+  const messages: WxMessage[] = []
+  for (const h of history) {
+    const role = h?.role
+    if (role !== 'user' && role !== 'assistant') continue
+    const text = typeof h.content === 'string' ? h.content : ''
+    if (!text.trim()) continue // 空正文（附件/占位）不成泡，同原 active=1 + 非空过滤
+    messages.push({ role, text, ts: parseTime(h.timestamp) })
+  }
+  if (!messages.length) return null // 无消息的壳会话不显示（同原 message_count > 0）
+
+  const parts = chatId.slice(WEIXIN_PREFIX.length).split(':')
+  const chatType = parts[0] || null
+  const userId = parts[1] || null
+  return {
+    id: `${agent}:${sid}`,
+    agent,
+    title: titleOf(raw.name, messages),
+    chatId,
+    chatType,
+    userId,
+    startedAt: parseTime(raw.created_at),
+    endedAt: parseTime(raw.updated_at),
+    messages,
+  }
 }
 
-/** 单个微信会话的 transcript（消息序号分页，契约同 agent-transcript.ts 的 TranscriptPage）。
- *  坑1：必须 active=1，否则读出 81% 的 compacted 旧上下文（同会话 active 82 行、含 compacted 达 3720 行）。 */
+/** 标题：cc-connect 里有 name 就用；没有就取首条用户消息前 30 字。 */
+function titleOf(name: unknown, messages: WxMessage[]): string | null {
+  if (typeof name === 'string' && name.trim()) return name.trim()
+  const first = messages.find((m) => m.role === 'user')
+  if (!first) return null
+  const oneLine = first.text.replace(/\s+/g, ' ').trim()
+  return oneLine ? oneLine.slice(0, TITLE_MAX) : null
+}
+
+/** 列出微信会话（最近在前）。q 只搜标题与 id，口径同原 /api/weixin/sessions。 */
+export function listWeixinSessions(opts: { limit?: number; offset?: number; q?: string } = {}): WeixinSessionListPage {
+  const limit = Math.min(500, Math.max(1, opts.limit ?? 30))
+  const offset = Math.max(0, opts.offset ?? 0)
+  const q = typeof opts.q === 'string' ? opts.q.trim().toLowerCase() : ''
+  const all = loadSessions()
+  const matched = q
+    ? all.filter((s) => s.id.toLowerCase().includes(q) || (s.title ?? '').toLowerCase().includes(q))
+    : all
+  const rows = matched.slice(offset, offset + limit).map(toSummary)
+  return { sessions: rows, total: matched.length, hasMore: offset + rows.length < matched.length }
+}
+
+function toSummary(s: WxSession): WeixinSessionSummary {
+  return {
+    id: s.id,
+    title: s.title,
+    model: s.agent,
+    startedAt: s.startedAt,
+    endedAt: s.endedAt,
+    endReason: null,
+    messageCount: s.messages.length,
+    chatId: s.chatId,
+    chatType: s.chatType,
+    userId: s.userId,
+  }
+}
+
+/** 单个微信会话的 transcript（消息序号分页，契约同 agent-transcript.ts 的 TranscriptPage）。 */
 export function readWeixinTranscript(
   sessionId: string,
   opts: { cursor?: number; before?: number } = {},
 ): TranscriptPage {
   if (!SESSION_ID_RE.test(sessionId)) return { exists: false, messages: [], cursor: 0 }
-  const db = openDb()
-  try {
-    const rows = db
-      .prepare(
-        `SELECT role, content, tool_name, tool_call_id, tool_calls, timestamp, reasoning_content
-           FROM messages WHERE session_id = ? AND active = 1 ORDER BY id`,
-      )
-      .all(sessionId) as Array<Record<string, unknown>>
-    if (!rows.length) return { exists: false, messages: [], cursor: 0 }
-    const messages: TranscriptMessage[] = []
-    for (const row of rows) {
-      const m = toMessage(row)
-      if (m) messages.push(m)
-    }
-    if (!messages.length) return { exists: false, messages: [], cursor: 0 }
-    return paginate(messages, opts)
-  } finally {
-    db.close()
-  }
-}
-
-/** state.db 消息行 → areco transcript 消息。 */
-function toMessage(row: Record<string, unknown>): TranscriptMessage | null {
-  const role = typeof row.role === 'string' ? row.role : ''
-  const content = typeof row.content === 'string' ? row.content : ''
-  const tsSec = Number(row.timestamp)
-  const timestamp = Number.isFinite(tsSec) && tsSec > 0 ? new Date(tsSec * 1000).toISOString() : null
-  const parts: TranscriptPart[] = []
-
-  if (role === 'user') {
-    if (content) parts.push({ kind: 'text', text: clip(content, MAX_PART_TEXT) })
-  } else if (role === 'assistant') {
-    if (content) parts.push({ kind: 'text', text: clip(content, MAX_PART_TEXT) })
-    // 坑4：weixin 有大量 assistant 消息 content 为空（实测 6270 条含 compacted），正文在 tool_calls
-    // 里——展开成多条 tool_use part（input 按协议要求是字符串）。
-    for (const call of parseJsonArray(typeof row.tool_calls === 'string' ? row.tool_calls : null)) {
-      const fn = pickFunction(call)
-      parts.push({
-        kind: 'tool_use',
-        name: String(fn.name ?? 'unknown'),
-        input: clip(stringifyArgs(fn.arguments), MAX_TOOL_TEXT),
-      })
-    }
-    if (!parts.length) {
-      const reasoning = typeof row.reasoning_content === 'string' ? row.reasoning_content : ''
-      if (reasoning) parts.push({ kind: 'text', text: clip('<reasoning> ' + reasoning, MAX_PART_TEXT) })
-    }
-  } else if (role === 'tool') {
-    // 坑5：tool 角色 → areco 里 tool_result 挂在 user 角色下（Anthropic 约定，同 hermes-handoff.ts）。
-    // 坑3：tool content 是 JSON 串 {"output":...,"exit_code":...,"error":...}——解包取 output、
-    // 按 exit_code 判 isError（exit_code 130 → true；0 → false；带 error → true）。
-    const { text, isError } = unpackToolContent(content)
-    parts.push({ kind: 'tool_result', text: clip(text, MAX_TOOL_TEXT), isError })
-  } else {
-    // session_meta 等无 areco 对应概念，丢弃（weixin active 12 条）
-    return null
-  }
-
-  if (!parts.length) return null
-  const transcriptRole: 'user' | 'assistant' = role === 'assistant' ? 'assistant' : 'user'
-  return { role: transcriptRole, parts, timestamp }
+  const s = loadSessions().find((x) => x.id === sessionId)
+  if (!s) return { exists: false, messages: [], cursor: 0 }
+  const messages: TranscriptMessage[] = s.messages.map((m) => ({
+    role: m.role,
+    parts: [{ kind: 'text', text: clip(m.text, MAX_PART_TEXT) }] as TranscriptPart[],
+    timestamp: m.ts ? new Date(m.ts).toISOString() : null,
+  }))
+  return paginate(messages, opts)
 }
 
 /** 消息序号分页：首载取尾页 / before 向前翻页 / cursor 向前增量。契约对齐 TranscriptPage。 */
@@ -201,8 +231,6 @@ function paginate(messages: TranscriptMessage[], opts: { cursor?: number; before
   return { exists: true, messages: messages.slice(cursor), cursor: total }
 }
 
-// ---- 行 → 摘要 / 小工具 ----
-
 // ---- 跨会话全文搜索 ----
 
 export interface WeixinSearchHit {
@@ -217,10 +245,6 @@ export interface WeixinSearchHit {
 const SEARCH_MAX_Q = 100
 const SEARCH_CTX = 60
 
-function escapeLike(q: string): string {
-  return q.replace(/[\\%_]/g, (c) => `\\${c}`)
-}
-
 function snippetOf(text: string, q: string): string {
   const src = text.replace(/\s+/g, ' ').trim()
   if (!src) return ''
@@ -231,134 +255,42 @@ function snippetOf(text: string, q: string): string {
   return (start > 0 ? '…' : '') + src.slice(start, end) + (end < src.length ? '…' : '')
 }
 
-/** 跨会话搜微信对话正文（只搜 user/assistant 的 content，不搜 tool 角色和 tool_calls JSON 噪音）。
- *  按消息时间倒序，最多 limit 条。 */
+/** 跨会话搜微信对话正文，按消息时间倒序，最多 limit 条。 */
 export function searchWeixinMessages(q: string, opts: { limit?: number } = {}): WeixinSearchHit[] {
   const query = q.trim().slice(0, SEARCH_MAX_Q)
   if (!query) return []
   const limit = Math.min(100, Math.max(1, opts.limit ?? 50))
-  const like = `%${escapeLike(query)}%`
-  const db = openDb()
-  try {
-    const rows = db
-      .prepare(
-        `SELECT m.session_id, m.role, m.content, m.timestamp, s.title, s.started_at
-           FROM messages m JOIN sessions s ON s.id = m.session_id
-          WHERE s.source = ? AND m.active = 1
-            AND m.role IN ('user', 'assistant')
-            AND m.content LIKE ? ESCAPE '\\'
-          ORDER BY m.timestamp DESC LIMIT ?`,
-      )
-      .all(SOURCE, like, limit) as Array<Record<string, unknown>>
-    return rows.map((r) => {
-      const content = typeof r.content === 'string' ? r.content : ''
-      return {
-        sessionId: String(r.session_id ?? ''),
-        sessionTitle: strOrNull(r.title),
-        sessionStartedAt: toMs(r.started_at),
-        role: typeof r.role === 'string' ? r.role : '',
-        timestamp: toMs(r.timestamp),
-        snippet: snippetOf(content, query),
-      }
-    })
-  } finally {
-    db.close()
+  const needle = query.toLowerCase()
+  const hits: WeixinSearchHit[] = []
+  for (const s of loadSessions()) {
+    for (const m of s.messages) {
+      if (!m.text.toLowerCase().includes(needle)) continue
+      hits.push({
+        sessionId: s.id,
+        sessionTitle: s.title,
+        sessionStartedAt: s.startedAt,
+        role: m.role,
+        timestamp: m.ts,
+        snippet: snippetOf(m.text, query),
+      })
+    }
   }
+  return hits.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0)).slice(0, limit)
 }
 
-// ---- 行 → 摘要 / 小工具（续）----
+// ---- 小工具 ----
 
-function toSummary(r: Record<string, unknown>): WeixinSessionSummary {
-  return {
-    id: String(r.id ?? ''),
-    title: strOrNull(r.title),
-    model: strOrNull(r.model),
-    startedAt: toMs(r.started_at),
-    endedAt: toMs(r.ended_at),
-    endReason: strOrNull(r.end_reason),
-    messageCount: Number(r.message_count) || 0,
-    chatId: strOrNull(r.chat_id),
-    chatType: strOrNull(r.chat_type),
-    userId: strOrNull(r.user_id),
-  }
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
 }
 
-function toMs(v: unknown): number | null {
-  const s = Number(v)
-  return Number.isFinite(s) && s > 0 ? Math.round(s * 1000) : null
-}
-
-function strOrNull(v: unknown): string | null {
-  return typeof v === 'string' && v ? v : null
-}
-
-function toCount(row: { c?: unknown } | undefined): number {
-  const n = Number(row?.c)
-  return Number.isFinite(n) ? n : 0
+/** ISO 时间串 → epoch 毫秒；非法/缺失返 null。 */
+function parseTime(v: unknown): number | null {
+  if (typeof v !== 'string' || !v) return null
+  const t = Date.parse(v)
+  return Number.isFinite(t) && t > 0 ? t : null
 }
 
 function clip(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) : s
-}
-
-function parseJsonArray(raw: string | null): unknown[] {
-  if (!raw) return []
-  try {
-    const v = JSON.parse(raw) as unknown
-    return Array.isArray(v) ? v : []
-  } catch {
-    return []
-  }
-}
-
-/** tool_calls 元素可能是 {function:{name,arguments}} 或裸 {name,arguments}，统一取 function 体。 */
-function pickFunction(call: unknown): { name?: unknown; arguments?: unknown } {
-  if (call && typeof call === 'object') {
-    const c = call as { function?: unknown; name?: unknown; arguments?: unknown }
-    if (c.function && typeof c.function === 'object') return c.function as { name?: unknown; arguments?: unknown }
-    return c
-  }
-  return {}
-}
-
-/** arguments 通常是 JSON 字符串，解析后美化；解析失败或本就是对象则原样字符串化。 */
-function stringifyArgs(args: unknown): string {
-  if (typeof args === 'string') {
-    try {
-      return JSON.stringify(JSON.parse(args) as unknown, null, 2)
-    } catch {
-      return args
-    }
-  }
-  if (args == null) return ''
-  try {
-    return JSON.stringify(args, null, 2)
-  } catch {
-    return String(args)
-  }
-}
-
-/** tool content 解包：{"output":...,"exit_code":...,"error":...} → {text, isError}；非 JSON 原串直用。 */
-function unpackToolContent(content: string): { text: string; isError: boolean } {
-  if (content && content.trimStart().startsWith('{')) {
-    try {
-      const obj = JSON.parse(content) as Record<string, unknown>
-      const output = obj.output ?? obj.result
-      const text = typeof output === 'string' ? output : output == null ? content : safeStringify(output)
-      const ec = obj.exit_code
-      const isError = Boolean(obj.error) || (ec !== undefined && ec !== null && ec !== 0)
-      return { text: text || content, isError }
-    } catch {
-      /* 非 JSON 原串直接用 */
-    }
-  }
-  return { text: content, isError: false }
-}
-
-function safeStringify(v: unknown): string {
-  try {
-    return JSON.stringify(v)
-  } catch {
-    return String(v)
-  }
 }

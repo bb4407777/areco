@@ -4,6 +4,12 @@
 
 ## 工作纪要
 
+### 2026-11-07 微信栏数据源 Hermes state.db → cc-connect 会话存档
+- **现象**：微信 tab 最新停在 10-01。查实非渲染/缓存问题——`~/.hermes/state.db` 的 weixin 会话最后一条就是 `2026-10-01 12:20`（库文件 10-10 后未再写），`hermes gateway` 早已停用（`Gateway is not running`），微信入站自 10 月起改由 cc-connect 承接，Hermes 不再记微信会话。
+- **改法**：`services/weixin-sessions.ts` 整体改读 `~/.cc-connect/sessions/*.json`——取 `user_sessions` 里 `weixin:` 前缀的会话（`chatId` 形如 `weixin:dm:<openid>@im.wechat`），`history` 已是纯 `{role,content,timestamp}`；对外 id 用 `<agent>:<sN>`（如 `CodeBuddy:s696`）跨 agent 文件不撞号；标题优先 `name`，空则取首条用户消息前 30 字；消息为空/无会话的壳按原口径过滤。`/api/weixin/sessions|search|transcript` 三个端点契约不变（分页、搜索、snippet 均照旧），客户端只改了注释与 `agent-label`（取当前会话的 agent 名）。
+- **验证**：真实数据 tsx 直调——会话 59 段、最新 `CodeBuddy:s696`（11-07 18:27，61 条）；transcript 61 条尾页正确、`hasMore=false`；搜索「恩平」命中当日消息。`npm run build` 全过；临时实例（`ARECO_ROOT=/tmp/areco-verify`、8799、免密）复跑三个端点全 `ok:true`，验完即关；生产 8790 已于 22:33 由 launchd 重启，dist 22:31 新产物在跑。
+- **影响面**：仅微信栏；其他渠道（sms/telegram 等）不混入。目录不存在（换机器/未装 cc-connect）返回空列表，不抛错。
+
 ### 2026-08-04 微信页气泡统一 + 跨会话查找（kimi CLI 会话起，08-05 Fable5 收尾核验；本条为终态，覆盖中途各版定调）
 - **气泡统一**：高律师令「微信界面气泡跟会话对话模式不一样，换好看的」。WeixinView.vue 删掉自绘 .bubble/.msg/.tool 约 90 行 CSS，改为直接复用会话对话模式同一个 `ChatMessage.vue` 组件（WxMsg→TranscriptMessage 映射：tool_use 的 text→input、秒/毫秒时间戳→ISO）。气泡样式从此单源，对话模式再调样式微信页自动跟上。容器间距对齐 TranscriptView `.stream`（padding 10px 0、无 gap）。
 - **查找（终态：跨会话、新→旧）**：头部搜索框**输入即搜**（防抖 300ms），服务端 `GET /api/weixin/search?q=` 跨全部微信会话搜正文——SQL 只搜 `role IN ('user','assistant')` 的 content，**不搜 tool 角色与 tool_calls**（初版双列 LIKE 命中 75% 是工具 JSON 噪音，按「搜索匹配不准确」反馈收窄；`%_` ESCAPE 字面化），按消息时间新→旧返回 ≤100 条。命中自动跳对应会话并滚动到关键词：全部命中黄底 `mark.hl`、当前命中红底白字 `mark.hl-now`；定位 = timestamp±1s + role + text 段含词三重匹配（只看 text part——工具折叠块不高亮、不参与定位）。**回车/↑ = 更早的命中，↓ = 更新的命中**（循环、n/N 计数；08-05 收尾时修正 ↑/↓ tooltip 与两处注释文案方向写反的笔误，行为未动）。ChatMessage.vue 新增可选 `highlight`/`highlightActive` prop（不传零影响其他页面），高亮在 md 渲染（html:false 已转义）之后做标签感知替换、只碰标签间纯文本。
