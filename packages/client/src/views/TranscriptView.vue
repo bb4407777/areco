@@ -131,8 +131,6 @@ const scroller = ref<HTMLElement | null>(null)
 // 离底超过该阈值显示「回到最新」悬浮按钮（不做贴底自动跟滚，追新一律手动点按钮）
 const NEAR_BOTTOM_PX = 160
 const showJump = ref(false)
-// 滑到离顶一屏内才自动翻「加载更早」：太早取会在阅读中途插内容、看着就是一顿跳
-const NEAR_TOP_PX = 120
 // 服务端按可见内容分页：把被折叠的类别传过去，免得一页过滤完只剩空屏
 const hideQuery = computed(() => {
   const hide: string[] = []
@@ -191,17 +189,8 @@ watch(
   }
 )
 
-// 程序化滚动（贴底、补页后复位）也会触发 scroll 事件：这段时间内不做「滑到顶就自动翻页」，
-// 否则一进会话 content 还没填满视口，scrollTop 恒为 0，会被自己的 scrollTo 反复触发、
-// 一路把更早的消息翻到底（2026-11-07 报障「一下子跳到最早的消息」）
-let programmaticUntil = 0
-function markProgrammatic(ms = 700) {
-  programmaticUntil = performance.now() + ms
-}
-
 function scrollToBottom(behavior?: ScrollBehavior) {
   const el = scroller.value
-  markProgrammatic()
   el?.scrollTo({ top: el.scrollHeight, behavior })
 }
 
@@ -393,8 +382,6 @@ async function loadOlder() {
       const delta = anchor.getBoundingClientRect().top - anchorTop
       if (Math.abs(delta) > 0.5) el.scrollTop += delta
     }
-    // 这次补偿也是一次程序化滚动，别让它触发下一轮自动翻页
-    markProgrammatic(250)
   } catch {
     /* 下次点再试 */
   } finally {
@@ -402,15 +389,11 @@ async function loadOlder() {
   }
 }
 
-// 滚动时同步「回到最新」按钮可见性；滑进顶部预取区自动加载更早。程序化 scrollTo 也触发 scroll 事件，状态自然对账
+// 滚动时同步「回到最新」按钮可见性；「加载更早」只由按钮触发，不做滚动自动翻页
 function onScroll() {
   const el = scroller.value
   if (!el) return
   showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
-  if (performance.now() < programmaticUntil) return
-  // 内容不足一屏时根本没得滑，自动翻页会把历史一路拉到最早
-  if (el.scrollHeight - el.clientHeight < 40) return
-  if (el.scrollTop <= NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
 }
 
 function jumpToLatest() {
@@ -458,7 +441,7 @@ onBeforeUnmount(() => {
       <div ref="scroller" class="stream" @scroll.passive="onScroll">
         <n-spin v-if="loading" class="center" />
         <template v-else>
-          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳（滚近顶部已自动翻页，按钮仅兜底） -->
+          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
           <div class="more">
             <template v-if="exists">
               <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">{{ hiddenOnly ? '↑ 更早为工具/思考记录，继续' : '↑ 加载更早' }}</n-button>

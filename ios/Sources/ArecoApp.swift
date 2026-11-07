@@ -1,8 +1,17 @@
+import AVFoundation
 import SwiftUI
 
 @main
 struct ArecoApp: App {
     @StateObject private var store = ServerStore()
+
+    init() {
+        // WKWebView 里的 WebAudio 默认走 ambient，iPhone 侧边静音开关一拨就没声；
+        // 改成 playback 类别，播报不受静音键影响。
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+    }
 
     var body: some Scene {
         WindowGroup {
