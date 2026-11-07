@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { kimiEntries, kimiParseLine, kimiWorkDirOf, readHistoryPage, resolveKimiWire } from './history'
+import { kimiEntries, kimiParseLine, kimiWorkDirOf, qoderEntries, readHistoryPage, resolveKimiWire } from './history'
 
 /** 造一个 kimi 落盘 fixture：<tmp>/sessions/<wd>/<sessionId>/{state.json, agents/main/wire.jsonl} */
 function kimiFixture(): { root: string; wd: string; sid: string; wire: string } {
@@ -157,6 +157,34 @@ test('readHistoryPage 单行超 8MB：游标退到块前、hasMore 诚实，可�
     assert.equal(older.messages.length, 1)
     assert.equal(older.start, 0)
     assert.equal(older.hasMore, false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('qoder 列表：cwd 取 workspace-directories，标题取首条用户输入', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-qoder-history-'))
+  const slug = '-Users-example-demo'
+  const sid = '11111111-2222-3333-4444-555555555555'
+  fs.mkdirSync(path.join(dir, slug), { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, slug, `${sid}.jsonl`),
+    [
+      JSON.stringify({ type: 'workspace-directories', sessionId: sid, directories: ['/Users/example/demo'] }),
+      JSON.stringify({ type: 'runtime-config', sessionId: sid, timestamp: 1794000000000 }),
+      JSON.stringify({ type: 'user', timestamp: '2026-11-07T10:00:00.000Z', message: { role: 'user', content: '把中枢换到主板 ds' } }),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-11-07T10:00:01.000Z', message: { role: 'assistant', content: [{ type: 'text', text: '好' }] } }),
+    ].join('\n')
+  )
+  try {
+    const entries = qoderEntries([{ source: 'qoder-cn-test', dir }])
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].source, 'qoder-cn-test')
+    assert.equal(entries[0].id, sid)
+    assert.equal(entries[0].title, '把中枢换到主板 ds')
+    assert.equal(entries[0].cwd, '/Users/example/demo')
+    assert.equal(entries[0].createdMs, 1794000000000)
+    assert.equal(entries[0].resumable, false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

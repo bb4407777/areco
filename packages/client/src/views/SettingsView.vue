@@ -534,6 +534,13 @@ function clearLog() {
         </div>
         <n-switch :value="ui.showProjects" @update:value="ui.setShowProjects" />
       </div>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">导航栏「进程」入口</div>
+          <div class="pref-hint">默认隐藏，打开后顶栏才出现「进程」；改后即存服务端，跨浏览器/设备生效</div>
+        </div>
+        <n-switch :value="ui.showProcesses" @update:value="ui.setShowProcesses" />
+      </div>
     </n-card>
 
     <n-card size="small" class="block">

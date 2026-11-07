@@ -85,6 +85,142 @@ function qclawEntries(): HistoryEntry[] {
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$|^-[A-Za-z0-9._-]+$/
 
+// ---- qoder 原生层 ----
+// qoder CLI 落盘与 claude 同构：~/.qoder/projects/<cwd-slug>/<uuid>.jsonl（国际版）与
+// ~/.qoder-cn/projects/…（国内版）。两处够不上 scanRaw：
+//   ① 文件里没有 cwd 字段，工作目录在首行 workspace-directories.directories[0]；
+//   ② 合计 ~3000 个会话、2.4GB，scanRaw 的 512KB 头部扫描全量跑一遍太重——这里只读 32KB，列表做 20s 缓存。
+// 行格式（type user/assistant + message.content）与 claude 一致，正文仍走 readHistoryPage + parseTranscriptLine。
+const QODER_SESSION_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+const QODER_HEAD_BYTES = 32 * 1024
+const QODER_LIST_TTL_MS = 20_000
+
+export function qoderRoots(): HistoryRoot[] {
+  const roots: HistoryRoot[] = []
+  for (const [source, dir] of [
+    ['qoder', path.join(os.homedir(), '.qoder', 'projects')],
+    ['qoder-cn', path.join(os.homedir(), '.qoder-cn', 'projects')],
+  ] as const) {
+    if (fs.existsSync(dir)) roots.push({ source, dir })
+  }
+  return roots
+}
+
+interface QoderHeadMeta {
+  cwd: string
+  createdMs: number
+  title: string
+}
+
+const qoderHeadCache = new Map<string, QoderHeadMeta & { mtimeMs: number; size: number }>()
+
+function qoderHeadMetaFor(filePath: string, stat: fs.Stats): QoderHeadMeta {
+  const hit = qoderHeadCache.get(filePath)
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit
+  const meta: QoderHeadMeta = { cwd: '', createdMs: 0, title: '' }
+  const bytes = Math.min(stat.size, QODER_HEAD_BYTES)
+  if (bytes > 0) {
+    const fd = fs.openSync(filePath, 'r')
+    let head = ''
+    try {
+      const buf = Buffer.alloc(bytes)
+      fs.readSync(fd, buf, 0, bytes, 0)
+      head = buf.toString('utf8')
+    } finally {
+      fs.closeSync(fd)
+    }
+    for (const line of head.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let row: Record<string, unknown>
+      try {
+        row = JSON.parse(trimmed) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (!meta.cwd && row.type === 'workspace-directories') {
+        const dirs = row.directories
+        if (Array.isArray(dirs) && typeof dirs[0] === 'string') meta.cwd = dirs[0]
+      }
+      if (!meta.createdMs) {
+        if (typeof row.timestamp === 'number') meta.createdMs = row.timestamp
+        else if (typeof row.timestamp === 'string') {
+          const ms = Date.parse(row.timestamp)
+          if (!Number.isNaN(ms)) meta.createdMs = ms
+        }
+      }
+      if (!meta.title && row.type === 'user' && row.isMeta !== true && row.isSidechain !== true) {
+        const text = userText((row.message as { content?: unknown } | undefined)?.content)
+        const label = text ? promptLabel(text) : ''
+        if (label) meta.title = label
+      }
+      if (meta.cwd && meta.createdMs && meta.title) break
+    }
+  }
+  qoderHeadCache.set(filePath, { ...meta, mtimeMs: stat.mtimeMs, size: stat.size })
+  return meta
+}
+
+const qoderListCache = new Map<string, { ts: number; entries: HistoryEntry[] }>()
+
+/** qoder 历史条目：扫 projects/<slug>/<uuid>.jsonl；标题取首条用户输入，cwd 取 workspace-directories */
+export function qoderEntries(roots: HistoryRoot[] = qoderRoots()): HistoryEntry[] {
+  const out: HistoryEntry[] = []
+  for (const root of roots) {
+    const cacheKey = `${root.source}:${root.dir}`
+    const cached = qoderListCache.get(cacheKey)
+    if (cached && Date.now() - cached.ts < QODER_LIST_TTL_MS) {
+      out.push(...cached.entries)
+      continue
+    }
+    const entries: HistoryEntry[] = []
+    for (const project of safeReaddir(root.dir)) {
+      const dir = path.join(root.dir, project)
+      for (const name of safeReaddir(dir)) {
+        if (!name.endsWith('.jsonl')) continue
+        const id = name.slice(0, -'.jsonl'.length)
+        if (!QODER_SESSION_ID.test(id)) continue
+        const filePath = path.join(dir, name)
+        let stat: fs.Stats
+        try {
+          stat = fs.statSync(filePath)
+        } catch {
+          continue
+        }
+        if (!stat.isFile() || stat.size === 0) continue
+        const meta = qoderHeadMetaFor(filePath, stat)
+        entries.push({
+          source: root.source,
+          project,
+          id,
+          title: meta.title || (meta.cwd ? path.basename(meta.cwd) : id.slice(0, 8)),
+          cwd: meta.cwd,
+          mtimeMs: stat.mtimeMs,
+          createdMs: meta.createdMs,
+          size: stat.size,
+          liveSessionId: null,
+          resumable: false, // qoder -r 需要同 cwd，areco 不代起
+        })
+      }
+    }
+    qoderListCache.set(cacheKey, { ts: Date.now(), entries })
+    out.push(...entries)
+  }
+  return out
+}
+
+/** qoder source/project/id → 校验后的会话文件绝对路径（防路径穿越） */
+export function resolveQoderSessionFile(source: string, project: string, id: string): string {
+  const root = qoderRoots().find((r) => r.source === source)
+  if (!root) throw new Error(`历史源不存在: ${source}`)
+  if (!SAFE_SEGMENT.test(project) || project.includes('..')) throw new Error('项目名不合法')
+  if (!QODER_SESSION_ID.test(id)) throw new Error('会话 id 不合法')
+  const filePath = path.join(root.dir, project, `${id}.jsonl`)
+  if (!filePath.startsWith(root.dir + path.sep)) throw new Error('路径不合法')
+  if (!fs.existsSync(filePath)) throw new Error('历史会话不存在')
+  return filePath
+}
+
 // ---- kimi 原生层 ----
 // kimi 落盘三层布局：~/.kimi-code/sessions/<wd_slug>/session_<uuid>/{state.json, agents/main/wire.jsonl}，
 // 塞不进 scanRaw 的 <root>/<project>/<id>.jsonl 两层假设，仿 qclaw 独立扫描 + controller 独立分支。
@@ -527,6 +663,14 @@ export function listHistory(
   }
   // mcode 原生层：读 MiniMax Code 本地 sqlite（mcode CLI 与 .app 共用），不进 scanRaw
   for (const entry of mcodeEntries()) {
+    if (q) {
+      const hay = `${entry.title}\n${entry.cwd}\n${entry.id}`.toLowerCase()
+      if (!hay.includes(q)) continue
+    }
+    matched.push(entry)
+  }
+  // qoder 原生层：~/.qoder 与 ~/.qoder-cn 两套 projects（32KB 头部扫描 + 20s 列表缓存）
+  for (const entry of qoderEntries()) {
     if (q) {
       const hay = `${entry.title}\n${entry.cwd}\n${entry.id}`.toLowerCase()
       if (!hay.includes(q)) continue

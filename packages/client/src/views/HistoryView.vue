@@ -194,6 +194,12 @@ onMounted(() => void load(true))
 .src.mcode {
   color: #e05a5a;
 }
+.src.qoder {
+  color: #4f9dff;
+}
+.src.qoder-cn {
+  color: #2fb3a3;
+}
 .path {
   flex: 1;
   min-width: 0;

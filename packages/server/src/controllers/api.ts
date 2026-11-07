@@ -25,6 +25,7 @@ import {
   resolveHistoryFile,
   resolveKimiWire,
   resolvePiSessionFile,
+  resolveQoderSessionFile,
 } from '../services/history'
 import { chatlogCwd, isChatlogSource, readChatlogTranscript } from '../services/chatlog'
 import { readMcdeTranscript } from '../services/mcode-sessions'
@@ -253,7 +254,7 @@ export class ApiControllers {
   updateUiPrefs = (ctx: Context) =>
     guard(ctx, () => {
       const body = (ctx.request.body ?? {}) as Partial<Record<keyof UiPrefs, unknown>>
-      const keys = ['showThinking', 'showToolUse', 'showToolResult', 'showTasks', 'showProjects', 'spawnMode'] as const
+      const keys = ['showThinking', 'showToolUse', 'showToolResult', 'showTasks', 'showProjects', 'showProcesses', 'spawnMode'] as const
       const provided = keys.filter((k) => body[k] !== undefined)
       if (!provided.length) throw new Error(`未提供可更新字段（${keys.join('/')}）`)
       const ui: UiPrefs = { ...(this.config.ui ?? {}) }
@@ -641,6 +642,14 @@ export class ApiControllers {
       // mcode 原生层：MiniMax Code 本地 sqlite 一站读全（消息量小，不按字节分页）
       if (source === 'mcode') {
         ok(ctx, readMcdeTranscript(id))
+        return
+      }
+      // qoder 原生层：与 claude 同构的 jsonl（国际版 qoder / 国内版 qoder-cn），字节游标分页
+      if (source === 'qoder' || source === 'qoder-cn') {
+        const filePath = resolveQoderSessionFile(source, project, id)
+        const beforeRaw = Number(ctx.query.before)
+        const before = Number.isFinite(beforeRaw) && beforeRaw >= 0 ? beforeRaw : undefined
+        ok(ctx, readHistoryPage(filePath, before))
         return
       }
       const filePath = resolveHistoryFile(this.historyRoots, source, project, id)
