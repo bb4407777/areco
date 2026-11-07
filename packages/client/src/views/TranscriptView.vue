@@ -10,6 +10,7 @@ import { useSessionsStore } from '../stores/sessions'
 import { useUiStore, type SessionViewMode } from '../stores/ui'
 import { chatCapable, statusTagText, templateLabel, trafficColor } from '../utils/format'
 import { isTaskNotification } from '../utils/notify'
+import { prependKeepingAnchor } from '../utils/prepend-anchor'
 import ArtifactsBar from '../components/ArtifactsBar.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import FilePreview from '../components/FilePreview.vue'
@@ -349,13 +350,30 @@ async function poll() {
   }
 }
 
-// 「加载更早」：照 weSaw 的做法——滚动离顶 48px 内自动补页，带锁防连环，插完按绝对位置复位
+// 「加载更早」：照 weSaw 的做法——滚动离顶 48px 内自动补页，带锁防连环
 const NEAR_TOP_PX = 48
 let olderLock = false
 let olderUnlock: number | null = null
 
-function nextFrame() {
-  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+// 可见性判断与 ChatMessage 同口径：默认折叠思考/工具，一页里可能一条看得见的都没有
+const ASK_TOOL = /ask|request_user_input/i
+function hasVisiblePart(m: TranscriptMessage) {
+  for (const p of m.parts) {
+    if (p.kind === 'thinking') {
+      if (ui.showThinking) return true
+      continue
+    }
+    if (p.kind === 'tool_use') {
+      if (ui.showToolUse || ASK_TOOL.test(String(p.name ?? ''))) return true
+      continue
+    }
+    if (p.kind === 'tool_result') {
+      if (ui.showToolResult) return true
+      continue
+    }
+    return true
+  }
+  return false
 }
 
 async function loadOlder() {
@@ -365,36 +383,39 @@ async function loadOlder() {
   const gen = sessionGen
   const id = sessionId.value
   try {
-    // 一页全是被折叠的工具/思考时屏幕上什么都不会多，接着往前取（最多 3 页），别让人对着空屏
-    for (let round = 0; round < 3; round++) {
-      const page = await api.get<TranscriptPage>(
-        `/api/sessions/${id}/transcript?before=${start}`
-      )
+    // 一页按字节切，碰上超长工具结果只出几条，再滤掉折叠的思考/工具，屏幕上可能一片空白。
+    // 先攒够几条真正看得见的内容，再一次性并入——逐页插入会重排多轮，滑起来一顿一顿。
+    let batch: TranscriptMessage[] = []
+    let next = start
+    let more: boolean = hasMore.value
+    let visible = 0
+    for (let round = 0; round < 6 && more; round++) {
+      const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${next}`)
       if (gen !== sessionGen) return
-      speechTracker.addBaseline(id, page.messages)
-      hasMore.value = page.hasMore ?? false
-      start = page.start ?? 0
+      more = page.hasMore ?? false
+      next = page.start ?? 0
       if (!page.messages.length) break
-      // 请求期间用户还在滑：插入前现量一次，按此刻的位置复位，不会被请求耗时带偏
-      const el = scroller.value
-      const prevTop = el?.scrollTop ?? 0
-      const prevHeight = el?.scrollHeight ?? 0
-      const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
-      const anchorTop = anchor?.getBoundingClientRect().top ?? 0
-      firstIndex.value -= page.messages.length
-      messages.value = [...page.messages, ...messages.value]
+      batch = [...page.messages, ...batch]
+      visible += page.messages.filter(hasVisiblePart).length
+      if (visible >= 8) break
+    }
+    hasMore.value = more
+    start = next
+    if (!batch.length) return
+    speechTracker.addBaseline(id, batch)
+    firstIndex.value -= batch.length
+    const el = scroller.value
+    if (!el) {
+      messages.value = [...batch, ...messages.value]
+      return
+    }
+    await prependKeepingAnchor(el, async () => {
+      messages.value = [...batch, ...messages.value]
       await nextTick()
-      if (!el) break
-      // 绝对赋值而不是累加：浏览器自己的滚动锚定若已补过，这里也不会补第二次
-      const added = el.scrollHeight - prevHeight
-      if (added > 0) el.scrollTop = prevTop + added
-      else if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
-      // 图片/折叠块可能晚一帧才量准，再校一次，确保视口仍停在原来那条消息上
-      await nextFrame()
-      if (el.scrollTop < NEAR_TOP_PX && anchor) {
-        el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
-      }
-      if (added >= 8 || !hasMore.value) break
+    })
+    // 仍不够一屏（整页都是折叠内容）就接着补，别停在空屏等下一次滚动
+    if (hasMore.value && el.scrollTop < NEAR_TOP_PX) {
+      window.setTimeout(() => void loadOlder(), 300)
     }
   } catch {
     /* 下次滑到顶再试 */
@@ -465,7 +486,6 @@ onBeforeUnmount(() => {
       <label class="auto-speech" title="只播新完成的正式文本；刷新后仍关闭">
         <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />自动
       </label>
-      <n-button v-if="speech.playingId" quaternary size="small" @click="speech.stop()">停止播报</n-button>
       <ViewModeSwitch mode="chat" @switch="switchMode" />
       <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
         <n-button quaternary size="small">操作 ▾</n-button>

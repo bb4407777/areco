@@ -75,7 +75,6 @@ function forceUpdate() {
                 <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />
                 自动播报
               </label>
-              <button v-if="speech.playingId" class="nav-link" type="button" @click="speech.stop()">停止播报</button>
               <button class="nav-link theme-btn" type="button" :title="ui.theme === 'dark' ? '切到浅色' : '切到深色'" @click="ui.toggleTheme()">
                 {{ ui.theme === 'dark' ? '☀️' : '🌙' }}
               </button>
