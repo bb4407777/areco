@@ -5,9 +5,11 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { NButton, NInput, NModal, NSwitch, useMessage } from 'naive-ui'
 import { api } from '../api'
+import { useUiStore } from '../stores/ui'
 import type { OpcRun, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
 
 const message = useMessage()
+const ui = useUiStore()
 
 const snap = ref<OpcSnapshot | null>(null)
 const loading = ref(false)
@@ -113,7 +115,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="opc-page">
+  <div class="opc-page" :class="{ mobile: ui.isMobile }">
     <div class="toolbar">
       <h2 class="page-title">OPC 后台</h2>
       <span class="counts">
@@ -139,7 +141,7 @@ onUnmounted(() => {
         :class="t.status"
         :title="`${t.label}\n模型 ${t.model || '账户默认'}\n冷却至 ${t.cooldownUntil ? new Date(t.cooldownUntil * 1000).toLocaleString('zh-CN') : '—'}\n最近错误 ${t.lastError || '无'}`"
       >
-        {{ t.id }}
+        <span class="track-name">{{ t.id }}</span>
         <span class="track-state">{{ trackState(t) }}</span>
         <span class="track-used">{{ t.used }} 单</span>
       </span>
@@ -151,7 +153,7 @@ onUnmounted(() => {
         <h3>在办工单</h3>
         <span class="hint">点「日志」看该单工人最后 400 行</span>
       </div>
-      <div class="table-wrap short">
+      <div v-if="!ui.isMobile" class="table-wrap short">
         <table>
           <thead>
             <tr>
@@ -182,6 +184,22 @@ onUnmounted(() => {
         </table>
         <div v-if="!tasks.length" class="empty">{{ snap ? '队列里没有在办工单' : '读取中…' }}</div>
       </div>
+      <div v-else class="cards">
+        <article v-for="r in tasks" :key="r.id" class="card" :class="{ clickable: r.hasLog }" @click="r.hasLog && openLog(r)">
+          <div class="card-top">
+            <span class="card-title">{{ r.title || r.id }}</span>
+            <span class="tag" :class="r.status">{{ STATUS_TEXT[r.status] ?? r.status }}</span>
+          </div>
+          <div class="card-meta">
+            <span class="mono">{{ r.id }}</span>
+            <span>{{ r.assignee }}</span>
+            <span>{{ fmtTime(r.createdAt * 1000) }}</span>
+            <span v-if="r.failures" class="danger">连败 {{ r.failures }}</span>
+            <span v-if="r.hasLog" class="card-act">日志 ›</span>
+          </div>
+        </article>
+        <div v-if="!tasks.length" class="empty">{{ snap ? '队列里没有在办工单' : '读取中…' }}</div>
+      </div>
     </section>
 
     <section class="block">
@@ -189,7 +207,7 @@ onUnmounted(() => {
         <h3>最近跑单</h3>
         <span class="hint">换轨单的「轨」列显示 轨1→轨2…</span>
       </div>
-      <div class="table-wrap">
+      <div v-if="!ui.isMobile" class="table-wrap">
         <table>
           <thead>
             <tr>
@@ -221,11 +239,37 @@ onUnmounted(() => {
         </table>
         <div v-if="!runs.length" class="empty">{{ snap ? '没有匹配的跑单' : '读取中…' }}</div>
       </div>
+      <div v-else class="cards">
+        <article v-for="r in runs" :key="`${r.taskId}-${r.ts}`" class="card" :class="{ bad: !r.ok }">
+          <div class="card-top">
+            <span class="card-title">{{ r.title || r.taskId }}</span>
+            <span class="tag" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成' : r.errKind || '败' }}</span>
+          </div>
+          <div class="card-meta">
+            <span class="mono card-track">{{ r.tracks || r.track }}</span>
+            <span v-if="r.fallback" class="tag fallback">换轨</span>
+            <span class="mono">{{ r.model }}</span>
+          </div>
+          <div class="card-meta">
+            <span>{{ fmtTime(Date.parse(r.ts)) }}</span>
+            <span>{{ r.dept }}</span>
+            <span>{{ fmtDur(r.durS) }}</span>
+            <span v-if="r.err" class="card-err">{{ r.err }}</span>
+          </div>
+        </article>
+        <div v-if="!runs.length" class="empty">{{ snap ? '没有匹配的跑单' : '读取中…' }}</div>
+      </div>
     </section>
 
     <p class="foot">只读视图 · 数据来自 ~/skills/opc 台账与看板 · 更新于 {{ updatedAt }}</p>
 
-    <NModal v-model:show="logShow" preset="card" :title="`工人日志 · ${logTitle}`" class="log-modal">
+    <NModal
+      v-model:show="logShow"
+      preset="card"
+      :title="`工人日志 · ${logTitle}`"
+      class="log-modal"
+      style="width: min(680px, 94vw)"
+    >
       <div v-if="logLoading" class="empty">读取中…</div>
       <template v-else-if="log">
         <p class="log-meta">{{ log.path }}<span v-if="log.truncated"> · 仅显示尾部</span></p>
@@ -495,15 +539,136 @@ tbody tr.bad {
   white-space: pre-wrap;
   word-break: break-all;
 }
-@media (max-width: 720px) {
+/* 卡片列表（窄屏用，桌面不走这块） */
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.card.clickable {
+  cursor: pointer;
+}
+.card.bad {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.card-top .tag {
+  flex: 0 0 auto;
+}
+.card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.card-track {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-act {
+  margin-left: auto;
+  color: var(--accent);
+}
+.card-err {
+  flex: 1 0 100%;
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
   .opc-page {
-    padding: 10px 10px 18px;
+    padding: 10px 10px 20px;
+    gap: 10px;
+    overflow-y: auto;
   }
-  .search {
-    width: 120px;
+  .toolbar {
+    gap: 6px 10px;
+  }
+  .page-title {
+    font-size: 16px;
   }
   .counts {
+    font-size: 11px;
+  }
+  .toolbar-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+  .search {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+  .block {
+    flex: 0 0 auto;
+  }
+  .block-head {
+    gap: 8px;
+  }
+  .hint {
     display: none;
+  }
+  /* 轨道：两列小卡，长名省略，状态在第二行 */
+  .tracks {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .track {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name used'
+      'state state';
+    align-items: center;
+    gap: 1px 8px;
+    padding: 6px 9px;
+    border-radius: 10px;
+  }
+  .track-name {
+    grid-area: name;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .track-used {
+    grid-area: used;
+    font-size: 10.5px;
+    text-align: right;
+  }
+  .track-state {
+    grid-area: state;
+    font-size: 10.5px;
   }
 }
 </style>
