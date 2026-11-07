@@ -8,6 +8,7 @@ import type { HistoryTranscriptPage, SessionSummary, TranscriptMessage } from '.
 import { api } from '../api'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
+import { messageCoverage, prependKeepingAnchor } from '../utils/prepend-anchor'
 import ChatMessage from '../components/ChatMessage.vue'
 import FilePreview from '../components/FilePreview.vue'
 
@@ -80,42 +81,44 @@ onBeforeUnmount(() => {
   if (olderUnlock !== null) clearTimeout(olderUnlock)
 })
 
-// 与对话页同一套：离顶 48px 内自动补页，插完按绝对位置复位（weSaw 做法）
+// 与对话页同一套：离顶 48px 内自动补页，插入后按首条消息的屏幕位移复位
 const NEAR_TOP_PX = 48
 let olderLock = false
 let olderUnlock: number | null = null
-
-function nextFrame() {
-  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-}
 
 async function loadOlder() {
   if (olderLock || loadingOlder.value || !hasMore.value) return
   olderLock = true
   loadingOlder.value = true
   const gen = routeGen
-  const url = `${baseUrl.value}/transcript?before=${start}`
   try {
-    const page = await api.get<HistoryTranscriptPage>(url)
-    if (gen !== routeGen) return
-    // 插入前现量，按此刻的位置复位（请求期间用户还在滑也不受影响）
+    // 一页按字节切，碰上超长工具结果可能只出两三条；先攒够一屏再一次性并入
+    let batch: TranscriptMessage[] = []
+    let next = start
+    let more: boolean = hasMore.value
+    for (let round = 0; round < 8 && more && batch.length < 20; round++) {
+      const page = await api.get<HistoryTranscriptPage>(`${baseUrl.value}/transcript?before=${next}`)
+      if (gen !== routeGen) return
+      more = page.hasMore
+      next = page.start
+      if (!page.messages.length) break
+      batch = [...page.messages, ...batch]
+    }
+    hasMore.value = more
+    start = next
+    if (!batch.length) return
+    firstIndex.value -= batch.length
     const el = scroller.value
-    const prevTop = el?.scrollTop ?? 0
-    const prevHeight = el?.scrollHeight ?? 0
-    const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
-    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
-    firstIndex.value -= page.messages.length
-    messages.value = [...page.messages, ...messages.value]
-    hasMore.value = page.hasMore
-    start = page.start
-    await nextTick()
-    if (!el) return
-    const added = el.scrollHeight - prevHeight
-    if (added > 0) el.scrollTop = prevTop + added
-    else if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
-    await nextFrame()
-    if (el.scrollTop < NEAR_TOP_PX && anchor) {
-      el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+    if (!el) {
+      messages.value = [...batch, ...messages.value]
+      return
+    }
+    await prependKeepingAnchor(el, async () => {
+      messages.value = [...batch, ...messages.value]
+      await nextTick()
+    })
+    if (hasMore.value && (el.scrollTop < NEAR_TOP_PX || messageCoverage(el) < 0.5)) {
+      window.setTimeout(() => void loadOlder(), 300)
     }
   } catch (err) {
     if (gen !== routeGen) return

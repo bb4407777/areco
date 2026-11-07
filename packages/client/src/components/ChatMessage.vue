@@ -337,9 +337,6 @@ function highlightInHtml(html: string, kw: string, active: boolean): string {
 .msg {
   display: flex;
   padding: 3px 12px;
-  /* 长对话滚动优化：屏外气泡跳过排版与绘制（iOS 滑动卡顿主因），估高供滚动条定位 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 96px;
 }
 .msg.user {
   justify-content: flex-end;

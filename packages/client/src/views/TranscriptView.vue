@@ -10,7 +10,7 @@ import { useSessionsStore } from '../stores/sessions'
 import { useUiStore, type SessionViewMode } from '../stores/ui'
 import { chatCapable, statusTagText, templateLabel, trafficColor } from '../utils/format'
 import { isTaskNotification } from '../utils/notify'
-import { prependKeepingAnchor } from '../utils/prepend-anchor'
+import { messageCoverage, prependKeepingAnchor } from '../utils/prepend-anchor'
 import ArtifactsBar from '../components/ArtifactsBar.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import FilePreview from '../components/FilePreview.vue'
@@ -355,27 +355,6 @@ const NEAR_TOP_PX = 48
 let olderLock = false
 let olderUnlock: number | null = null
 
-// 可见性判断与 ChatMessage 同口径：默认折叠思考/工具，一页里可能一条看得见的都没有
-const ASK_TOOL = /ask|request_user_input/i
-function hasVisiblePart(m: TranscriptMessage) {
-  for (const p of m.parts) {
-    if (p.kind === 'thinking') {
-      if (ui.showThinking) return true
-      continue
-    }
-    if (p.kind === 'tool_use') {
-      if (ui.showToolUse || ASK_TOOL.test(String(p.name ?? ''))) return true
-      continue
-    }
-    if (p.kind === 'tool_result') {
-      if (ui.showToolResult) return true
-      continue
-    }
-    return true
-  }
-  return false
-}
-
 async function loadOlder() {
   if (olderLock || loadingOlder.value || !hasMore.value) return
   olderLock = true
@@ -383,21 +362,18 @@ async function loadOlder() {
   const gen = sessionGen
   const id = sessionId.value
   try {
-    // 一页按字节切，碰上超长工具结果只出几条，再滤掉折叠的思考/工具，屏幕上可能一片空白。
-    // 先攒够几条真正看得见的内容，再一次性并入——逐页插入会重排多轮，滑起来一顿一顿。
+    // 一页按字节切，碰上超长工具结果可能只出两三条；先攒够一屏再一次性并入，
+    // 逐页插入会让整列重排多轮，滑起来一顿一顿
     let batch: TranscriptMessage[] = []
     let next = start
     let more: boolean = hasMore.value
-    let visible = 0
-    for (let round = 0; round < 6 && more; round++) {
+    for (let round = 0; round < 8 && more && batch.length < 20; round++) {
       const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${next}`)
       if (gen !== sessionGen) return
       more = page.hasMore ?? false
       next = page.start ?? 0
       if (!page.messages.length) break
       batch = [...page.messages, ...batch]
-      visible += page.messages.filter(hasVisiblePart).length
-      if (visible >= 8) break
     }
     hasMore.value = more
     start = next
@@ -414,7 +390,7 @@ async function loadOlder() {
       await nextTick()
     })
     // 仍不够一屏（整页都是折叠内容）就接着补，别停在空屏等下一次滚动
-    if (hasMore.value && el.scrollTop < NEAR_TOP_PX) {
+    if (hasMore.value && (el.scrollTop < NEAR_TOP_PX || messageCoverage(el) < 0.5)) {
       window.setTimeout(() => void loadOlder(), 300)
     }
   } catch {
