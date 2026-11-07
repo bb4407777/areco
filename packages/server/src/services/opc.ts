@@ -94,6 +94,7 @@ export function parseRun(value: unknown): OpcRun | null {
     errKind: typeof row.err_kind === 'string' ? row.err_kind : '',
     err: typeof row.err === 'string' ? row.err : '',
     fallback: Number(row.fallback) || 0,
+    sessionId: typeof row.session_id === 'string' ? row.session_id : '',
   }
 }
 
@@ -118,6 +119,48 @@ export function parseAllRuns(text: string): OpcRun[] {
     if (run) runs.push(run)
   }
   return runs
+}
+
+// ── 会话定位：台账 session_id → 历史页的 (source, project) ──
+// 各引擎落盘都是 <root>/<cwd-slug>/<session-id>.jsonl，只有根与源名不同。
+const SESSION_ROOTS: Record<string, { source: string; dir: string }[]> = {
+  codebuddy: [{ source: 'codebuddy', dir: path.join(os.homedir(), '.codebuddy', 'projects') }],
+  qoder: [
+    { source: 'qoder', dir: path.join(os.homedir(), '.qoder', 'projects') },
+    { source: 'qoder-cn', dir: path.join(os.homedir(), '.qoder-cn', 'projects') },
+  ],
+}
+const sessionCache = new Map<string, { source: string; project: string } | null>()
+
+/**
+ * 会话文件位置：各引擎落盘都是 <root>/<cwd-slug>/<session-id>.jsonl。
+ * 全量扫一遍 ~/.codebuddy/projects 要两分钟（1.5 万会话 / 6.3G），所以只按 id
+ * 逐个 slug 目录做 existsSync（几百个目录，毫秒级），命中即缓存。
+ */
+export function locateSession(sessionId: string, engine = ''): { source: string; project: string } | null {
+  if (!sessionId) return null
+  const hit = sessionCache.get(sessionId)
+  if (hit !== undefined) return hit
+  const roots = SESSION_ROOTS[engine] ?? Object.values(SESSION_ROOTS).flat()
+  let found: { source: string; project: string } | null = null
+  for (const root of roots) {
+    let projects: string[] = []
+    try {
+      projects = fs.readdirSync(root.dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
+    } catch {
+      continue
+    }
+    for (const project of projects) {
+      if (fs.existsSync(path.join(root.dir, project, `${sessionId}.jsonl`))) {
+        found = { source: root.source, project }
+        break
+      }
+    }
+    if (found) break
+  }
+  if (sessionCache.size > 1000) sessionCache.clear()
+  sessionCache.set(sessionId, found)
+  return found
 }
 
 /** 本地日历日（台账 ts 写的是本地时间 "YYYY-MM-DDTHH:mm:ss"，按前缀比对即可） */
@@ -266,6 +309,13 @@ function readTasks(): { tasks: OpcTaskRow[]; counts: Record<string, number>; war
 export function snapshot(): OpcSnapshot {
   const { runs, today, byTrack, warning: runWarn } = readRuns()
   const { tasks, counts, warning: taskWarn } = readTasks()
+  for (const r of runs) {
+    const ref = r.sessionId ? locateSession(r.sessionId, r.engine) : null
+    if (ref) {
+      r.sessionSource = ref.source
+      r.sessionProject = ref.project
+    }
+  }
   return {
     ts: Date.now(),
     runs,

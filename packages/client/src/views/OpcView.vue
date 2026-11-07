@@ -3,6 +3,7 @@
 // 数据源全在服务端 services/opc.ts（只读 ~/skills/opc 与 ~/.hermes/kanban/logs）；
 // 这里只展示与按需拉单张工单的日志尾部，不提供任何写操作。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { NButton, NInput, NSwitch, useMessage } from 'naive-ui'
 import { api } from '../api'
 import { useUiStore } from '../stores/ui'
@@ -10,6 +11,7 @@ import type { OpcRun, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '.
 
 const message = useMessage()
 const ui = useUiStore()
+const router = useRouter()
 
 const snap = ref<OpcSnapshot | null>(null)
 const auto = ref(true)
@@ -134,6 +136,22 @@ async function loadLog(id: string): Promise<void> {
   } finally {
     logLoading.value = false
   }
+}
+
+/** 该单的引擎会话在历史页的位置（服务端按 session_id 查落盘文件所得） */
+const sessionTarget = computed(() => {
+  const r = selectedRun.value
+  if (!r?.sessionId || !r.sessionSource || !r.sessionProject) return null
+  return r
+})
+
+function openSession(): void {
+  const r = sessionTarget.value
+  if (!r) return
+  router.push({
+    path: `/history/${r.sessionSource}/${r.sessionProject}/${r.sessionId}`,
+    query: { title: r.title || r.taskId },
+  })
 }
 
 function select(id: string): void {
@@ -306,6 +324,13 @@ onUnmounted(() => {
             <div class="kv-row"><span class="k">耗时</span><span class="v">{{ fmtDur(selectedRun.durS) }}</span></div>
             <div v-if="selectedRun.err" class="kv-row"><span class="k">错误</span><span class="v err">{{ selectedRun.err }}</span></div>
           </template>
+          <div v-if="selectedRun?.sessionId" class="kv-row">
+            <span class="k">会话</span>
+            <span class="v">
+              <button v-if="sessionTarget" type="button" class="link" @click="openSession">打开对话记录 ›</button>
+              <span v-else class="muted">会话文件未找到（{{ selectedRun?.sessionId.slice(0, 8) }}…）</span>
+            </span>
+          </div>
         </div>
 
         <div class="log-head">
@@ -580,6 +605,21 @@ onUnmounted(() => {
   color: var(--danger);
   font-size: 12px;
 }
+.link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.link:hover {
+  text-decoration: underline;
+}
+.muted {
+  color: var(--faint);
+}
 .log-head {
   display: flex;
   align-items: baseline;
@@ -740,12 +780,18 @@ onUnmounted(() => {
   .opc {
     flex-direction: column;
   }
+  /* 移动端整页一屏：列表/详情各自占满剩余高度，滚动交给 side-list / log-wrap，
+     .side 必须 flex:1 否则高度按内容撑开、超出部分被 .opc 的 overflow:hidden 裁掉（滑不动） */
   .opc.mobile .side {
     width: 100%;
     border-right: none;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .opc.mobile .main {
     width: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .side-head {
     padding: 10px 12px 6px;

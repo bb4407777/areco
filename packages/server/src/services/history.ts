@@ -221,6 +221,28 @@ export function resolveQoderSessionFile(source: string, project: string, id: str
   return filePath
 }
 
+// ---- codebuddy 原生层（只按 id 直取，不进列表）----
+// CodeBuddy 无头 CLI（后台工人主力轨）落盘 ~/.codebuddy/projects/<cwd-slug>/<uuid>.jsonl。
+// 每行是 WorkBuddy 事件（type/role/content，行内自带 cwd/sessionId），正文解析用 parseWorkbuddy。
+// 本机有 1.5 万个会话、6.3G：全量扫一遍要两分钟，绝不进列表；OPC 页按台账 session_id
+// 直查 320 个 cwd-slug 目录（existsSync），命中即给出 <source>/<project>/<id> 供跳转。
+const CB_SESSION_ID = QODER_SESSION_ID
+
+export function codebuddyRoot(): HistoryRoot {
+  return { source: 'codebuddy', dir: path.join(os.homedir(), '.codebuddy', 'projects') }
+}
+
+/** codebuddy source/project/id → 校验后的会话文件绝对路径 */
+export function resolveCodebuddySessionFile(project: string, id: string): string {
+  const root = codebuddyRoot()
+  if (!SAFE_SEGMENT.test(project) || project.includes('..')) throw new Error('项目名不合法')
+  if (!CB_SESSION_ID.test(id)) throw new Error('会话 id 不合法')
+  const filePath = path.join(root.dir, project, `${id}.jsonl`)
+  if (!filePath.startsWith(root.dir + path.sep)) throw new Error('路径不合法')
+  if (!fs.existsSync(filePath)) throw new Error('历史会话不存在')
+  return filePath
+}
+
 // ---- kimi 原生层 ----
 // kimi 落盘三层布局：~/.kimi-code/sessions/<wd_slug>/session_<uuid>/{state.json, agents/main/wire.jsonl}，
 // 塞不进 scanRaw 的 <root>/<project>/<id>.jsonl 两层假设，仿 qclaw 独立扫描 + controller 独立分支。

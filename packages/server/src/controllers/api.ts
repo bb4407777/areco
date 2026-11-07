@@ -22,6 +22,7 @@ import {
   piWorkDirOf,
   readHistoryAllMessages,
   readHistoryPage,
+  resolveCodebuddySessionFile,
   resolveHistoryFile,
   resolveKimiWire,
   resolvePiSessionFile,
@@ -642,6 +643,14 @@ export class ApiControllers {
       // mcode 原生层：MiniMax Code 本地 sqlite 一站读全（消息量小，不按字节分页）
       if (source === 'mcode') {
         ok(ctx, readMcdeTranscript(id))
+        return
+      }
+      // codebuddy 原生层：后台工人的无头会话（WorkBuddy 事件行，parseWorkbuddy 解析）。
+      // 文件量小（一单一份），直接整读，不做字节分页。
+      if (source === 'codebuddy') {
+        const filePath = resolveCodebuddySessionFile(project, id)
+        const messages = parseWorkbuddy(fs.readFileSync(filePath, 'utf8'))
+        ok(ctx, { messages, start: 0, end: messages.length, hasMore: false })
         return
       }
       // qoder 原生层：与 claude 同构的 jsonl（国际版 qoder / 国内版 qoder-cn），字节游标分页

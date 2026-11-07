@@ -563,6 +563,11 @@ export interface OpcRun {
   err: string
   /** 是否因限流换过轨 */
   fallback: number
+  /** 该单引擎会话 id（可到历史页看完整对话；老台账没有此字段） */
+  sessionId?: string
+  /** 会话在历史页的位置（source/project = 落盘源与 cwd slug），找不到落盘文件时为空 */
+  sessionSource?: string
+  sessionProject?: string
 }
 
 export interface OpcTaskRow {
