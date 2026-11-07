@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// OPC 后台页（2026-11-07）：一屏看轨道健康 + 看板在办 + 最近跑单。
+// OPC 后台页（2026-11-08 改版）：与「会话」「历史」同构——左侧列表、右侧详情。
 // 数据源全在服务端 services/opc.ts（只读 ~/skills/opc 与 ~/.hermes/kanban/logs）；
 // 这里只展示与按需拉单张工单的日志尾部，不提供任何写操作。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { NButton, NInput, NModal, NSwitch, useMessage } from 'naive-ui'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { NButton, NInput, NSwitch, useMessage } from 'naive-ui'
 import { api } from '../api'
 import { useUiStore } from '../stores/ui'
 import type { OpcRun, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
@@ -14,10 +14,10 @@ const ui = useUiStore()
 const snap = ref<OpcSnapshot | null>(null)
 const auto = ref(true)
 const q = ref('')
-const logShow = ref(false)
-const logLoading = ref(false)
-const logTitle = ref('')
+const selectedId = ref<string | null>(null)
 const log = ref<OpcTaskLog | null>(null)
+const logLoading = ref(false)
+const logError = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
 
 const STATUS_TEXT: Record<string, string> = {
@@ -28,20 +28,6 @@ const STATUS_TEXT: Record<string, string> = {
   blocked: '阻断',
 }
 
-const tasks = computed<OpcTaskRow[]>(() => {
-  const kw = q.value.trim().toLowerCase()
-  const rows = snap.value?.tasks ?? []
-  if (!kw) return rows
-  return rows.filter((r) => `${r.title}\n${r.assignee}\n${r.id}`.toLowerCase().includes(kw))
-})
-
-const runs = computed<OpcRun[]>(() => {
-  const kw = q.value.trim().toLowerCase()
-  const day = localDay()
-  const rows = (snap.value?.runs ?? []).filter((r) => r.ts.startsWith(day)).slice(0, 80)
-  if (!kw) return rows
-  return rows.filter((r) => `${r.title}\n${r.dept}\n${r.track}\n${r.tracks}`.toLowerCase().includes(kw))
-})
 /** 本地日历日（台账 ts 是本地时间 "YYYY-MM-DDTHH:mm:ss"，按前缀取当天） */
 function localDay(): string {
   const d = new Date()
@@ -49,9 +35,48 @@ function localDay(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
-/** 已完成 / 失败 分开排：完成的内容排最上，失败的单另列，不混在完成里 */
-const runsOk = computed(() => runs.value.filter((r) => r.ok))
-const runsBad = computed(() => runs.value.filter((r) => !r.ok))
+const kw = computed(() => q.value.trim().toLowerCase())
+function hit(text: string): boolean {
+  return !kw.value || text.toLowerCase().includes(kw.value)
+}
+
+/** 今日跑单（台账本地日前缀），最新在前 */
+const todayRuns = computed<OpcRun[]>(() => {
+  const day = localDay()
+  return (snap.value?.runs ?? []).filter((r) => r.ts.startsWith(day))
+})
+
+/** 在办工单 */
+const activeTasks = computed<OpcTaskRow[]>(() =>
+  (snap.value?.tasks ?? []).filter((r) => hit(`${r.title}\n${r.assignee}\n${r.id}`))
+)
+
+/** 今日跑单按 taskId 去重（同一单重跑只留最后一次） */
+function uniqRuns(rows: OpcRun[]): OpcRun[] {
+  const seen = new Set<string>()
+  const out: OpcRun[] = []
+  for (const r of rows) {
+    if (seen.has(r.taskId)) continue
+    seen.add(r.taskId)
+    out.push(r)
+  }
+  return out
+}
+
+/** 已完成：排除仍在在办列表里的同一单（在跑的会有上次败绩记录） */
+const doneRuns = computed<OpcRun[]>(() => {
+  const busy = new Set(activeTasks.value.map((t) => t.id))
+  return uniqRuns(
+    todayRuns.value.filter((r) => r.ok && !busy.has(r.taskId) && hit(`${r.title}\n${r.dept}\n${r.track}\n${r.taskId}`))
+  ).slice(0, 80)
+})
+
+const failedRuns = computed<OpcRun[]>(() => {
+  const busy = new Set(activeTasks.value.map((t) => t.id))
+  return uniqRuns(
+    todayRuns.value.filter((r) => !r.ok && !busy.has(r.taskId) && hit(`${r.title}\n${r.dept}\n${r.track}\n${r.taskId}`))
+  ).slice(0, 40)
+})
 
 const activeCount = computed(
   () => (snap.value?.counts.ready ?? 0) + (snap.value?.counts.claimed ?? 0) + (snap.value?.counts.running ?? 0) + (snap.value?.counts.in_progress ?? 0)
@@ -60,6 +85,11 @@ const activeCount = computed(
 const updatedAt = computed(() =>
   snap.value ? new Date(snap.value.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '—'
 )
+
+/** 选中项：先找在办工单，再找跑单 */
+const selectedTask = computed<OpcTaskRow | null>(() => (snap.value?.tasks ?? []).find((t) => t.id === selectedId.value) ?? null)
+const selectedRun = computed<OpcRun | null>(() => (snap.value?.runs ?? []).find((r) => r.taskId === selectedId.value) ?? null)
+const detailTitle = computed(() => selectedTask.value?.title || selectedRun.value?.title || selectedId.value || '')
 
 function fmtTime(ts: number): string {
   if (!ts) return '—'
@@ -93,19 +123,35 @@ async function refresh(): Promise<void> {
   }
 }
 
-async function openLog(row: OpcTaskRow): Promise<void> {
-  logTitle.value = `${row.title || row.id}（${row.id}）`
+async function loadLog(id: string): Promise<void> {
   log.value = null
-  logShow.value = true
+  logError.value = ''
   logLoading.value = true
   try {
-    log.value = await api.get<OpcTaskLog>(`/api/opc/tasks/${row.id}/log`)
+    log.value = await api.get<OpcTaskLog>(`/api/opc/tasks/${id}/log`)
   } catch (e) {
-    message.error((e as Error).message)
+    logError.value = (e as Error).message
   } finally {
     logLoading.value = false
   }
 }
+
+function select(id: string): void {
+  if (selectedId.value === id) return
+  selectedId.value = id
+  void loadLog(id)
+}
+
+function back(): void {
+  selectedId.value = null
+  log.value = null
+  logError.value = ''
+}
+
+watch(selectedId, (id) => {
+  // 自动刷新后选中项消失（单子已完成掉出在办列表）时，留在详情页不弹回
+  if (id && !selectedTask.value && !selectedRun.value && snap.value) return
+})
 
 function restartTimer(): void {
   if (timer) clearInterval(timer)
@@ -122,424 +168,548 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="opc-page" :class="{ mobile: ui.isMobile }">
-    <div class="toolbar">
-      <h2 class="page-title">OPC 后台</h2>
-      <span class="counts">
-        在办 <b>{{ activeCount }}</b> · 待派 <b>{{ snap?.counts.ready ?? 0 }}</b> · 阻断
-        <b>{{ snap?.counts.blocked ?? 0 }}</b> · 今日 <b>{{ snap?.today?.runs ?? 0 }}</b> 单 · 成
-        <b>{{ snap?.today?.ok ?? 0 }}</b>
-      </span>
-      <div class="toolbar-actions">
-        <n-input v-model:value="q" size="small" clearable placeholder="搜工单 / 轨 / 部门" class="search" />
-        <span class="auto-switch">
-          <n-switch v-model:value="auto" size="small" @update:value="restartTimer" />
-          <span class="auto-text">自动刷新</span>
+  <div class="opc" :class="{ mobile: ui.isMobile }">
+    <!-- 左栏：工单列表（手机端在未选中时占满，选中后让位给详情） -->
+    <aside v-show="!ui.isMobile || !selectedId" class="side">
+      <div class="side-head">
+        <span class="side-title">OPC 后台</span>
+        <span class="counts">
+          在办 <b>{{ activeCount }}</b> · 今日 <b>{{ snap?.today?.runs ?? 0 }}</b> 单 · 成
+          <b>{{ snap?.today?.ok ?? 0 }}</b>
         </span>
-        <n-button size="small" @click="refresh">刷新</n-button>
       </div>
-    </div>
 
-    <div class="tracks">
-      <span
-        v-for="t in snap?.tracks ?? []"
-        :key="t.id"
-        class="track"
-        :class="t.status"
-        :title="`${t.label}\n模型 ${t.model || '账户默认'}\n冷却至 ${t.cooldownUntil ? new Date(t.cooldownUntil * 1000).toLocaleString('zh-CN') : '—'}\n最近错误 ${t.lastError || '无'}`"
-      >
-        <span class="track-name">{{ t.id }}</span>
-        <span class="track-state">{{ trackState(t) }}</span>
-        <span class="track-used">今日 {{ t.usedToday }} 单</span>
-      </span>
-      <span v-if="!snap?.tracks.length" class="empty-inline">轨道表读取中…</span>
-    </div>
+      <div class="side-actions">
+        <n-input v-model:value="q" size="small" clearable placeholder="搜工单 / 轨 / 岗位" class="search" />
+        <n-switch v-model:value="auto" size="small" title="自动刷新" @update:value="restartTimer" />
+        <n-button size="small" quaternary @click="refresh">刷新</n-button>
+      </div>
 
-    <section class="block done-block">
-      <div class="block-head">
-        <h3>今日已完成</h3>
-        <span class="hint">今天 {{ runsOk.length }} 单</span>
+      <!-- 手机端：轨道健康放列表顶部，桌面端在右侧空态里 -->
+      <div v-if="ui.isMobile" class="side-tracks">
+        <span
+          v-for="t in snap?.tracks ?? []"
+          :key="t.id"
+          class="chip"
+          :class="t.status"
+          :title="`${t.label}\n模型 ${t.model || '账户默认'}\n${trackState(t)}`"
+        >
+          <span class="chip-name">{{ t.id }}</span>
+          <span class="chip-used">{{ t.usedToday }}</span>
+        </span>
       </div>
-      <div v-if="!ui.isMobile" class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th class="col-time">完成</th>
-              <th class="col-dept">岗位</th>
-              <th>内容</th>
-              <th class="col-track">轨</th>
-              <th class="col-model">模型</th>
-              <th class="col-dur">耗时</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="r in runsOk" :key="`${r.taskId}-${r.ts}`">
-              <td class="num">{{ fmtTime(Date.parse(r.ts)) }}</td>
-              <td>{{ r.dept }}</td>
-              <td class="title" :title="r.title">{{ r.title }}</td>
-              <td class="mono track-cell">
-                {{ r.track }}
-              </td>
-              <td class="mono">{{ r.model }}</td>
-              <td class="num">{{ fmtDur(r.durS) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-if="!runsOk.length" class="empty">{{ snap ? '今天还没有完成的单' : '读取中…' }}</div>
-      </div>
-      <div v-else class="cards">
-        <article v-for="r in runsOk" :key="`${r.taskId}-${r.ts}`" class="card">
-          <div class="card-top">
-            <span class="card-title">{{ r.title || r.taskId }}</span>
-            <span class="tag ok">成</span>
-          </div>
-          <div class="card-meta">
-            <span class="mono card-track">{{ r.track }}</span>
-            <span class="mono">{{ r.model }}</span>
-          </div>
-          <div class="card-meta">
-            <span>{{ fmtTime(Date.parse(r.ts)) }}</span>
-            <span>{{ r.dept }}</span>
-            <span>{{ fmtDur(r.durS) }}</span>
-          </div>
-        </article>
-        <div v-if="!runsOk.length" class="empty">{{ snap ? '今天还没有完成的单' : '读取中…' }}</div>
-      </div>
-    </section>
 
-    <section class="block">
-      <div class="block-head">
-        <h3>今日在办</h3>
-        <span class="hint">点「日志」看该单工人最后 400 行</span>
-      </div>
-      <div v-if="!ui.isMobile" class="table-wrap short">
-        <table>
-          <thead>
-            <tr>
-              <th class="col-id">工单</th>
-              <th class="col-st">状态</th>
-              <th class="col-dept">岗位</th>
-              <th class="col-time">创建</th>
-              <th class="col-fail">连败</th>
-              <th>标题</th>
-              <th class="col-act" />
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="r in tasks" :key="r.id">
-              <td class="mono">{{ r.id }}</td>
-              <td>
+      <div class="side-list">
+        <template v-if="snap">
+          <div v-if="activeTasks.length" class="group">
+            <div class="group-head">在办<span class="group-n">{{ activeTasks.length }}</span></div>
+            <button
+              v-for="r in activeTasks"
+              :key="r.id"
+              type="button"
+              class="item"
+              :class="{ active: selectedId === r.id }"
+              @click="select(r.id)"
+            >
+              <div class="item-top">
+                <span class="item-title">{{ r.title || r.id }}</span>
+                <span class="item-time">{{ fmtTime(r.createdAt * 1000) }}</span>
+              </div>
+              <div class="item-meta">
                 <span class="tag" :class="r.status">{{ STATUS_TEXT[r.status] ?? r.status }}</span>
-              </td>
-              <td>{{ r.assignee }}</td>
-              <td class="num">{{ fmtTime(r.createdAt * 1000) }}</td>
-              <td class="num" :class="{ danger: r.failures > 0 }">{{ r.failures }}</td>
-              <td class="title" :title="r.title">{{ r.title }}</td>
-              <td class="act">
-                <n-button v-if="r.hasLog" size="tiny" ghost @click="openLog(r)">日志</n-button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-if="!tasks.length" class="empty">{{ snap ? '今天没有在办工单' : '读取中…' }}</div>
-      </div>
-      <div v-else class="cards">
-        <article v-for="r in tasks" :key="r.id" class="card" :class="{ clickable: r.hasLog }" @click="r.hasLog && openLog(r)">
-          <div class="card-top">
-            <span class="card-title">{{ r.title || r.id }}</span>
-            <span class="tag" :class="r.status">{{ STATUS_TEXT[r.status] ?? r.status }}</span>
+                <span class="item-dept">{{ r.assignee }}</span>
+                <span v-if="r.failures" class="danger">连败 {{ r.failures }}</span>
+                <span v-if="r.hasLog" class="item-act">日志</span>
+              </div>
+            </button>
           </div>
-          <div class="card-meta">
-            <span class="mono">{{ r.id }}</span>
-            <span>{{ r.assignee }}</span>
-            <span>{{ fmtTime(r.createdAt * 1000) }}</span>
-            <span v-if="r.failures" class="danger">连败 {{ r.failures }}</span>
-            <span v-if="r.hasLog" class="card-act">日志 ›</span>
-          </div>
-        </article>
-        <div v-if="!tasks.length" class="empty">{{ snap ? '今天没有在办工单' : '读取中…' }}</div>
-      </div>
-    </section>
 
-    <section v-if="runsBad.length" class="block">
-      <div class="block-head">
-        <h3>今天失败</h3>
-        <span class="hint">{{ runsBad.length }} 单</span>
-      </div>
-      <div v-if="!ui.isMobile" class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th class="col-time">开始</th>
-              <th class="col-dept">岗位</th>
-              <th>标题</th>
-              <th class="col-track">轨</th>
-              <th class="col-model">模型</th>
-              <th class="col-dur">耗时</th>
-              <th class="col-ok">原因</th>
-              <th>错误</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="r in runsBad" :key="`${r.taskId}-${r.ts}`" :class="{ bad: !r.ok }">
-              <td class="num">{{ fmtTime(Date.parse(r.ts)) }}</td>
-              <td>{{ r.dept }}</td>
-              <td class="title" :title="r.title">{{ r.title }}</td>
-              <td class="mono track-cell">
-                {{ r.track }}
-              </td>
-              <td class="mono">{{ r.model }}</td>
-              <td class="num">{{ fmtDur(r.durS) }}</td>
-              <td>
-                <span class="tag" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成' : r.errKind || '败' }}</span>
-              </td>
-              <td class="title err-text" :title="r.err">{{ r.err }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-if="!runs.length" class="empty">{{ snap ? '没有匹配的跑单' : '读取中…' }}</div>
-      </div>
-      <div v-else class="cards">
-        <article v-for="r in runsBad" :key="`${r.taskId}-${r.ts}`" class="card" :class="{ bad: !r.ok }">
-          <div class="card-top">
-            <span class="card-title">{{ r.title || r.taskId }}</span>
-            <span class="tag" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成' : r.errKind || '败' }}</span>
+          <div v-if="doneRuns.length" class="group">
+            <div class="group-head">今日完成<span class="group-n">{{ doneRuns.length }}</span></div>
+            <button
+              v-for="r in doneRuns"
+              :key="r.taskId"
+              type="button"
+              class="item"
+              :class="{ active: selectedId === r.taskId }"
+              @click="select(r.taskId)"
+            >
+              <div class="item-top">
+                <span class="item-title">{{ r.title || r.taskId }}</span>
+                <span class="item-time">{{ fmtTime(Date.parse(r.ts)) }}</span>
+              </div>
+              <div class="item-meta">
+                <span class="tag ok">成</span>
+                <span class="item-dept">{{ r.dept }}</span>
+                <span class="item-track">{{ r.track }}</span>
+                <span>{{ fmtDur(r.durS) }}</span>
+              </div>
+            </button>
           </div>
-          <div class="card-meta">
-            <span class="mono card-track">{{ r.track }}</span>
-            <span class="mono">{{ r.model }}</span>
-          </div>
-          <div class="card-meta">
-            <span>{{ fmtTime(Date.parse(r.ts)) }}</span>
-            <span>{{ r.dept }}</span>
-            <span>{{ fmtDur(r.durS) }}</span>
-            <span v-if="r.err" class="card-err">{{ r.err }}</span>
-          </div>
-        </article>
-        <div v-if="!runs.length" class="empty">{{ snap ? '没有匹配的跑单' : '读取中…' }}</div>
-      </div>
-    </section>
 
-    <p class="foot">只读视图 · 数据来自 ~/skills/opc 台账与看板 · 更新于 {{ updatedAt }}</p>
+          <div v-if="failedRuns.length" class="group">
+            <div class="group-head">今日失败<span class="group-n">{{ failedRuns.length }}</span></div>
+            <button
+              v-for="r in failedRuns"
+              :key="r.taskId"
+              type="button"
+              class="item"
+              :class="{ active: selectedId === r.taskId }"
+              @click="select(r.taskId)"
+            >
+              <div class="item-top">
+                <span class="item-title">{{ r.title || r.taskId }}</span>
+                <span class="item-time">{{ fmtTime(Date.parse(r.ts)) }}</span>
+              </div>
+              <div class="item-meta">
+                <span class="tag bad">{{ r.errKind || '败' }}</span>
+                <span class="item-dept">{{ r.dept }}</span>
+                <span class="item-track">{{ r.track }}</span>
+              </div>
+            </button>
+          </div>
 
-    <NModal
-      v-model:show="logShow"
-      preset="card"
-      :title="`工人日志 · ${logTitle}`"
-      class="log-modal"
-      style="width: min(680px, 94vw)"
-    >
-      <div v-if="logLoading" class="empty">读取中…</div>
-      <template v-else-if="log">
-        <p class="log-meta">{{ log.path }}<span v-if="log.truncated"> · 仅显示尾部</span></p>
-        <pre class="log-body">{{ log.lines.join('\n') }}</pre>
+          <div v-if="!activeTasks.length && !doneRuns.length && !failedRuns.length" class="empty">
+            {{ kw ? '没有匹配的工单' : '今天还没有工单' }}
+          </div>
+        </template>
+        <div v-else class="empty">读取中…</div>
+      </div>
+    </aside>
+
+    <!-- 右栏：详情（未选中显示轨道健康与今日概览） -->
+    <main v-show="!ui.isMobile || selectedId" class="main">
+      <template v-if="selectedId">
+        <div class="detail-head">
+          <button v-if="ui.isMobile" type="button" class="back" @click="back">‹ 返回</button>
+          <h2 class="detail-title">{{ detailTitle }}</h2>
+          <span v-if="selectedTask" class="tag" :class="selectedTask.status">{{ STATUS_TEXT[selectedTask.status] ?? selectedTask.status }}</span>
+          <span v-else-if="selectedRun" class="tag" :class="selectedRun.ok ? 'ok' : 'bad'">{{ selectedRun.ok ? '成' : selectedRun.errKind || '败' }}</span>
+          <span class="detail-id">{{ selectedId }}</span>
+        </div>
+
+        <div class="kv">
+          <template v-if="selectedTask">
+            <div class="kv-row"><span class="k">岗位</span><span class="v">{{ selectedTask.assignee || '—' }}</span></div>
+            <div class="kv-row"><span class="k">状态</span><span class="v">{{ STATUS_TEXT[selectedTask.status] ?? selectedTask.status }}</span></div>
+            <div class="kv-row"><span class="k">创建</span><span class="v">{{ fmtTime(selectedTask.createdAt * 1000) }}</span></div>
+            <div class="kv-row"><span class="k">开始</span><span class="v">{{ selectedTask.startedAt ? fmtTime(selectedTask.startedAt * 1000) : '—' }}</span></div>
+            <div class="kv-row"><span class="k">连败</span><span class="v" :class="{ danger: selectedTask.failures > 0 }">{{ selectedTask.failures }}</span></div>
+            <div v-if="selectedTask.workerPid" class="kv-row"><span class="k">进程</span><span class="v mono">{{ selectedTask.workerPid }}</span></div>
+            <div v-if="selectedTask.lastError" class="kv-row"><span class="k">上次错误</span><span class="v err">{{ selectedTask.lastError }}</span></div>
+          </template>
+          <template v-else-if="selectedRun">
+            <div class="kv-row"><span class="k">岗位</span><span class="v">{{ selectedRun.dept || '—' }}</span></div>
+            <div class="kv-row"><span class="k">轨</span><span class="v mono">{{ selectedRun.track }}</span></div>
+            <div class="kv-row"><span class="k">模型</span><span class="v mono">{{ selectedRun.model }}</span></div>
+            <div class="kv-row"><span class="k">开始</span><span class="v">{{ fmtTime(Date.parse(selectedRun.ts)) }}</span></div>
+            <div class="kv-row"><span class="k">耗时</span><span class="v">{{ fmtDur(selectedRun.durS) }}</span></div>
+            <div v-if="selectedRun.err" class="kv-row"><span class="k">错误</span><span class="v err">{{ selectedRun.err }}</span></div>
+          </template>
+        </div>
+
+        <div class="log-head">
+          <span>工人日志</span>
+          <span v-if="log" class="log-meta">{{ log.truncated ? '仅尾部' : '全部' }} · {{ log.lines.length }} 行 · {{ log.path }}</span>
+        </div>
+        <div class="log-wrap">
+          <div v-if="logLoading" class="empty">读取中…</div>
+          <pre v-else-if="log" class="log-body">{{ log.lines.join('\n') }}</pre>
+          <div v-else class="empty">{{ logError || '没有日志' }}</div>
+        </div>
       </template>
-      <div v-else class="empty">没有日志</div>
-    </NModal>
+
+      <!-- 空态：轨道健康 + 今日概览 -->
+      <div v-else class="overview">
+        <div class="ov-head">
+          <h2 class="ov-title">轨道健康</h2>
+          <span class="hint">读失败不写冷却；额度/限流才冷却，到期自动恢复</span>
+        </div>
+        <div class="tracks">
+          <div
+            v-for="t in snap?.tracks ?? []"
+            :key="t.id"
+            class="track"
+            :class="t.status"
+            :title="`模型 ${t.model || '账户默认'}\n冷却至 ${t.cooldownUntil ? new Date(t.cooldownUntil * 1000).toLocaleString('zh-CN') : '—'}\n最近错误 ${t.lastError || '无'}`"
+          >
+            <span class="track-name">{{ t.id }}</span>
+            <span class="track-model mono">{{ t.model || '账户默认' }}</span>
+            <span class="track-state">{{ trackState(t) }}</span>
+            <span class="track-used">今日 {{ t.usedToday }} 单</span>
+          </div>
+          <div v-if="!snap?.tracks.length" class="empty">轨道表读取中…</div>
+        </div>
+        <p class="select-hint">← 从左侧选择一张工单，查看详情与工人日志</p>
+        <p class="foot">只读视图 · 数据来自 ~/skills/opc 台账与看板 · 更新于 {{ updatedAt }}</p>
+      </div>
+    </main>
   </div>
 </template>
 
 <style scoped>
-.opc-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px 18px 24px;
-  height: 100%;
+.opc {
+  flex: 1;
   min-height: 0;
+  display: flex;
   overflow: hidden;
 }
-.toolbar {
+.side {
+  width: 340px;
+  flex: 0 0 auto;
+  border-right: 1px solid var(--border);
+  background: var(--bar);
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  min-height: 0;
+}
+.side-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 14px 8px;
   flex-wrap: wrap;
 }
-.page-title {
-  margin: 0;
-  font-size: 17px;
+.side-title {
+  font-size: 16px;
   font-weight: 600;
 }
 .counts {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 .counts b {
   color: var(--text);
 }
-.toolbar-actions {
-  margin-left: auto;
+.side-actions {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.search {
-  width: 190px;
-}
-.auto-switch {
-  display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
+  padding: 0 12px 10px;
 }
-.tracks {
+.search {
+  flex: 1;
+  min-width: 0;
+}
+.side-tracks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  padding: 0 12px 8px;
+}
+.chip {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.track {
-  display: inline-flex;
   align-items: center;
   gap: 6px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 4px 11px;
-  font-size: 11.5px;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  min-width: 0;
+}
+.chip.ok {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.chip.cooldown {
+  border-color: #e8a33d;
+}
+.chip.error,
+.chip.missing {
+  color: var(--faint);
+}
+.chip-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip-used {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+.side-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 16px;
+}
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 6px 2px;
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+.group-n {
+  color: var(--muted);
+}
+.item {
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  padding: 7px 9px;
+  cursor: pointer;
   color: var(--text);
+  font: inherit;
+}
+.item:hover {
+  background: var(--hover);
+}
+.item.active {
+  background: var(--panel);
+  border-color: var(--border-strong);
+}
+.item-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-time {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 0;
+}
+.item-dept {
+  flex: 0 0 auto;
+}
+.item-track {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
+.item-act {
+  margin-left: auto;
+  color: var(--accent);
+}
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.back {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.detail-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-id {
+  font-size: 11.5px;
+  color: var(--faint);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.kv {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.kv-row {
+  display: flex;
+  gap: 12px;
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+.k {
+  flex: 0 0 68px;
+  color: var(--faint);
+}
+.v {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.v.err {
+  color: var(--danger);
+  font-size: 12px;
+}
+.log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 18px 6px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.log-meta {
+  color: var(--faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-wrap {
+  flex: 1;
+  min-height: 0;
+  margin: 0 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--code-bg, #11151c);
+  overflow: auto;
+}
+.log-body {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.overview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ov-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.ov-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 760px;
+}
+.track {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 96px 76px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 11px;
+  font-size: 11.5px;
+  background: var(--panel);
+}
 .track.ok {
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 .track.cooldown {
   border-color: #e8a33d;
 }
 .track.error,
 .track.missing {
-  border-color: var(--faint);
   color: var(--faint);
+}
+.track-name {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
 }
 .track-state {
   color: var(--muted);
-  font-family: inherit;
 }
 .track-used {
+  text-align: right;
   color: var(--faint);
+  font-variant-numeric: tabular-nums;
 }
-.empty-inline {
+.select-hint {
+  margin: 8px 0 0;
   color: var(--faint);
-  font-size: 12px;
+  font-size: 12.5px;
 }
-.block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
-  flex: 1;
-}
-.block-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.block-head h3 {
-  margin: 0;
-  font-size: 13.5px;
-  font-weight: 600;
+.foot {
+  margin: auto 0 0;
+  color: var(--faint);
+  font-size: 11.5px;
 }
 .hint {
   color: var(--faint);
   font-size: 11.5px;
 }
-.table-wrap {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel);
-}
-.table-wrap.short {
-  max-height: 34vh;
-  flex: 0 1 auto;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
+.empty {
+  padding: 22px;
+  text-align: center;
+  color: var(--faint);
   font-size: 12.5px;
 }
-thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: var(--bar);
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-  padding: 7px 10px;
-  font-weight: 500;
-  color: var(--faint);
-  white-space: nowrap;
-}
-tbody td {
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-  white-space: nowrap;
-}
-tbody tr:hover {
-  background: var(--hover);
-}
-tbody tr.bad {
-  background: var(--danger-bg);
-}
-.col-id {
-  width: 104px;
-}
-.col-st,
-.col-ok {
-  width: 70px;
-}
-.col-dept {
-  width: 104px;
-}
-.col-time {
-  width: 92px;
-}
-.col-fail,
-.col-dur {
-  width: 62px;
-}
-.col-track {
-  width: 200px;
-}
-.col-model {
-  width: 190px;
-}
-.col-act {
-  width: 60px;
+.danger {
+  color: var(--danger);
 }
 .mono {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-}
-.num {
-  text-align: right;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.num.danger {
-  color: var(--danger);
-}
-.title {
-  max-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text);
-}
-.track-cell {
-  max-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.act {
-  text-align: right;
 }
 .tag {
   display: inline-block;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10.5px;
   border: 1px solid var(--border-strong);
   color: var(--muted);
 }
@@ -548,11 +718,15 @@ tbody tr.bad {
   border-color: var(--accent);
   color: var(--accent);
 }
+.tag.ready {
+  border-color: var(--border-strong);
+}
 .tag.claimed {
   border-color: #8f86c9;
   color: #8f86c9;
 }
-.tag.blocked {
+.tag.blocked,
+.tag.bad {
   border-color: var(--danger);
   color: var(--danger);
 }
@@ -560,169 +734,90 @@ tbody tr.bad {
   border-color: var(--accent);
   color: var(--accent);
 }
-.tag.bad {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-.empty {
-  padding: 24px;
-  text-align: center;
-  color: var(--faint);
-}
-.foot {
-  margin: 0;
-  color: var(--faint);
-  font-size: 11.5px;
-}
-.log-meta {
-  margin: 0 0 8px;
-  color: var(--faint);
-  font-size: 11.5px;
-  word-break: break-all;
-}
-.log-body {
-  margin: 0;
-  max-height: 60vh;
-  overflow: auto;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--code-bg, #11151c);
-  color: var(--text);
-  font-size: 11.5px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-/* 卡片列表（窄屏用，桌面不走这块） */
-.cards {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 9px 11px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel);
-}
-.card.clickable {
-  cursor: pointer;
-}
-.card.bad {
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-}
-.card-top {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-.card-top .tag {
-  flex: 0 0 auto;
-}
-.card-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 13px;
-  line-height: 1.35;
-  color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-word;
-}
-.card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 3px 10px;
-  font-size: 11.5px;
-  color: var(--muted);
-}
-.card-track {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.card-act {
-  margin-left: auto;
-  color: var(--accent);
-}
-.card-err {
-  flex: 1 0 100%;
-  color: var(--danger);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
+/* 手机端：列表独占一屏，选中后详情独占一屏 */
 @media (max-width: 768px) {
-  .opc-page {
-    padding: 10px 10px 20px;
-    gap: 10px;
-    overflow-y: auto;
+  .opc {
+    flex-direction: column;
   }
-  .toolbar {
-    gap: 6px 10px;
+  .opc.mobile .side {
+    width: 100%;
+    border-right: none;
   }
-  .page-title {
-    font-size: 16px;
-  }
-  .counts {
-    font-size: 11px;
-  }
-  .toolbar-actions {
-    margin-left: 0;
+  .opc.mobile .main {
     width: 100%;
   }
-  .search {
-    flex: 1;
-    width: auto;
-    min-width: 0;
+  .side-head {
+    padding: 10px 12px 6px;
   }
-  .block {
-    flex: 0 0 auto;
+  .side-title {
+    font-size: 15px;
   }
-  .block-head {
+  .side-list {
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  .item {
+    padding: 9px 10px;
+    border-color: var(--border);
+    background: var(--panel);
+    margin-bottom: 2px;
+  }
+  .detail-head {
+    padding: 10px 12px 8px;
     gap: 8px;
   }
-  .hint {
-    display: none;
+  .detail-title {
+    font-size: 14px;
+    flex: 1 1 100%;
+    order: 3;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
   }
-  /* 轨道：两列小卡，长名省略，状态在第二行 */
-  .tracks {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
+  .kv {
+    padding: 10px 12px;
+  }
+  .k {
+    flex-basis: 60px;
+  }
+  .log-head {
+    padding: 8px 12px 4px;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+  }
+  .log-meta {
+    flex: 1 1 100%;
+  }
+  .log-wrap {
+    margin: 0 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .overview {
+    padding: 12px;
   }
   .track {
-    display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       'name used'
-      'state state';
-    align-items: center;
-    gap: 1px 8px;
+      'model state';
+    gap: 2px 8px;
     padding: 6px 9px;
-    border-radius: 10px;
   }
   .track-name {
     grid-area: name;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .track-used {
     grid-area: used;
     font-size: 10.5px;
-    text-align: right;
+  }
+  .track-model {
+    grid-area: model;
+    font-size: 10.5px;
   }
   .track-state {
     grid-area: state;
     font-size: 10.5px;
+    text-align: right;
   }
 }
 </style>
