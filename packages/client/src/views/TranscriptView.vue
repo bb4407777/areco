@@ -131,12 +131,8 @@ const scroller = ref<HTMLElement | null>(null)
 // 离底超过该阈值显示「回到最新」悬浮按钮（不做贴底自动跟滚，追新一律手动点按钮）
 const NEAR_BOTTOM_PX = 160
 const showJump = ref(false)
-// 滑进顶部预取区就自动翻「加载更早」免手点：阈值取近一屏，页面还没滑到顶就开始取，
-// 到顶时内容已就位（loadOlder 内有 hasMore/loadingOlder 双闸）
-const PREFETCH_RATIO = 0.8
-function prefetchDistance(el: HTMLElement) {
-  return Math.max(240, Math.round(el.clientHeight * PREFETCH_RATIO))
-}
+// 滑到离顶一屏内才自动翻「加载更早」：太早取会在阅读中途插内容、看着就是一顿跳
+const NEAR_TOP_PX = 120
 // 服务端按可见内容分页：把被折叠的类别传过去，免得一页过滤完只剩空屏
 const hideQuery = computed(() => {
   const hide: string[] = []
@@ -375,39 +371,30 @@ async function loadOlder() {
   const id = sessionId.value
   loadingOlder.value = true
   const el = scroller.value
-  // 以「原来第一条消息」为锚：单元高度会因 markdown/图片异步变动，按新增高度补 scrollTop
-  // 容易补不准（补少了就停在更早的内容上，看着像跳到最早），直接按锚点位移校正
+  // 锚点＝当前第一条消息：记住它在屏幕上的位置，插完把它挪回原处。
+  // 容器已关掉浏览器自带的滚动锚定（overflow-anchor: none），这里只补一次，避免两套补偿叠加成跳跃
   const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
-  const anchorTop = anchor?.getBoundingClientRect().top ?? 0
-  const prevHeight = el?.scrollHeight ?? 0
-  let batch: TranscriptMessage[] = []
   try {
-    // 服务端已按可见内容补足一页；万一整页仍被过滤干净（全是被隐藏的工具/思考），再往前要一页
-    for (let i = 0; i < 2 && hasMore.value; i++) {
-      const page = await api.get<TranscriptPage>(
-        `/api/sessions/${id}/transcript?before=${start}${hideQuery.value}`
-      )
-      if (gen !== sessionGen) return
-      speechTracker.addBaseline(id, page.messages)
-      batch = [...page.messages, ...batch]
-      hasMore.value = page.hasMore ?? false
-      hiddenOnly.value = page.hiddenOnly ?? false
-      start = page.start ?? 0
-      if (page.messages.length) break
-    }
-    if (!batch.length) return
-    // 攒够一次并入再量高：逐页 prepend 会让整列重渲染多轮，上滑会一顿一顿
-    firstIndex.value -= batch.length
-    messages.value = [...batch, ...messages.value]
-    markProgrammatic()
+    const page = await api.get<TranscriptPage>(
+      `/api/sessions/${id}/transcript?before=${start}${hideQuery.value}`
+    )
+    if (gen !== sessionGen) return
+    speechTracker.addBaseline(id, page.messages)
+    hasMore.value = page.hasMore ?? false
+    hiddenOnly.value = page.hiddenOnly ?? false
+    start = page.start ?? 0
+    if (!page.messages.length) return
+    // 请求期间用户可能还在滑：插入前现量一次锚点位置，之后按它的位移补，不受中途滚动影响
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
+    firstIndex.value -= page.messages.length
+    messages.value = [...page.messages, ...messages.value]
     await nextTick()
-    if (el) {
-      // 维持视口停在原内容处：优先按锚点位移，锚点没了再退回高度差
-      const delta = anchor ? anchor.getBoundingClientRect().top - anchorTop : 0
-      if (anchor && Math.abs(delta) > 1) el.scrollTop += delta
-      else el.scrollTop += el.scrollHeight - prevHeight
-      markProgrammatic()
+    if (el && anchor) {
+      const delta = anchor.getBoundingClientRect().top - anchorTop
+      if (Math.abs(delta) > 0.5) el.scrollTop += delta
     }
+    // 这次补偿也是一次程序化滚动，别让它触发下一轮自动翻页
+    markProgrammatic(250)
   } catch {
     /* 下次点再试 */
   } finally {
@@ -423,7 +410,7 @@ function onScroll() {
   if (performance.now() < programmaticUntil) return
   // 内容不足一屏时根本没得滑，自动翻页会把历史一路拉到最早
   if (el.scrollHeight - el.clientHeight < 40) return
-  if (el.scrollTop < prefetchDistance(el) && !loading.value && hasMore.value) void loadOlder()
+  if (el.scrollTop <= NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
 }
 
 function jumpToLatest() {
@@ -585,6 +572,8 @@ onBeforeUnmount(() => {
 .stream {
   flex: 1;
   overflow-y: auto;
+  /* 关掉浏览器自带的滚动锚定：翻页补偿统一由 loadOlder 按锚点算一次，免得两套一起把视口推歪 */
+  overflow-anchor: none;
   padding: 10px 0;
   overscroll-behavior: contain;
 }
