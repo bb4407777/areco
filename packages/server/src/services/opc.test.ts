@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { parseRunsText, snapshot, taskLog } from './opc'
+import { localDay, parseRunsText, snapshot, taskLog, todayStats } from './opc'
 
 test('台账逐行解析：坏行跳过，最新在前，按上限截断', () => {
   const text = [
@@ -82,6 +82,12 @@ test('快照：轨健康/在办工单/跑单三块拼齐，完成单不进在办
     assert.equal(snap.tracks.length, 2)
     assert.equal(snap.tracks[0].status, 'ok')
     assert.equal(snap.tracks[1].status, 'cooldown')
+    // 今日统计：台账里那一单是今天、且成功，落在最终轨 codebuddy-ds
+    assert.equal(snap.today.runs, 1)
+    assert.equal(snap.today.ok, 1)
+    assert.equal(snap.tracks[0].usedToday, 1)
+    assert.equal(snap.tracks[1].usedToday, 0)
+    assert.equal(snap.tracks[0].used, 9) // 累计值仍在，只是不再展示
   } finally {
     if (prevRoot === undefined) delete process.env.ARECO_OPC_ROOT
     else process.env.ARECO_OPC_ROOT = prevRoot
@@ -105,4 +111,18 @@ test('工人日志：只回尾部行，非法 id 直接拒', () => {
     else process.env.ARECO_OPC_LOGS = prevLogs
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('今日统计：只数当天、按最终轨归集、坏日期不计', () => {
+  const runs = [
+    { ts: '2026-11-07T09:00:00', taskId: 't_1', track: 'qoder-cn', ok: true },
+    { ts: '2026-11-07T23:59:59', taskId: 't_2', track: 'qoder-cn', ok: false },
+    { ts: '2026-11-06T23:59:59', taskId: 't_3', track: 'qoder-cn', ok: true },
+    { ts: '', taskId: 't_4', track: 'codebuddy-ds', ok: true },
+  ] as Parameters<typeof todayStats>[0]
+  const got = todayStats(runs, '2026-11-07')
+  assert.equal(got.runs, 2)
+  assert.equal(got.ok, 1)
+  assert.deepEqual(got.byTrack, { 'qoder-cn': 2 })
+  assert.equal(localDay(new Date(2026, 10, 7, 0, 5)), '2026-11-07')
 })

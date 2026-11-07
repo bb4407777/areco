@@ -99,6 +99,11 @@ export function parseRun(value: unknown): OpcRun | null {
 
 /** 台账正文 → 最近 RUN_LIMIT 单，最新在前（逐行解析，坏行跳过） */
 export function parseRunsText(text: string, limit = RUN_LIMIT): OpcRun[] {
+  return parseAllRuns(text).reverse().slice(0, limit)
+}
+
+/** 台账正文 → 全部单（旧在前）。今日统计要用全量，不能只看尾部窗口里的 200 条。 */
+export function parseAllRuns(text: string): OpcRun[] {
   const runs: OpcRun[] = []
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -112,21 +117,48 @@ export function parseRunsText(text: string, limit = RUN_LIMIT): OpcRun[] {
     const run = parseRun(parsed)
     if (run) runs.push(run)
   }
-  return runs.reverse().slice(0, limit)
+  return runs
 }
 
-function readRuns(): { runs: OpcRun[]; warning?: string } {
-  const tail = readTail(path.join(opcRoot(), 'data', 'track-runs.jsonl'))
-  if (!tail) return { runs: [], warning: '轨道台账 track-runs.jsonl 不存在' }
+/** 本地日历日（台账 ts 写的是本地时间 "YYYY-MM-DDTHH:mm:ss"，按前缀比对即可） */
+export function localDay(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 今日各轨跑单数（按最终落地的轨计）+ 今日总数/成功数 */
+export function todayStats(runs: OpcRun[], day = localDay()): {
+  byTrack: Record<string, number>
+  runs: number
+  ok: number
+} {
+  const byTrack: Record<string, number> = {}
+  let total = 0
+  let ok = 0
+  for (const r of runs) {
+    if (!r.ts.startsWith(day)) continue
+    total += 1
+    if (r.ok) ok += 1
+    const t = r.track || 'unknown'
+    byTrack[t] = (byTrack[t] ?? 0) + 1
+  }
+  return { byTrack, runs: total, ok }
+}
+
+function readRuns(): { runs: OpcRun[]; today: { runs: number; ok: number }; byTrack: Record<string, number>; warning?: string } {
+  const tail = readTail(path.join(opcRoot(), 'data', 'track-runs.jsonl'), 64 * 1024 * 1024)
+  if (!tail) return { runs: [], today: { runs: 0, ok: 0 }, byTrack: {}, warning: '轨道台账 track-runs.jsonl 不存在' }
   let text = tail.text
   if (tail.truncated) {
     const nl = text.indexOf('\n')
     if (nl >= 0) text = text.slice(nl + 1)
   }
-  return { runs: parseRunsText(text) }
+  const all = parseAllRuns(text)
+  const stats = todayStats(all)
+  return { runs: all.reverse().slice(0, RUN_LIMIT), today: { runs: stats.runs, ok: stats.ok }, byTrack: stats.byTrack }
 }
 
-function readTracks(): OpcTrackRow[] {
+function readTracks(usedToday: Record<string, number> = {}): OpcTrackRow[] {
   const file = readJson<RawTracksFile>(path.join(opcRoot(), 'config', 'tracks.json'))
   const health = readJson<Record<string, RawTrackHealth>>(path.join(opcRoot(), 'data', 'track-health.json')) ?? {}
   const defs = file?.tracks ?? {}
@@ -152,6 +184,7 @@ function readTracks(): OpcTrackRow[] {
       model: def.model ?? '',
       surface: def.surface ?? '',
       used: Number(h?.used) || 0,
+      usedToday: usedToday[id] ?? 0,
       fallback: Number(h?.fallback) || 0,
       failures: Number(h?.consecutive_failures) || 0,
       cooldownUntil,
@@ -228,14 +261,15 @@ function readTasks(): { tasks: OpcTaskRow[]; counts: Record<string, number>; war
 }
 
 export function snapshot(): OpcSnapshot {
-  const { runs, warning: runWarn } = readRuns()
+  const { runs, today, byTrack, warning: runWarn } = readRuns()
   const { tasks, counts, warning: taskWarn } = readTasks()
   return {
     ts: Date.now(),
     runs,
     tasks,
     counts,
-    tracks: readTracks(),
+    today,
+    tracks: readTracks(byTrack),
     warning: runWarn ?? taskWarn,
   }
 }

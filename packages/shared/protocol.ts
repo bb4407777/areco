@@ -590,7 +590,10 @@ export interface OpcTrackRow {
   engine: string
   model: string
   surface: string
+  /** 累计选用次数（健康表原值，不展示） */
   used: number
+  /** 今日跑单数（按最终落地的轨计，台账 track-runs.jsonl） */
+  usedToday: number
   fallback: number
   failures: number
   cooldownUntil: number
@@ -605,6 +608,8 @@ export interface OpcSnapshot {
   runs: OpcRun[]
   tasks: OpcTaskRow[]
   counts: Record<string, number>
+  /** 今日（本地日历日）跑单：总数与成功数 */
+  today: { runs: number; ok: number }
   tracks: OpcTrackRow[]
   warning?: string
 }
