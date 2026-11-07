@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { AudioBlockedError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
+import { WavElementPlayer, isIOSLike } from '../audio/wavPlayer'
 
 export interface SpeechItem {
   messageId: string
@@ -158,11 +159,15 @@ export const useSpeechStore = defineStore('speech', {
   }),
   actions: {
     core(): SpeechQueue {
-      queue ??= new SpeechQueue(new PcmPlayer(), globalThis.fetch.bind(globalThis), {
-        onPlaying: (id) => { this.playingId = id },
-        onBlocked: (blocked) => { this.blocked = blocked },
-        onError: (error) => { this.error = error },
-      })
+      if (!queue) {
+        // iOS 上用 <audio> 播放（Web Audio 会被侧边静音开关掐掉），其余端仍是流式 Web Audio
+        const player: SpeechPlayer = isIOSLike() ? new WavElementPlayer() : new PcmPlayer()
+        queue = new SpeechQueue(player, globalThis.fetch.bind(globalThis), {
+          onPlaying: (id) => { this.playingId = id },
+          onBlocked: (blocked) => { this.blocked = blocked },
+          onError: (error) => { this.error = error },
+        })
+      }
       return queue
     },
     playManual(item: SpeechItem) {

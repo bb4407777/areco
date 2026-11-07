@@ -4,13 +4,10 @@ import SwiftUI
 @main
 struct ArecoApp: App {
     @StateObject private var store = ServerStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        // WKWebView 里的 WebAudio 默认走 ambient，iPhone 侧边静音开关一拨就没声；
-        // 改成 playback 类别，播报不受静音键影响。
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        try? session.setActive(true)
+        AppAudioSession.apply()
     }
 
     var body: some Scene {
@@ -20,7 +17,21 @@ struct ArecoApp: App {
                 // 固定浅色：原先是硬编码 .dark，网页浅色时状态栏、键盘、设置页却全黑（2026-11-07 报障）
                 .preferredColorScheme(.light)
                 .task { await store.resolve() }
+                .onChange(of: scenePhase) { phase in
+                    // WebKit 播放媒体时可能把类别改回 ambient，回前台重设一次
+                    if phase == .active { AppAudioSession.apply() }
+                }
         }
+    }
+}
+
+enum AppAudioSession {
+    /// WKWebView 里的音频默认走 ambient，iPhone 侧边静音开关一拨就没声；
+    /// playback 类别不受静音键影响，播报在静音模式下也能出声。
+    static func apply() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
     }
 }
 
