@@ -20,16 +20,12 @@ import type { TranscriptMessage, TranscriptPage, TranscriptPart } from '../../..
 import { trafficStateFromMessages, type TrafficState } from '../../../shared/traffic'
 import type { Session } from './session'
 import { cwdToSlug } from './transcript'
-import { countVisible, messageVisible, type VisibilityPrefs } from './transcript-visibility'
 import { createLogger } from '../logger'
 import { DATA_DIR } from '../config'
 
 const log = createLogger('agent-transcript')
 
 const PAGE_MESSAGES = 80
-// 对话模式按可见内容补页：一页至少这么多条看得见的消息，最多向前多翻这么多页
-const VISIBLE_MIN = 20
-const VISIBLE_EXPAND_PAGES = 6
 const MAX_PART_TEXT = 20_000
 const MAX_TOOL_TEXT = 2_000
 const MAX_META_LINE_BYTES = 1024 * 1024
@@ -1292,38 +1288,18 @@ const JITTER_TOLERANCE = 4
 export function paginateMessages(
   messages: TranscriptMessage[],
   kind: AgentKind,
-  opts: { cursor: number; before?: number },
-  visible?: VisibilityPrefs
+  opts: { cursor: number; before?: number }
 ): TranscriptPage {
   const total = messages.length
-  // 尾页/向前翻页：一页 80 条里折叠块占大头时（对话模式默认隐藏思考/工具）向前补，
-  // 保证过滤后仍够一屏可读内容，别让前端落到「只剩加载更早」的空屏
-  const tailPage = (end: number): TranscriptPage => {
-    let start = Math.max(0, end - PAGE_MESSAGES)
-    if (visible) {
-      for (let i = 0; i < VISIBLE_EXPAND_PAGES && start > 0; i++) {
-        if (countVisible(messages, start, end, visible) >= VISIBLE_MIN) break
-        start = Math.max(0, start - PAGE_MESSAGES)
-      }
-    }
-    const slice = messages.slice(start, end)
-    const kept = visible ? slice.filter((m) => messageVisible(m, visible)) : slice
-    return {
-      exists: true,
-      messages: kept,
-      cursor: end,
-      start,
-      hasMore: start > 0,
-      hiddenOnly: visible ? kept.length === 0 && start > 0 : undefined,
-    }
-  }
   if (opts.before !== undefined) {
     const end = Math.max(0, Math.min(opts.before, total))
-    return tailPage(end)
+    const start = Math.max(0, end - PAGE_MESSAGES)
+    return { exists: true, messages: messages.slice(start, end), cursor: end, start, hasMore: start > 0 }
   }
   const jitter = APPEND_ONLY_KINDS.has(kind) && total < opts.cursor && opts.cursor - total <= JITTER_TOLERANCE
   if (opts.cursor === 0 || (total < opts.cursor && !jitter)) {
-    return tailPage(total)
+    const start = Math.max(0, total - PAGE_MESSAGES)
+    return { exists: true, messages: messages.slice(start), cursor: total, start, hasMore: start > 0 }
   }
   if (total < opts.cursor) return { exists: true, messages: [], cursor: opts.cursor } // 抖动：游标不动，空答等恢复
   return { exists: true, messages: messages.slice(opts.cursor), cursor: total }
@@ -1332,12 +1308,12 @@ export function paginateMessages(
 export function readAgentTranscript(
   session: Session,
   kind: AgentKind,
-  opts: { cursor: number; before?: number; visible?: VisibilityPrefs }
+  opts: { cursor: number; before?: number }
 ): TranscriptPage {
   const filePath = locate(session, kind)
   if (!filePath) return { exists: false, messages: [], cursor: 0 }
   const messages = loadMessages(session.id, filePath, kind)
-  return paginateMessages(messages, kind, opts, opts.visible)
+  return paginateMessages(messages, kind, opts)
 }
 
 /** captureTick 增量读（2026-07-30 P1-7）用的三个小口子：路径定位 / 追加型判断 / 片段解析 */

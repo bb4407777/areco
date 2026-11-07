@@ -11,7 +11,6 @@ import type { HistoryEntry, HistoryListPage, HistoryTranscriptPage, TranscriptMe
 import { parseTranscriptLine } from './transcript'
 import { parseKimi, parsePi } from './agent-transcript'
 import { chatlogEntries, isChatlogSource } from './chatlog'
-import { messageVisible, type VisibilityPrefs } from './transcript-visibility'
 
 // 头部扫描上限：cwd/首条用户输入/首个时间戳都落在文件头部，但 file-history-snapshot
 // 行可能很大，给足余量；扫完仍无用户输入且文件更大时不下结论（保留条目、标题走兜底）
@@ -611,37 +610,6 @@ export function readHistoryPage(
     }
     return { messages, start: absStart, end: absEnd, hasMore: absStart > 0 }
   }
-}
-
-/**
- * 可见性补页：在 readHistoryPage 之上按「看得见的消息」补足一页。
- *
- * 单页按 512KB 字节切，碰上超长工具结果常常只出几条；对话模式默认又隐藏思考/工具块，
- * 一页过滤后可能一条不剩，前端就只剩一个「加载更早」按钮（2026-11-07 报障）。
- * 这里继续往前翻，直到攒够 minVisible 条可见消息、翻到最早或触到页数上限；
- * start 取最早扫到的位置，end 仍是第一页的尾部（客户端拿它当增量游标）。
- */
-export function readVisibleHistoryPage(
-  filePath: string,
-  before: number | undefined,
-  parseLine: (line: string) => TranscriptMessage | null,
-  prefs: VisibilityPrefs,
-  minVisible = 20,
-  maxPages = 12
-): HistoryTranscriptPage {
-  const first = readHistoryPage(filePath, before, parseLine)
-  let messages = first.messages.filter((m) => messageVisible(m, prefs))
-  let start = first.start
-  let hasMore = first.hasMore
-  for (let i = 1; i < maxPages && hasMore && messages.length < minVisible; i++) {
-    if (start <= 0) break
-    const prev = readHistoryPage(filePath, start, parseLine)
-    if (prev.start >= start) break // 不再前进，防死循环
-    messages = [...prev.messages.filter((m) => messageVisible(m, prefs)), ...messages]
-    start = prev.start
-    hasMore = prev.hasMore
-  }
-  return { messages, start, end: first.end, hasMore, hiddenOnly: messages.length === 0 && hasMore }
 }
 
 /** 全量读取（供跨 agent 交接）：取文件尾部 maxBytes 内的完整行消息；parseLine 同 readHistoryPage */

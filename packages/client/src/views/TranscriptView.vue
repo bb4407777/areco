@@ -125,20 +125,10 @@ const exists = ref(true)
 const loading = ref(true)
 const loadingOlder = ref(false)
 const hasMore = ref(false)
-// 这一段翻到的都是被隐藏的工具/思考记录：按钮改提示，别让人对着空屏反复点
-const hiddenOnly = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 // 离底超过该阈值显示「回到最新」悬浮按钮（不做贴底自动跟滚，追新一律手动点按钮）
 const NEAR_BOTTOM_PX = 160
 const showJump = ref(false)
-// 服务端按可见内容分页：把被折叠的类别传过去，免得一页过滤完只剩空屏
-const hideQuery = computed(() => {
-  const hide: string[] = []
-  if (!ui.showThinking) hide.push('thinking')
-  if (!ui.showToolUse) hide.push('tool_use')
-  if (!ui.showToolResult) hide.push('tool_result')
-  return hide.length ? `&hide=${hide.join(',')}` : ''
-})
 let cursor = 0 // 向前增量续读点（字节）；0 = 尚未拿到尾页（服务端按尾页响应）
 let start = 0 // 最早已载页的起始字节，「加载更早」传 before=start
 // 向前翻页时 firstIndex 后退，保证已渲染消息的 key 稳定不漂移
@@ -161,33 +151,12 @@ watch(sessionId, (newId, oldId) => {
   loading.value = true
   loadingOlder.value = false
   hasMore.value = false
-  hiddenOnly.value = false
   showJump.value = false
   showScreen.value = false
   screenLines.value = []
   screenError.value = false
   void poll()
 })
-
-// 显示开关变了＝可见内容变了，已加载的页缺新打开的那类，从头重取（服务端按 hide 过滤分页）
-watch(
-  () => [ui.showThinking, ui.showToolUse, ui.showToolResult],
-  () => {
-    sessionGen++
-    cursor = 0
-    start = 0
-    firstIndex.value = 0
-    messages.value = []
-    speechTracker.invalidate()
-    speechCompletionPending = false
-    loading.value = true
-    loadingOlder.value = false
-    hasMore.value = false
-    hiddenOnly.value = false
-    showJump.value = false
-    void poll()
-  }
-)
 
 function scrollToBottom(behavior?: ScrollBehavior) {
   const el = scroller.value
@@ -307,9 +276,7 @@ async function poll() {
       return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
     })()
     const isFirstLoad = requestCursor === 0
-    const page = await api.get<TranscriptPage>(
-      `/api/sessions/${id}/transcript?cursor=${requestCursor}${hideQuery.value}`
-    )
+    const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?cursor=${requestCursor}`)
     if (gen !== sessionGen) return // 会话已切换，丢弃过期响应
     exists.value = page.exists
     // 带 start 的是尾页：首载，或 agent 会话（cursor=消息条数）条数收缩触发 total<cursor 的
@@ -323,7 +290,6 @@ async function poll() {
     if (isTailPage) {
       start = page.start ?? 0
       hasMore.value = page.hasMore ?? false
-      hiddenOnly.value = page.hiddenOnly ?? false
       messages.value = page.messages
       firstIndex.value = 0
       if (page.messages.length) {
@@ -358,30 +324,21 @@ async function loadOlder() {
   if (loadingOlder.value || !hasMore.value) return
   const gen = sessionGen
   const id = sessionId.value
+  const before = start
   loadingOlder.value = true
-  const el = scroller.value
-  // 锚点＝当前第一条消息：记住它在屏幕上的位置，插完把它挪回原处。
-  // 容器已关掉浏览器自带的滚动锚定（overflow-anchor: none），这里只补一次，避免两套补偿叠加成跳跃
-  const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
   try {
-    const page = await api.get<TranscriptPage>(
-      `/api/sessions/${id}/transcript?before=${start}${hideQuery.value}`
-    )
+    const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${before}`)
     if (gen !== sessionGen) return
     speechTracker.addBaseline(id, page.messages)
-    hasMore.value = page.hasMore ?? false
-    hiddenOnly.value = page.hiddenOnly ?? false
-    start = page.start ?? 0
-    if (!page.messages.length) return
-    // 请求期间用户可能还在滑：插入前现量一次锚点位置，之后按它的位移补，不受中途滚动影响
-    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
+    const el = scroller.value
+    const prevHeight = el?.scrollHeight ?? 0
     firstIndex.value -= page.messages.length
     messages.value = [...page.messages, ...messages.value]
+    hasMore.value = page.hasMore ?? false
+    start = page.start ?? 0
     await nextTick()
-    if (el && anchor) {
-      const delta = anchor.getBoundingClientRect().top - anchorTop
-      if (Math.abs(delta) > 0.5) el.scrollTop += delta
-    }
+    // 维持视口停在原内容处
+    if (el) el.scrollTop += el.scrollHeight - prevHeight
   } catch {
     /* 下次点再试 */
   } finally {
@@ -389,7 +346,7 @@ async function loadOlder() {
   }
 }
 
-// 滚动时同步「回到最新」按钮可见性；「加载更早」只由按钮触发，不做滚动自动翻页
+// 滚动时只同步「回到最新」按钮可见性；「加载更早」只由按钮触发
 function onScroll() {
   const el = scroller.value
   if (!el) return
@@ -441,12 +398,11 @@ onBeforeUnmount(() => {
       <div ref="scroller" class="stream" @scroll.passive="onScroll">
         <n-spin v-if="loading" class="center" />
         <template v-else>
-          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
+          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳（滚近顶部已自动翻页，按钮仅兜底） -->
           <div class="more">
-            <template v-if="exists">
-              <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">{{ hiddenOnly ? '↑ 更早为工具/思考记录，继续' : '↑ 加载更早' }}</n-button>
-              <span v-else-if="messages.length" class="done">已到最早</span>
-              <span v-else class="done">还没有可显示的对话内容</span>
+            <template v-if="exists && messages.length">
+              <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
+              <span v-else class="done">已到最早</span>
             </template>
             <span v-else class="done">没有会话</span>
           </div>
@@ -555,8 +511,6 @@ onBeforeUnmount(() => {
 .stream {
   flex: 1;
   overflow-y: auto;
-  /* 关掉浏览器自带的滚动锚定：翻页补偿统一由 loadOlder 按锚点算一次，免得两套一起把视口推歪 */
-  overflow-anchor: none;
   padding: 10px 0;
   overscroll-behavior: contain;
 }
