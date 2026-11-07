@@ -18,9 +18,8 @@ struct Endpoint: Equatable {
     let mode: ServerMode
 }
 
-/// 服务器地址不再手填：启动时按「局域网 → 公网」自动选通。
-///   局域网候选第一条是 mDNS 名（DHCP 换 IP 也不失效），第二条是固定 IP 兜底；
-///   上回连的是公网，这次就先试公网，免得在外面干等局域网超时。
+/// 服务器地址不再手填：固定两个地址、固定顺序——先局域网，不通再公网。
+///   局域网用 mDNS 名（Mac 换 IP 也不用改），公网是 Cloudflare 域名。
 /// 手填地址仍然保留，填了就压过自动逻辑（出差/临时换机时用）。
 @MainActor
 final class ServerStore: ObservableObject {
@@ -30,13 +29,9 @@ final class ServerStore: ObservableObject {
         case failed(String)
     }
 
+    static let lanURL = URL(string: "http://gaodeMacBook-Pro.local:8790")!
     static let publicURL = URL(string: "https://areco.gaochengbin.com")!
-    static let lanCandidates = [
-        URL(string: "http://gaodeMacBook-Pro.local:8790")!,
-        URL(string: "http://192.168.5.152:8790")!,
-    ]
     private static let customKey = "areco.customURL"
-    private static let lastModeKey = "areco.lastMode"
 
     @Published private(set) var phase: Phase = .probing
     @Published private(set) var active: Endpoint?
@@ -57,17 +52,9 @@ final class ServerStore: ObservableObject {
             return
         }
 
-        let lastMode = UserDefaults.standard.string(forKey: Self.lastModeKey) ?? ""
-        if lastMode == ServerMode.wan.rawValue, await probe(Self.publicURL, timeout: 4) {
-            activate(Endpoint(url: Self.publicURL, mode: .wan))
+        if await probe(Self.lanURL, timeout: 1.5) {
+            activate(Endpoint(url: Self.lanURL, mode: .lan))
             return
-        }
-
-        for candidate in Self.lanCandidates {
-            if await probe(candidate, timeout: 1.5) {
-                activate(Endpoint(url: candidate, mode: .lan))
-                return
-            }
         }
 
         if await probe(Self.publicURL, timeout: 5) {
@@ -107,7 +94,6 @@ final class ServerStore: ObservableObject {
     private func activate(_ endpoint: Endpoint) {
         active = endpoint
         phase = .ready
-        UserDefaults.standard.set(endpoint.mode.rawValue, forKey: Self.lastModeKey)
     }
 
     private func probe(_ base: URL, timeout: TimeInterval) async -> Bool {

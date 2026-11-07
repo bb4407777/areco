@@ -107,7 +107,7 @@ struct SettingsView: View {
                         dismiss()
                     }
                 } footer: {
-                    Text("默认就是自动：先连同一 Wi-Fi 下的 Mac（\(ServerStore.lanCandidates[0].host ?? "")），不通再走公网域名。正常情况下不用打开这个页面。")
+                    Text("默认就是自动：先连同一 Wi-Fi 下的 Mac（\(ServerStore.lanURL.host ?? "")），不通再走公网 \(ServerStore.publicURL.host ?? "")。正常情况下不用打开这个页面。")
                 }
 
                 Section {
