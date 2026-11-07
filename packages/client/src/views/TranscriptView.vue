@@ -129,8 +129,12 @@ const scroller = ref<HTMLElement | null>(null)
 // 离底超过该阈值显示「回到最新」悬浮按钮（不做贴底自动跟滚，追新一律手动点按钮）
 const NEAR_BOTTOM_PX = 160
 const showJump = ref(false)
-// 滚近顶部自动翻「加载更早」免手点（loadOlder 内有 hasMore/loadingOlder 双闸，prepend 后视口复位天然防连环触发）
-const NEAR_TOP_PX = 80
+// 滑进顶部预取区就自动翻「加载更早」免手点：阈值取近一屏，页面还没滑到顶就开始取，
+// 到顶时内容已就位（loadOlder 内有 hasMore/loadingOlder 双闸）
+const PREFETCH_RATIO = 0.8
+function prefetchDistance(el: HTMLElement) {
+  return Math.max(240, Math.round(el.clientHeight * PREFETCH_RATIO))
+}
 let cursor = 0 // 向前增量续读点（字节）；0 = 尚未拿到尾页（服务端按尾页响应）
 let start = 0 // 最早已载页的起始字节，「加载更早」传 before=start
 // 向前翻页时 firstIndex 后退，保证已渲染消息的 key 稳定不漂移
@@ -326,21 +330,25 @@ async function loadOlder() {
   if (loadingOlder.value || !hasMore.value) return
   const gen = sessionGen
   const id = sessionId.value
-  const before = start
   loadingOlder.value = true
   try {
-    const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${before}`)
-    if (gen !== sessionGen) return
-    speechTracker.addBaseline(id, page.messages)
     const el = scroller.value
-    const prevHeight = el?.scrollHeight ?? 0
-    firstIndex.value -= page.messages.length
-    messages.value = [...page.messages, ...messages.value]
-    hasMore.value = page.hasMore ?? false
-    start = page.start ?? 0
-    await nextTick()
-    // 维持视口停在原内容处
-    if (el) el.scrollTop += el.scrollHeight - prevHeight
+    // 一页按字节切，碰上超长工具结果可能只出几条消息、填不满一屏；一页不够就顺手往前再要，
+    // 直到填过预取线、翻到最早或触到次数上限，免得用户每滑一次都等一个来回
+    for (let i = 0; i < 8 && hasMore.value; i++) {
+      const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${start}`)
+      if (gen !== sessionGen) return
+      speechTracker.addBaseline(id, page.messages)
+      const prevHeight = el?.scrollHeight ?? 0
+      firstIndex.value -= page.messages.length
+      messages.value = [...page.messages, ...messages.value]
+      hasMore.value = page.hasMore ?? false
+      start = page.start ?? 0
+      await nextTick()
+      // 维持视口停在原内容处
+      if (el) el.scrollTop += el.scrollHeight - prevHeight
+      if (!el || el.scrollTop > prefetchDistance(el)) break
+    }
   } catch {
     /* 下次点再试 */
   } finally {
@@ -348,12 +356,12 @@ async function loadOlder() {
   }
 }
 
-// 滚动时同步「回到最新」按钮可见性；滚近顶部自动加载更早。程序化 scrollTo 也触发 scroll 事件，状态自然对账
+// 滚动时同步「回到最新」按钮可见性；滑进顶部预取区自动加载更早。程序化 scrollTo 也触发 scroll 事件，状态自然对账
 function onScroll() {
   const el = scroller.value
   if (!el) return
   showJump.value = el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX
-  if (el.scrollTop < NEAR_TOP_PX && !loading.value && hasMore.value) void loadOlder()
+  if (el.scrollTop < prefetchDistance(el) && !loading.value && hasMore.value) void loadOlder()
 }
 
 function jumpToLatest() {
