@@ -9,12 +9,28 @@
 1. 装 Xcode（App Store），打开 → Settings → Accounts → 加 Apple ID（免费号即自动生成 Personal Team）。
 2. iPhone 开开发者模式：设置 → 隐私与安全性 → 开发者模式 → 开，重启手机。
 
-## 装到手机（个人签 7 天，之后每 7 天 ⌘R 重装一次，数据不丢）
+## 装到手机（个人签 7 天，之后每 7 天重装一次，数据不丢）
 
 1. 打开 `ios/Areco.xcodeproj`（工程由 `ios/project.yml` 生成，改动后 `cd ios && xcodegen generate`）。
 2. target Areco → Signing & Capabilities → Team 选 Personal Team；bundle id 撞车就在 `cn.gao.areco` 后面加几个字母。
-3. iPhone 插线（首次点「信任此电脑」），顶部设备选自己的 iPhone → ⌘R。
-4. 首次运行手机拦截：设置 → 通用 → VPN 与设备管理 → 信任开发者证书。
+3. 第一次用线：iPhone 插线（首次点「信任此电脑」），顶部设备选自己的 iPhone → ⌘R；
+   首次运行手机拦截：设置 → 通用 → VPN 与设备管理 → 信任开发者证书。
+4. **之后走局域网调试，不用插线**：Xcode → Window → Devices and Simulators → 选 iPhone →
+   勾「Connect via network」，拔线。同一 Wi-Fi 下设备名旁出现网络标记，⌘R 直接无线安装。
+
+命令行等价（本机已配对，`xcrun devicectl list devices` 可查）：
+
+```bash
+cd ios
+xcodebuild -project Areco.xcodeproj -scheme Areco \
+  -destination 'id=<xcodebuild -showdestinations 里的设备 id>' \
+  -derivedDataPath /tmp/areco-dd-device -allowProvisioningUpdates \
+  DEVELOPMENT_TEAM=5L83JYDB49 build
+xcrun devicectl device install app --device <devicectl 的 UUID> \
+  /tmp/areco-dd-device/Build/Products/Debug-iphoneos/Areco.app
+```
+
+安装时手机要解锁（锁屏状态下 `devicectl process launch` 会报 Locked）。
 
 ## 手机端使用
 
