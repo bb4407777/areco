@@ -306,9 +306,46 @@ function readTasks(): { tasks: OpcTaskRow[]; counts: Record<string, number>; war
   }
 }
 
+/**
+ * 台账里的标题补正：历史行记的是工位名（「通话录音」），看不出是哪个人哪件事。
+ * 按 task_id 回看板取工单自身标题，让「在办」与「今日完成」两处叫同一个名字。
+ */
+function readTaskTitles(ids: string[]): Map<string, string> {
+  const out = new Map<string, string>()
+  const file = path.join(opcRoot(), 'data', 'kanban.db')
+  const uniq = [...new Set(ids.filter(Boolean))]
+  if (!uniq.length || !fs.existsSync(file)) return out
+  let db: DatabaseSync | null = null
+  try {
+    db = new DatabaseSync(file, { readOnly: true })
+    for (let i = 0; i < uniq.length; i += 400) {
+      const part = uniq.slice(i, i + 400)
+      const ph = part.map(() => '?').join(',')
+      const rows = db
+        .prepare(`SELECT id, title FROM tasks WHERE id IN (${ph})`)
+        .all(...part) as unknown as { id: string; title: string | null }[]
+      for (const row of rows) if (row.title) out.set(row.id, row.title)
+    }
+  } catch {
+    /* 看板库读不了就沿用台账原标题 */
+  } finally {
+    try {
+      db?.close()
+    } catch {
+      /* ignore */
+    }
+  }
+  return out
+}
+
 export function snapshot(): OpcSnapshot {
   const { runs, today, byTrack, warning: runWarn } = readRuns()
   const { tasks, counts, warning: taskWarn } = readTasks()
+  const titles = readTaskTitles(runs.map((r) => r.taskId))
+  for (const r of runs) {
+    const real = titles.get(r.taskId)
+    if (real) r.title = real
+  }
   for (const r of runs) {
     const ref = r.sessionId ? locateSession(r.sessionId, r.engine) : null
     if (ref) {
