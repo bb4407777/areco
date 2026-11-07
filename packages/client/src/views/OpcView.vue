@@ -120,8 +120,8 @@ onUnmounted(() => {
       <h2 class="page-title">OPC 后台</h2>
       <span class="counts">
         在办 <b>{{ activeCount }}</b> · 待派 <b>{{ snap?.counts.ready ?? 0 }}</b> · 阻断
-        <b>{{ snap?.counts.blocked ?? 0 }}</b> · 今日 <b>{{ snap?.today.runs ?? 0 }}</b> 单 · 成
-        <b>{{ snap?.today.ok ?? 0 }}</b>
+        <b>{{ snap?.counts.blocked ?? 0 }}</b> · 今日 <b>{{ snap?.today?.runs ?? 0 }}</b> 单 · 成
+        <b>{{ snap?.today?.ok ?? 0 }}</b>
       </span>
       <div class="toolbar-actions">
         <n-input v-model:value="q" size="small" clearable placeholder="搜工单 / 轨 / 部门" class="search" />
