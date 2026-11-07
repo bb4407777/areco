@@ -320,6 +320,13 @@ async function poll() {
         await nextTick()
         if (isFirstLoad || wasAtBottom) scrollToBottom()
         else onScroll() // 未跟滚：内容替换后对账「回到最新」按钮可见性
+        // 尾页短到不能滚动时，滚动事件永远不会来；补一次，免得停在半屏且上不去
+        if (isFirstLoad) {
+          window.setTimeout(() => {
+            const s = scroller.value
+            if (s && hasMore.value && s.scrollHeight - s.clientHeight < 40) void loadOlder()
+          }, 400)
+        }
       }
     } else if (page.messages.length) {
       // 增量新消息只追加不滚动：贴底自动跟滚已关（会杀 iOS 惯性滚动造成断触），追新点「回到最新」
@@ -357,35 +364,40 @@ async function loadOlder() {
   loadingOlder.value = true
   const gen = sessionGen
   const id = sessionId.value
-  const before = start
   try {
-    const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${before}`)
-    if (gen !== sessionGen) return
-    speechTracker.addBaseline(id, page.messages)
-    hasMore.value = page.hasMore ?? false
-    start = page.start ?? 0
-    if (!page.messages.length) return
-    // 请求期间用户还在滑：插入前现量一次，按此刻的位置复位，不会被请求耗时带偏
-    const el = scroller.value
-    const prevTop = el?.scrollTop ?? 0
-    const prevHeight = el?.scrollHeight ?? 0
-    const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
-    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
-    firstIndex.value -= page.messages.length
-    messages.value = [...page.messages, ...messages.value]
-    await nextTick()
-    if (!el) return
-    // 绝对赋值而不是累加：浏览器自己的滚动锚定若已补过，这里也不会补第二次
-    const added = el.scrollHeight - prevHeight
-    if (added > 0) el.scrollTop = prevTop + added
-    else if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
-    // 图片/折叠块可能晚一帧才量准，再校一次，确保视口仍停在原来那条消息上
-    await nextFrame()
-    if (el.scrollTop < NEAR_TOP_PX && anchor) {
-      el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+    // 一页全是被折叠的工具/思考时屏幕上什么都不会多，接着往前取（最多 3 页），别让人对着空屏
+    for (let round = 0; round < 3; round++) {
+      const page = await api.get<TranscriptPage>(
+        `/api/sessions/${id}/transcript?before=${start}`
+      )
+      if (gen !== sessionGen) return
+      speechTracker.addBaseline(id, page.messages)
+      hasMore.value = page.hasMore ?? false
+      start = page.start ?? 0
+      if (!page.messages.length) break
+      // 请求期间用户还在滑：插入前现量一次，按此刻的位置复位，不会被请求耗时带偏
+      const el = scroller.value
+      const prevTop = el?.scrollTop ?? 0
+      const prevHeight = el?.scrollHeight ?? 0
+      const anchor = el?.querySelector<HTMLElement>('.msg') ?? null
+      const anchorTop = anchor?.getBoundingClientRect().top ?? 0
+      firstIndex.value -= page.messages.length
+      messages.value = [...page.messages, ...messages.value]
+      await nextTick()
+      if (!el) break
+      // 绝对赋值而不是累加：浏览器自己的滚动锚定若已补过，这里也不会补第二次
+      const added = el.scrollHeight - prevHeight
+      if (added > 0) el.scrollTop = prevTop + added
+      else if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+      // 图片/折叠块可能晚一帧才量准，再校一次，确保视口仍停在原来那条消息上
+      await nextFrame()
+      if (el.scrollTop < NEAR_TOP_PX && anchor) {
+        el.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+      }
+      if (added >= 8 || !hasMore.value) break
     }
   } catch {
-    /* 下次点再试 */
+    /* 下次滑到顶再试 */
   } finally {
     if (gen === sessionGen) loadingOlder.value = false
     if (olderUnlock !== null) clearTimeout(olderUnlock)
@@ -464,14 +476,8 @@ onBeforeUnmount(() => {
       <div ref="scroller" class="stream" @scroll.passive="onScroll">
         <n-spin v-if="loading" class="center" />
         <template v-else>
-          <!-- .more 固定高度常驻：加载中 spinner/「加载更早」/「已到最早」三态同尺寸，切换不跳（滑到顶会自动补页，按钮兜底） -->
-          <div class="more">
-            <template v-if="exists && messages.length">
-              <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
-              <span v-else class="done">已到最早</span>
-            </template>
-            <span v-else class="done">没有会话</span>
-          </div>
+          <div v-if="!exists" class="hist-end">没有会话</div>
+          <div v-else-if="!hasMore && messages.length" class="hist-end">已到最早</div>
           <ChatMessage
             v-for="(msg, i) in messages"
             :key="firstIndex + i"
@@ -487,6 +493,9 @@ onBeforeUnmount(() => {
         <ThinkingStream v-if="working && !loading && liveThinking" class="stream-typing" :text="liveThinking" />
         <TypingIndicator v-else-if="working && !loading" class="stream-typing" label="正在输入中…" />
       </div>
+      <Transition name="jump">
+        <div v-if="loadingOlder && !loading" class="older-pill">正在加载更早…</div>
+      </Transition>
       <Transition name="jump">
         <button v-if="showJump" type="button" class="jump-latest" @click="jumpToLatest">↓ 回到最新</button>
       </Transition>
@@ -580,6 +589,27 @@ onBeforeUnmount(() => {
   padding: 10px 0;
   overscroll-behavior: contain;
 }
+.older-pill {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+  box-shadow: 0 2px 10px var(--shadow);
+}
+.hist-end {
+  text-align: center;
+  font-size: 11px;
+  color: var(--faint);
+  padding: 6px 0 2px;
+}
 .jump-latest {
   position: absolute;
   bottom: 14px;
@@ -646,18 +676,6 @@ onBeforeUnmount(() => {
   color: var(--fold-text);
   background: var(--term-bg);
   border-top: 1px solid var(--border);
-}
-.more {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  box-sizing: border-box;
-  height: 32px; /* tiny 按钮 22px + padding 10px：「加载更早」/「已到最早」/空态同高不塌缩 */
-  padding: 2px 0 8px;
-}
-.done {
-  font-size: 11px;
-  color: var(--faint);
 }
 .stream-tail {
   height: 8px;

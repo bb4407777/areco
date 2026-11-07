@@ -195,13 +195,7 @@ function onContinue(key: string) {
     <div ref="scroller" class="stream" @scroll.passive="onScroll">
       <n-spin v-if="loading" class="center" />
       <template v-else>
-        <!-- .more 固定高度常驻：空态/「加载更早」/「已到最早」三态同尺寸，切换不跳 -->
-        <div class="more">
-          <template v-if="messages.length">
-            <n-button v-if="hasMore" size="tiny" quaternary :loading="loadingOlder" @click="loadOlder">↑ 加载更早</n-button>
-            <span v-else class="done">已到最早</span>
-          </template>
-        </div>
+        <div v-if="!hasMore && messages.length" class="hist-end">已到最早</div>
         <n-empty v-if="!messages.length" description="这份日志里没有可展示的对话" class="center" />
         <template v-else>
           <ChatMessage
@@ -252,17 +246,11 @@ function onContinue(key: string) {
   padding: 10px 0 calc(14px + env(safe-area-inset-bottom, 0px));
   overscroll-behavior: contain;
 }
-.more {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  box-sizing: border-box;
-  height: 32px; /* tiny 按钮 22px + padding 10px：「加载更早」/「已到最早」/空态同高不塌缩 */
-  padding: 2px 0 8px;
-}
-.done {
+.hist-end {
+  text-align: center;
   font-size: 11px;
   color: var(--faint);
+  padding: 6px 0 2px;
 }
 .stream-tail {
   height: 8px;
