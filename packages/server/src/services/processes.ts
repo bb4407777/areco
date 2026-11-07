@@ -28,7 +28,11 @@ const RULES: Rule[] = [
   { re: /skills\/cc-connect\/(bin\/cc-connect|scripts\/workbuddy-acp-clean)/, kind: 'service', label: 'cc-connect 中枢' },
   { re: /server\.acp_bridge|acp_bridge\.py/, kind: 'service', label: 'ACP 桥 :8647' },
   { re: /server\.main --port 8698|hermes-live\/server\/main\.py/, kind: 'service', label: 'hermes-live :8698' },
-  { re: /areco.*(dist\/index\.js|packages\/server)/, kind: 'service', label: 'areco 座舱 :8790' },
+  // 服务实际命令行是 `node dist/server/index.cjs`（不带 areco 字样，要靠启动形态认）；
+  // Electron 壳是 areco.app/Contents/MacOS/areco。不可写宽泛的 packages/server——
+  // 任何人 grep/编辑这个目录，其 zsh 命令行都会带这串路径，被误标成服务。
+  { re: /areco\.app\/Contents\/MacOS\/areco$/, kind: 'service', label: 'areco 座舱 :8790' },
+  { re: /(^|\/)node\s+\S*dist\/server\/index\.cjs$/, kind: 'service', label: 'areco 座舱 :8790' },
   { re: /ego-browser/, kind: 'service', label: 'ego 浏览器' },
   { re: /hindsight/, kind: 'service', label: 'hindsight' },
   { re: /skills\/opc\/(scripts|lib)\/|pi-worker|chat-dispatch\.py|kanban|orchestrat/, kind: 'worker', label: 'OPC 后台' },
@@ -53,7 +57,13 @@ export function etimeToSec(etime: string): number {
   return days * 86400 + parts[parts.length - 3] * 3600 + parts[parts.length - 2] * 60 + parts[parts.length - 1]
 }
 
+// shell 包装器本身不带业务含义，且 `zsh -c '…'` 的内联脚本里会出现任何路径与关键字
+// （编辑/grep 这个仓库时命令行就含 packages/server、skills/opc），必须先短路为「其他」，
+// 否则整条命令按内联文本分类，会把编辑器会话标成服务或后台任务。
+const SHELL_WRAPPER = /^\/(?:bin|usr\/bin)\/(?:zsh|bash|sh)\s+-c\b/
+
 export function classify(command: string): { kind: ProcessKind; label: string } {
+  if (SHELL_WRAPPER.test(command)) return { kind: 'other', label: '其他' }
   for (const r of RULES) {
     if (r.re.test(command)) return { kind: r.kind, label: r.label }
   }

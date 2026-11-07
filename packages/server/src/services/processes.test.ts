@@ -35,12 +35,20 @@ test('etime → 秒：分/时/天三档', () => {
 })
 
 test('分类：服务/后台/CLI/其他', () => {
-  assert.equal(classify('/Users/gao/Code/areco/packages/server/dist/index.js').kind, 'service')
+  assert.equal(classify('/Users/gao/.npm-global/bin/node dist/server/index.cjs').label, 'areco 座舱 :8790')
+  assert.equal(classify('/Applications/areco.app/Contents/MacOS/areco').kind, 'service')
   assert.equal(classify('/opt/homebrew/bin/python3 -m server.acp_bridge').label, 'ACP 桥 :8647')
   assert.equal(classify('/x/skills/cc-connect/bin/cc-connect').kind, 'service')
   assert.equal(classify('node /x/skills/opc/scripts/pi-worker.py').kind, 'worker')
   assert.equal(classify('node /x/cli/bin/codebuddy --acp').kind, 'cli')
   assert.equal(classify('/usr/bin/vim foo.txt').kind, 'other')
+})
+
+test('分类：shell 包装器先短路，内联脚本里的关键字不参与分类', () => {
+  // 编辑/巡检仓库时命令行必然含这些路径，不能因此被标成服务或后台任务
+  const sh = `/bin/zsh -c cd /Users/gao/Code/areco && grep -rn x packages/server/src && cat /x/skills/opc/scripts/pi-worker.py`
+  assert.equal(classify(sh).kind, 'other')
+  assert.equal(classify('/bin/bash -c node /x/cli/bin/codebuddy --acp').kind, 'other')
 })
 
 test('launchctl list：PID 列为 - 的跳过', () => {
