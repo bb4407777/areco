@@ -52,7 +52,7 @@ final class ServerStore: ObservableObject {
             return
         }
 
-        if await probe(Self.lanURL, timeout: 1.5) {
+        if await probe(Self.lanURL, timeout: 3) {
             activate(Endpoint(url: Self.lanURL, mode: .lan))
             return
         }
