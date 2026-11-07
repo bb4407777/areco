@@ -216,11 +216,14 @@ function readTasks(): { tasks: OpcTaskRow[]; counts: Record<string, number>; war
   let db: DatabaseSync | null = null
   try {
     db = new DatabaseSync(file, { readOnly: true })
+    // 只看今天的单（2026-11-08 高律师令「都显示今天的工单」）：口径＝本地日历日创建的工单
+    const dayStart = new Date()
+    dayStart.setHours(0, 0, 0, 0)
+    const since = Math.floor(dayStart.getTime() / 1000)
     const counts: Record<string, number> = {}
-    for (const row of db.prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all() as unknown as {
-      status: string
-      n: number
-    }[]) {
+    for (const row of db
+      .prepare('SELECT status, COUNT(*) AS n FROM tasks WHERE created_at >= ? GROUP BY status')
+      .all(since) as unknown as { status: string; n: number }[]) {
       counts[row.status] = Number(row.n) || 0
     }
     const placeholders = ACTIVE_STATUS.map(() => '?').join(',')
@@ -229,11 +232,11 @@ function readTasks(): { tasks: OpcTaskRow[]; counts: Record<string, number>; war
         `SELECT id, title, assignee, status, priority, created_at, started_at, completed_at,
                 consecutive_failures, last_failure_error, worker_pid
            FROM tasks
-          WHERE status IN (${placeholders})
-          ORDER BY priority DESC, created_at ASC
+          WHERE status IN (${placeholders}) AND created_at >= ?
+          ORDER BY created_at DESC
           LIMIT ?`
       )
-      .all(...ACTIVE_STATUS, TASK_LIMIT) as unknown as TaskDbRow[]
+      .all(...ACTIVE_STATUS, since, TASK_LIMIT) as unknown as TaskDbRow[]
     const tasks = rows.map((row) => ({
       id: row.id,
       title: row.title,

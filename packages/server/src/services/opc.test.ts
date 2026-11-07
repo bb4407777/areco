@@ -22,7 +22,14 @@ test('台账逐行解析：坏行跳过，最新在前，按上限截断', () =>
   assert.equal(parseRunsText(text, 1).length, 1)
 })
 
+function localTs(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 function fixture(): { root: string; logs: string } {
+  const NOW = Math.floor(Date.now() / 1000)
+  const TODAY_TS = localTs()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-opc-'))
   const logs = path.join(root, 'logs')
   fs.mkdirSync(path.join(root, 'data'), { recursive: true })
@@ -30,7 +37,7 @@ function fixture(): { root: string; logs: string } {
   fs.mkdirSync(logs, { recursive: true })
   fs.writeFileSync(
     path.join(root, 'data', 'track-runs.jsonl'),
-    `${JSON.stringify({ ts: '2026-11-07T10:00:00', task_id: 't_abc', dept: 'recording', title: '录音', track: 'codebuddy-ds', tracks: 'qoder-cn→codebuddy-ds', engine: 'codebuddy', model: 'ds', ok: true, dur_s: 12, fallback: 1 })}\n`
+    `${JSON.stringify({ ts: TODAY_TS, task_id: 't_abc', dept: 'recording', title: '录音', track: 'codebuddy-ds', tracks: 'qoder-cn→codebuddy-ds', engine: 'codebuddy', model: 'ds', ok: true, dur_s: 12, fallback: 1 })}\n`
   )
   fs.writeFileSync(
     path.join(root, 'config', 'tracks.json'),
@@ -56,10 +63,10 @@ function fixture(): { root: string; logs: string } {
     consecutive_failures INTEGER DEFAULT 0, last_failure_error TEXT, worker_pid INTEGER)`)
   db.prepare(
     'INSERT INTO tasks (id,title,assignee,status,priority,created_at,consecutive_failures,last_failure_error) VALUES (?,?,?,?,?,?,?,?)'
-  ).run('t_abc', '录音纪要', 'recording', 'ready', 0, 1794000000, 1, '限流')
+  ).run('t_abc', '录音纪要', 'recording', 'ready', 0, NOW, 1, '限流')
   db.prepare(
     'INSERT INTO tasks (id,title,assignee,status,priority,created_at) VALUES (?,?,?,?,?,?)'
-  ).run('t_done', '已办', 'wechat', 'done', 0, 1793000000)
+  ).run('t_done', '已办', 'wechat', 'done', 0, NOW)
   db.close()
   fs.writeFileSync(path.join(logs, 't_abc.log'), 'line1\nline2\nline3\n')
   return { root, logs }
@@ -125,4 +132,29 @@ test('今日统计：只数当天、按最终轨归集、坏日期不计', () =>
   assert.equal(got.ok, 1)
   assert.deepEqual(got.byTrack, { 'qoder-cn': 2 })
   assert.equal(localDay(new Date(2026, 10, 7, 0, 5)), '2026-11-07')
+})
+
+test('在办只看当天：更早的工单不入列也不计数', () => {
+  const { root, logs } = fixture()
+  const db = new DatabaseSync(path.join(root, 'data', 'kanban.db'))
+  const old = Math.floor(Date.now() / 1000) - 3 * 86400
+  db.prepare('INSERT INTO tasks (id,title,assignee,status,priority,created_at) VALUES (?,?,?,?,?,?)').run(
+    't_old', '三天前的单', 'recording', 'ready', 0, old
+  )
+  db.close()
+  const prevRoot = process.env.ARECO_OPC_ROOT
+  const prevLogs = process.env.ARECO_OPC_LOGS
+  process.env.ARECO_OPC_ROOT = root
+  process.env.ARECO_OPC_LOGS = logs
+  try {
+    const snap = snapshot()
+    assert.deepEqual(snap.tasks.map((t) => t.id), ['t_abc'])
+    assert.equal(snap.counts.ready, 1)
+  } finally {
+    if (prevRoot === undefined) delete process.env.ARECO_OPC_ROOT
+    else process.env.ARECO_OPC_ROOT = prevRoot
+    if (prevLogs === undefined) delete process.env.ARECO_OPC_LOGS
+    else process.env.ARECO_OPC_LOGS = prevLogs
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

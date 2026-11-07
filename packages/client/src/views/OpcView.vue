@@ -38,10 +38,21 @@ const tasks = computed<OpcTaskRow[]>(() => {
 
 const runs = computed<OpcRun[]>(() => {
   const kw = q.value.trim().toLowerCase()
-  const rows = (snap.value?.runs ?? []).slice(0, 80)
+  const day = localDay()
+  const rows = (snap.value?.runs ?? []).filter((r) => r.ts.startsWith(day)).slice(0, 80)
   if (!kw) return rows
   return rows.filter((r) => `${r.title}\n${r.dept}\n${r.track}\n${r.tracks}`.toLowerCase().includes(kw))
 })
+/** 本地日历日（台账 ts 是本地时间 "YYYY-MM-DDTHH:mm:ss"，按前缀取当天） */
+function localDay(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 已完成 / 失败 分开排：完成的内容排最上，失败的单另列，不混在完成里 */
+const runsOk = computed(() => runs.value.filter((r) => r.ok))
+const runsBad = computed(() => runs.value.filter((r) => !r.ok))
 
 const activeCount = computed(
   () => (snap.value?.counts.ready ?? 0) + (snap.value?.counts.claimed ?? 0) + (snap.value?.counts.running ?? 0) + (snap.value?.counts.in_progress ?? 0)
@@ -148,9 +159,63 @@ onUnmounted(() => {
       <span v-if="!snap?.tracks.length" class="empty-inline">轨道表读取中…</span>
     </div>
 
+    <section class="block done-block">
+      <div class="block-head">
+        <h3>今日已完成</h3>
+        <span class="hint">今天 {{ runsOk.length }} 单 · 换轨的显示 轨1→轨2</span>
+      </div>
+      <div v-if="!ui.isMobile" class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-time">完成</th>
+              <th class="col-dept">岗位</th>
+              <th>内容</th>
+              <th class="col-track">轨</th>
+              <th class="col-model">模型</th>
+              <th class="col-dur">耗时</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in runsOk" :key="`${r.taskId}-${r.ts}`">
+              <td class="num">{{ fmtTime(Date.parse(r.ts)) }}</td>
+              <td>{{ r.dept }}</td>
+              <td class="title" :title="r.title">{{ r.title }}</td>
+              <td class="mono track-cell">
+                {{ r.tracks || r.track }}
+                <span v-if="r.fallback" class="tag fallback">换轨</span>
+              </td>
+              <td class="mono">{{ r.model }}</td>
+              <td class="num">{{ fmtDur(r.durS) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!runsOk.length" class="empty">{{ snap ? '今天还没有完成的单' : '读取中…' }}</div>
+      </div>
+      <div v-else class="cards">
+        <article v-for="r in runsOk" :key="`${r.taskId}-${r.ts}`" class="card">
+          <div class="card-top">
+            <span class="card-title">{{ r.title || r.taskId }}</span>
+            <span class="tag ok">成</span>
+          </div>
+          <div class="card-meta">
+            <span class="mono card-track">{{ r.tracks || r.track }}</span>
+            <span v-if="r.fallback" class="tag fallback">换轨</span>
+            <span class="mono">{{ r.model }}</span>
+          </div>
+          <div class="card-meta">
+            <span>{{ fmtTime(Date.parse(r.ts)) }}</span>
+            <span>{{ r.dept }}</span>
+            <span>{{ fmtDur(r.durS) }}</span>
+          </div>
+        </article>
+        <div v-if="!runsOk.length" class="empty">{{ snap ? '今天还没有完成的单' : '读取中…' }}</div>
+      </div>
+    </section>
+
     <section class="block">
       <div class="block-head">
-        <h3>在办工单</h3>
+        <h3>今日在办</h3>
         <span class="hint">点「日志」看该单工人最后 400 行</span>
       </div>
       <div v-if="!ui.isMobile" class="table-wrap short">
@@ -182,7 +247,7 @@ onUnmounted(() => {
             </tr>
           </tbody>
         </table>
-        <div v-if="!tasks.length" class="empty">{{ snap ? '队列里没有在办工单' : '读取中…' }}</div>
+        <div v-if="!tasks.length" class="empty">{{ snap ? '今天没有在办工单' : '读取中…' }}</div>
       </div>
       <div v-else class="cards">
         <article v-for="r in tasks" :key="r.id" class="card" :class="{ clickable: r.hasLog }" @click="r.hasLog && openLog(r)">
@@ -198,14 +263,14 @@ onUnmounted(() => {
             <span v-if="r.hasLog" class="card-act">日志 ›</span>
           </div>
         </article>
-        <div v-if="!tasks.length" class="empty">{{ snap ? '队列里没有在办工单' : '读取中…' }}</div>
+        <div v-if="!tasks.length" class="empty">{{ snap ? '今天没有在办工单' : '读取中…' }}</div>
       </div>
     </section>
 
-    <section class="block">
+    <section v-if="runsBad.length" class="block">
       <div class="block-head">
-        <h3>最近跑单</h3>
-        <span class="hint">换轨单的「轨」列显示 轨1→轨2…</span>
+        <h3>今天失败</h3>
+        <span class="hint">{{ runsBad.length }} 单 · 换轨单显示 轨1→轨2</span>
       </div>
       <div v-if="!ui.isMobile" class="table-wrap">
         <table>
@@ -217,11 +282,12 @@ onUnmounted(() => {
               <th class="col-track">轨</th>
               <th class="col-model">模型</th>
               <th class="col-dur">耗时</th>
-              <th class="col-ok">结果</th>
+              <th class="col-ok">原因</th>
+              <th>错误</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="r in runs" :key="`${r.taskId}-${r.ts}`" :class="{ bad: !r.ok }">
+            <tr v-for="r in runsBad" :key="`${r.taskId}-${r.ts}`" :class="{ bad: !r.ok }">
               <td class="num">{{ fmtTime(Date.parse(r.ts)) }}</td>
               <td>{{ r.dept }}</td>
               <td class="title" :title="r.title">{{ r.title }}</td>
@@ -234,13 +300,14 @@ onUnmounted(() => {
               <td>
                 <span class="tag" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成' : r.errKind || '败' }}</span>
               </td>
+              <td class="title err-text" :title="r.err">{{ r.err }}</td>
             </tr>
           </tbody>
         </table>
         <div v-if="!runs.length" class="empty">{{ snap ? '没有匹配的跑单' : '读取中…' }}</div>
       </div>
       <div v-else class="cards">
-        <article v-for="r in runs" :key="`${r.taskId}-${r.ts}`" class="card" :class="{ bad: !r.ok }">
+        <article v-for="r in runsBad" :key="`${r.taskId}-${r.ts}`" class="card" :class="{ bad: !r.ok }">
           <div class="card-top">
             <span class="card-title">{{ r.title || r.taskId }}</span>
             <span class="tag" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成' : r.errKind || '败' }}</span>
