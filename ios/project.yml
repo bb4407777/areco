@@ -1,0 +1,33 @@
+name: Areco
+options:
+  bundleIdPrefix: cn.gao
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  Areco:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Areco
+        NSLocalNetworkUsageDescription: 需要连接同一 Wi-Fi 下的 Mac 上的 areco 座舱。
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true   # 局域网明文 http / ws（自用，不过审）
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cn.gao.areco
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    scheme:
+      testTargets: []
