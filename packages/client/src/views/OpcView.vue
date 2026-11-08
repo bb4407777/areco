@@ -41,6 +41,8 @@ const sending = ref(false)
 /** 刚发出、还没进会话记录的那一句（界面上先占一行，跑完被真实消息替换） */
 const pendingText = ref('')
 const chatEl = ref<HTMLElement | null>(null)
+/** 对话固定停在最新消息：在底部附近才跟随，手动往上翻就不抢滚动条 */
+const stickBottom = ref(true)
 let timer: ReturnType<typeof setInterval> | undefined
 
 /** 常驻会话在列表里的选中 id 前缀，与工单 id 分开 */
@@ -181,18 +183,24 @@ async function loadLog(id: string): Promise<void> {
 
 /** 常驻会话的对话记录：按 session_id 定位落盘文件，读尾部消息 */
 async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
-  transcript.value = null
-  transcriptError.value = ''
-  if (!s) return
+  if (!s) {
+    transcript.value = null
+    transcriptError.value = ''
+    return
+  }
   if (!s.sessionId) {
+    transcript.value = null
     transcriptError.value = '还没有会话记录（该岗第一次接单时开新会话）'
     return
   }
   if (!s.sessionSource || !s.sessionProject) {
+    transcript.value = null
     transcriptError.value = '会话文件未落盘（可能已被清理）'
     return
   }
-  transcriptLoading.value = true
+  // 续轮刷新时保留已载入的消息，避免整块清空后跳一下
+  if (!transcript.value) transcriptLoading.value = true
+  transcriptError.value = ''
   try {
     const page = await api.get<{ messages: TranscriptMessage[] }>(
       `/api/history/${s.sessionSource}/${s.sessionProject}/${s.sessionId}/transcript`
@@ -202,13 +210,38 @@ async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
     if (pendingText.value && transcript.value.some((m) => m.role === 'user' && msgTextOf(m).includes(pendingText.value))) {
       pendingText.value = ''
     }
-    await nextTick()
-    if (chatEl.value) chatEl.value.scrollTop = chatEl.value.scrollHeight
+    scrollToLatestIfStick()
   } catch (e) {
     transcriptError.value = (e as Error).message
   } finally {
     transcriptLoading.value = false
   }
+}
+
+/** 滚到最新一条；等两帧让消息（代码块/表格）排完版再定位，否则停在半截 */
+async function scrollToLatest(force = false): Promise<void> {
+  if (!force && !stickBottom.value) return
+  await nextTick()
+  const jump = (): void => {
+    const el = chatEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  }
+  jump()
+  requestAnimationFrame(() => {
+    jump()
+    requestAnimationFrame(jump)
+  })
+}
+
+function scrollToLatestIfStick(): void {
+  void scrollToLatest()
+}
+
+/** 手动上翻即脱离跟随，回到底部附近再重新跟随 */
+function onChatScroll(): void {
+  const el = chatEl.value
+  if (!el) return
+  stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48
 }
 
 function msgTextOf(m: TranscriptMessage): string {
@@ -228,6 +261,7 @@ function selectSession(dept: string): void {
   const id = `${SESS_PREFIX}${dept}`
   if (selectedId.value !== id) selectedId.value = id
   draft.value = draftOf(dept)
+  stickBottom.value = true
   void loadTranscript(selectedSession.value)
 }
 
@@ -241,6 +275,8 @@ async function sendMessage(): Promise<void> {
     const res = await api.post<OpcSessionSendResult>(`/api/opc/sessions/${s.dept}/message`, { text })
     draft.value = ''
     pendingText.value = text
+    stickBottom.value = true
+    void scrollToLatest(true)
     message.success(res.taskId ? `已派给${s.name}（${res.taskId}），跑完自动刷新` : `已派给${s.name}`)
     await refresh()
   } catch (e) {
@@ -321,6 +357,12 @@ watch(
   () => {
     if (selectedSession.value && transcript.value) void loadTranscript(selectedSession.value)
   }
+)
+
+// 消息增减（新一轮回复、占位行换成真实消息）都跟到最新一条
+watch(
+  () => [transcriptTail.value.length, pendingText.value] as const,
+  () => scrollToLatestIfStick()
 )
 
 function restartTimer(): void {
@@ -515,8 +557,8 @@ onUnmounted(() => {
             <span>对话记录</span>
             <span v-if="transcript" class="log-meta">尾部 {{ transcriptTail.length }} 条 / 共 {{ transcript.length }} 条</span>
           </div>
-          <div ref="chatEl" class="log-wrap chat-wrap">
-            <div v-if="transcriptLoading" class="empty">读取中…</div>
+          <div ref="chatEl" class="log-wrap chat-wrap" @scroll.passive="onChatScroll">
+            <div v-if="transcriptLoading && !transcriptTail.length" class="empty">读取中…</div>
             <div v-else-if="transcriptTail.length || pendingText" class="chat">
               <ChatMessage v-for="(m, i) in transcriptTail" :key="i" :message="m" />
               <div v-if="pendingText" class="pending">
