@@ -634,6 +634,18 @@ export interface OpcSessionRow {
   /** 该岗最近一单（台账） */
   lastRunAt?: string
   lastRunOk?: boolean
+  /** 换轨／满轮换下来的上一段会话（留档可回看，最新在前） */
+  past?: OpcPastSession[]
+}
+
+export interface OpcPastSession {
+  sessionId: string
+  engine: string
+  rounds: number
+  updated?: string
+  /** 会话文件在历史页的位置；文件已清理时为空 */
+  sessionSource?: string
+  sessionProject?: string
 }
 
 export interface OpcSnapshot {

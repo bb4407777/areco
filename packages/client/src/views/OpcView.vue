@@ -9,6 +9,7 @@ import ChatMessage from '../components/ChatMessage.vue'
 import { api } from '../api'
 import { useUiStore } from '../stores/ui'
 import type {
+  OpcPastSession,
   OpcRun,
   OpcSessionRow,
   OpcSessionSendResult,
@@ -38,8 +39,16 @@ const transcriptError = ref('')
 const draft = ref('')
 const drafts: Record<string, string> = {}
 const sending = ref(false)
-/** 刚发出、还没进会话记录的那一句（界面上先占一行，跑完被真实消息替换） */
-const pendingText = ref('')
+/** 刚发出、还没进会话记录的那一句（界面上先占一行，跑完被真实消息替换）。
+ * 按岗存：切到别的岗不会把它带过去（2026-11-08 高律师「这个发送串了」） */
+const pendingByDept = ref<Record<string, string>>({})
+const pendingText = computed(() => {
+  const dept = selectedSession.value?.dept
+  return dept ? pendingByDept.value[dept] ?? '' : ''
+})
+function setPending(dept: string, text: string): void {
+  pendingByDept.value = { ...pendingByDept.value, [dept]: text }
+}
 const chatEl = ref<HTMLElement | null>(null)
 /** 对话固定停在最新消息：在底部附近才跟随，手动往上翻就不抢滚动条 */
 const stickBottom = ref(true)
@@ -91,8 +100,45 @@ const selectedSession = computed<OpcSessionRow | null>(() => {
   return (snap.value?.sessions ?? []).find((s) => s.dept === dept) ?? null
 })
 
+/** 工人每轮收到的整段提示词：只留高律师自己那句话，别把模板和召回当消息读 */
+const CHAT_MARK = '〔常驻会话对话〕'
+const CHAT_MARK_SHORT = '〔OPC 对话〕'
+function userTextOf(raw: string): string {
+  let s = raw
+  const i = s.indexOf(CHAT_MARK)
+  const j = s.indexOf(CHAT_MARK_SHORT)
+  if (i >= 0) s = s.slice(i + CHAT_MARK.length)
+  else if (j >= 0) s = s.slice(j + CHAT_MARK_SHORT.length)
+  else {
+    const k = s.indexOf('—— 任务正文 ——')
+    if (k >= 0) s = s.slice(k + '—— 任务正文 ——'.length)
+  }
+  for (const cut of ['\n## 自动召回', '\n〔principal_only', '\n〔完工闸', '\n—— 运行时附录',
+    '\n—— 原任务正文', '\n—— 本单是常驻会话对话']) {
+    const k = s.indexOf(cut)
+    if (k >= 0) s = s.slice(0, k)
+  }
+  s = s.replace(/^高律师在 OPC 页面直接发来的一句话[^\n]*\n*/, '')
+  return s.trim()
+}
+
+/** 对话记录只留能读的：指令行（剥掉派单模板）与有正文的回复；纯工具/思考轮不占位 */
+const transcriptView = computed<TranscriptMessage[]>(() => {
+  const out: TranscriptMessage[] = []
+  for (const m of transcript.value ?? []) {
+    if (m.role === 'user') {
+      const text = userTextOf(msgTextOf(m))
+      if (!text) continue
+      out.push({ ...m, parts: [{ kind: 'text', text }] })
+    } else if (m.parts.some((p) => p.kind === 'text' || p.kind === 'notice')) {
+      out.push(m)
+    }
+  }
+  return out
+})
+
 /** 详情只展示会话尾部，完整对话点进历史页 */
-const transcriptTail = computed<TranscriptMessage[]>(() => (transcript.value ?? []).slice(-30))
+const transcriptTail = computed<TranscriptMessage[]>(() => transcriptView.value.slice(-30))
 
 /** 今日跑单按 taskId 去重（同一单重跑只留最后一次） */
 function uniqRuns(rows: OpcRun[]): OpcRun[] {
@@ -142,6 +188,13 @@ function fmtTime(ts: number): string {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+function fmtDay(s: string): string {
+  const t = Date.parse(s)
+  if (!t) return ''
+  const d = new Date(t)
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function fmtDur(sec: number): string {
   if (!sec) return '—'
   if (sec < 60) return `${sec.toFixed(0)}s`
@@ -181,19 +234,51 @@ async function loadLog(id: string): Promise<void> {
   }
 }
 
-/** 常驻会话的对话记录：按 session_id 定位落盘文件，读尾部消息 */
+/** 会话段（换轨／满轮会换会话）：旧段在前、当前段在后，按时间合并成一条记录 */
+interface SegRef {
+  id: string
+  source: string
+  project: string
+}
+
+function segmentsOf(s: OpcSessionRow): SegRef[] {
+  const segs: SegRef[] = []
+  for (const p of s.past ?? []) {
+    if (p.sessionId && p.sessionSource && p.sessionProject) {
+      segs.push({ id: p.sessionId, source: p.sessionSource, project: p.sessionProject })
+    }
+  }
+  if (s.sessionId && s.sessionSource && s.sessionProject) {
+    segs.push({ id: s.sessionId, source: s.sessionSource, project: s.sessionProject })
+  }
+  return segs
+}
+
+async function fetchSegment(seg: SegRef): Promise<TranscriptMessage[]> {
+  try {
+    const page = await api.get<{ messages: TranscriptMessage[] }>(
+      `/api/history/${seg.source}/${seg.project}/${seg.id}/transcript`
+    )
+    return page.messages ?? []
+  } catch {
+    return []
+  }
+}
+
+/** 常驻会话的对话记录：历史各段＋当前段合并（换过轨也不再只剩最后一轮） */
 async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
   if (!s) {
     transcript.value = null
     transcriptError.value = ''
     return
   }
+  const segs = segmentsOf(s)
   if (!s.sessionId) {
     transcript.value = null
     transcriptError.value = '还没有会话记录（该岗第一次接单时开新会话）'
     return
   }
-  if (!s.sessionSource || !s.sessionProject) {
+  if (!segs.length) {
     transcript.value = null
     transcriptError.value = '会话文件未落盘（可能已被清理）'
     return
@@ -202,13 +287,22 @@ async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
   if (!transcript.value) transcriptLoading.value = true
   transcriptError.value = ''
   try {
-    const page = await api.get<{ messages: TranscriptMessage[] }>(
-      `/api/history/${s.sessionSource}/${s.sessionProject}/${s.sessionId}/transcript`
-    )
-    transcript.value = page.messages ?? []
+    const pages = await Promise.all(segs.map(fetchSegment))
+    const merged: TranscriptMessage[] = []
+    pages.forEach((msgs, si) => msgs.forEach((m, mi) => merged.push(m)))
+    const key = (m: TranscriptMessage): number => (m.timestamp ? Date.parse(m.timestamp) : NaN)
+    // 有时间戳的按时间排；无时间戳的保持原段序（稳定排序靠下标兜底）
+    const idx = new Map(merged.map((m, i) => [m, i] as const))
+    transcript.value = merged.slice().sort((a, b) => {
+      const ta = key(a)
+      const tb = key(b)
+      if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb
+      return (idx.get(a) ?? 0) - (idx.get(b) ?? 0)
+    })
     // 刚发出的那句已经进了会话记录 → 撤掉占位行
-    if (pendingText.value && transcript.value.some((m) => m.role === 'user' && msgTextOf(m).includes(pendingText.value))) {
-      pendingText.value = ''
+    if (pendingByDept.value[s.dept] && transcript.value.some(
+      (m) => m.role === 'user' && msgTextOf(m).includes(pendingByDept.value[s.dept]))) {
+      setPending(s.dept, '')
     }
     scrollToLatestIfStick()
   } catch (e) {
@@ -274,7 +368,7 @@ async function sendMessage(): Promise<void> {
   try {
     const res = await api.post<OpcSessionSendResult>(`/api/opc/sessions/${s.dept}/message`, { text })
     draft.value = ''
-    pendingText.value = text
+    setPending(s.dept, text)
     stickBottom.value = true
     void scrollToLatest(true)
     message.success(res.taskId ? `已派给${s.name}（${res.taskId}），跑完自动刷新` : `已派给${s.name}`)
@@ -313,6 +407,15 @@ function openSessionRow(s: OpcSessionRow): void {
   })
 }
 
+/** 上一段会话（换轨／满轮换下来的那段，仍在盘上） */
+function openPastSession(p: OpcPastSession): void {
+  if (!p.sessionSource || !p.sessionProject) return
+  router.push({
+    path: `/history/${p.sessionSource}/${p.sessionProject}/${p.sessionId}`,
+    query: { title: `${selectedSession.value?.name || ''}（上一段）` },
+  })
+}
+
 /** 该单的引擎会话在历史页的位置（服务端按 session_id 查落盘文件所得） */
 const sessionTarget = computed(() => {
   const r = selectedRun.value
@@ -334,7 +437,6 @@ function select(id: string): void {
   selectedId.value = id
   transcript.value = null
   transcriptError.value = ''
-  pendingText.value = ''
   void loadLog(id)
 }
 
@@ -551,11 +653,25 @@ onUnmounted(() => {
                 <span v-else class="muted">会话文件未落盘</span>
               </span>
             </div>
+            <div v-if="selectedSession.past?.length" class="kv-row">
+              <span class="k">上一段</span>
+              <span class="v past-list">
+                <button
+                  v-for="p in selectedSession.past"
+                  :key="p.sessionId"
+                  type="button"
+                  class="link"
+                  @click="openPastSession(p)"
+                >{{ p.engine || '会话' }} · {{ p.rounds }} 轮<template v-if="p.updated"> · {{ fmtDay(p.updated) }}</template> ›</button>
+              </span>
+            </div>
           </div>
 
           <div class="log-head">
             <span>对话记录</span>
-            <span v-if="transcript" class="log-meta">尾部 {{ transcriptTail.length }} 条 / 共 {{ transcript.length }} 条</span>
+            <span v-if="transcript" class="log-meta">
+              显示 {{ transcriptTail.length }} 条 / 共 {{ transcriptView.length }} 条{{ (selectedSession?.past?.length ?? 0) ? `（含 ${selectedSession?.past?.length} 段历史会话）` : '' }}
+            </span>
           </div>
           <div ref="chatEl" class="log-wrap chat-wrap" @scroll.passive="onChatScroll">
             <div v-if="transcriptLoading && !transcriptTail.length" class="empty">读取中…</div>
@@ -884,6 +1000,13 @@ onUnmounted(() => {
 .v.err {
   color: var(--danger);
   font-size: 12px;
+}
+/* 上一段会话（可能多段，竖排） */
+.past-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
 }
 .link {
   border: none;

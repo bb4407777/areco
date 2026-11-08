@@ -145,7 +145,10 @@ export function locateSession(sessionId: string, engine = ''): { source: string;
   const hit = sessionCache.get(sessionId)
   if (hit !== undefined) return hit
   // 先按引擎自己的根找，再兜底扫全部根（会话可能由换轨前的另一引擎开出，如财务旧会话落在 qoder-cn）
-  const primary = SESSION_ROOTS[engine] ?? []
+  // engine 传进来的常是轨 id（qoder-intl／codebuddy-ds-ai），先归到引擎族再查根目录
+  const family = engine.startsWith('codebuddy') ? 'codebuddy'
+    : engine.startsWith('qoder') ? 'qoder' : engine
+  const primary = SESSION_ROOTS[family] ?? []
   const roots = primary.concat(Object.values(SESSION_ROOTS).flat().filter((r) => !primary.includes(r)))
   let found: { source: string; project: string } | null = null
   for (const root of roots) {
@@ -356,6 +359,7 @@ interface RawSessionEntry {
   rounds?: number
   engine?: string
   updated?: string
+  past?: RawSessionEntry[]
 }
 
 /**
@@ -391,17 +395,30 @@ function readSessions(runs: OpcRun[], tasks: OpcTaskRow[]): OpcSessionRow[] {
       queuedTitle: queued?.title,
       lastRunAt: last?.ts,
       lastRunOk: last?.ok,
+      past: (Array.isArray(ent.past) ? ent.past : [])
+        .filter((p) => typeof p?.session_id === 'string' && p.session_id)
+        .map((p) => {
+          const pref = locateSession(String(p.session_id), String(p.engine || ''))
+          return {
+            sessionId: String(p.session_id),
+            engine: String(p.engine || ''),
+            rounds: Number(p.rounds) || 0,
+            updated: typeof p.updated === 'string' ? p.updated : '',
+            sessionSource: pref?.source,
+            sessionProject: pref?.project,
+          }
+        })
+        .reverse(),
     })
   }
-  // 在跑／排队在前，其余按最近一单倒序（没跑过的沉底）
-  const live = (s: OpcSessionRow) => Number(Boolean(s.runningTaskId)) * 2 + Number(Boolean(s.queuedTaskId))
-  rows.sort(
-    (a, b) =>
-      live(b) - live(a) ||
-      (b.lastRunAt ?? '').localeCompare(a.lastRunAt ?? '') ||
-      (b.updated || '').localeCompare(a.updated || '') ||
-      a.dept.localeCompare(b.dept)
-  )
+  // 固定按 depts.json 的岗序（不按在跑/时间重排）：列表每 10 秒刷一次，一重排就会在
+  // 指尖下换行——2026-11-08 高律师「这个发送串了」即由此而来。在跑/排队改由行上的标签表达。
+  const order = Object.keys(depts)
+  const rank = (d: string) => {
+    const i = order.indexOf(d)
+    return i < 0 ? order.length : i
+  }
+  rows.sort((a, b) => rank(a.dept) - rank(b.dept) || a.dept.localeCompare(b.dept))
   return rows
 }
 
@@ -422,11 +439,12 @@ export function sendSessionMessage(dept: string, text: string): { taskId: string
 
   const firstLine = bodyText.split('\n').find((l) => l.trim())?.trim() ?? ''
   const title = firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine
-  const body = `〔常驻会话对话〕高律师在 OPC 页面直接发来的一句话，按本岗职责直接办或直接答，不要另开话题。\n\n${bodyText}`
+  const body = `〔OPC 对话〕${bodyText}\n\n—— 本单是常驻会话对话：按本岗职责直接办或直接答，不要另开话题；汇报照常一行「需办：」。`
   const script = path.join(opcRoot(), 'scripts', 'chat-dispatch.py')
   if (!fs.existsSync(script)) throw new Error(`派单口不存在：${script}`)
 
-  const r = spawnSync(OPC_PY, [script, '--assignee', dept, '--title', title, '--stdin', '--principal'], {
+  const r = spawnSync(OPC_PY, [script, '--assignee', dept, '--title', title, '--stdin', '--principal',
+    '--recall-min-signal'], {
     input: body,
     encoding: 'utf8',
     timeout: 90_000,
