@@ -32,3 +32,11 @@ test('超长无标点句按逗号截断', () => {
 test('空文本不产生请求', () => {
   assert.deepEqual(splitForSpeech('   \n '), [])
 })
+
+test('纯符号碎片不单独成句：并进上一句', () => {
+  assert.deepEqual(splitForSpeech('他来了。——然后呢？'), ['他来了。', '——然后呢？'])
+})
+
+test('整段只有符号时不出句', () => {
+  assert.deepEqual(splitForSpeech('—— …。（）'), [])
+})

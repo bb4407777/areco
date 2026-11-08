@@ -20,6 +20,9 @@ const MD_PATTERNS: Array<[RegExp, string]> = [
   [/^\s*\d+\.\s+/gm, ''],
 ]
 
+// 至少要有文字或数字，纯符号片段不送合成（edge-tts 会返回空音频并抛错）
+const SPEAKABLE = /[\p{L}\p{N}]/u
+
 const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{1F000}-\u{1F0FF}\u{2600}-\u{26FF}\u{FE0F}\u{1F900}-\u{1F9FF}]+/gu
 
 function clean(text: string): string {
@@ -68,8 +71,12 @@ export class SentenceAssembler {
     const rest = this.buf.trim()
     this.buf = ''
     if (rest) {
-      out.push(rest)
-      this.emittedAny = true
+      if (!SPEAKABLE.test(rest)) {
+        if (out.length) out[out.length - 1] += rest
+      } else {
+        out.push(rest)
+        this.emittedAny = true
+      }
     }
     return out
   }
@@ -98,10 +105,15 @@ export class SentenceAssembler {
       if (cut < 0) break
       const sentence = this.buf.slice(0, cut + 1).trim()
       this.buf = this.buf.slice(cut + 1)
-      if (sentence.replace(/[。！？!?；;…，、,\s]/g, '')) {
-        out.push(sentence)
-        this.emittedAny = true
+      if (!sentence.replace(/[。！？!?；;…，、,\s]/g, '')) continue
+      // 只有标点/符号的碎片（如括号、破折号）会让 edge-tts 合成出空音频并报错：
+      // 并进上一句，没有上一句就丢掉。
+      if (!SPEAKABLE.test(sentence)) {
+        if (out.length) out[out.length - 1] += sentence
+        continue
       }
+      out.push(sentence)
+      this.emittedAny = true
     }
     return out
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { AudioBlockedError, PcmCancelledError, type SpeechPlayer } from '../audio/pcmPlayer'
+import { AudioBlockedError, EmptyAudioError, PcmCancelledError, type SpeechPlayer } from '../audio/pcmPlayer'
 import { SpeechQueue } from './speech'
 
 class FakePlayer implements SpeechPlayer {
@@ -185,5 +185,24 @@ test('播报中途停止时未消费的预取请求不产生未处理异常', as
   queue.stop()
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(player.playCalls, 0)
+  assert.equal(queue.hasPlayedAuto('m1'), false)
+})
+
+test('某一句没有音频时跳过，不算播报失败', async () => {
+  const texts: string[] = []
+  let errors: (string | null)[] = []
+  let plays = 0
+  const player = {
+    async unlock() {},
+    async play() {
+      plays++
+      if (plays === 2) throw new EmptyAudioError()
+    },
+    stop() {},
+  }
+  const queue = new SpeechQueue(player, fakeFetch(texts), { onError: (e) => errors.push(e) })
+  queue.playManual({ messageId: 'm1', text: '第一句很短。第二句也很短！第三句同样很短？' })
+  await waitFor(() => plays === 3)
+  assert.equal(errors.filter((e) => e).length, 0)
   assert.equal(queue.hasPlayedAuto('m1'), false)
 })

@@ -5,6 +5,14 @@ export class AudioBlockedError extends Error {
   }
 }
 
+/** 服务端这段没合成出音频（例如只有标点）：跳过这一句，不当作播报失败 */
+export class EmptyAudioError extends Error {
+  constructor() {
+    super('语音服务未返回音频')
+    this.name = 'EmptyAudioError'
+  }
+}
+
 export class PcmCancelledError extends Error {
   constructor() {
     super('播放已停止')

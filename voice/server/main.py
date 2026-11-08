@@ -36,7 +36,12 @@ def create_app(engine: TTS, cfg: Config) -> web.Application:
             raise web.HTTPBadRequest(text="text is too long")
 
         assembler = SentenceAssembler(cfg.sentence_max_buffer, cfg.sentence_first_min)
-        sentences = [*assembler.feed(text), *assembler.flush()]
+        sentences = [
+            sentence
+            for sentence in [*assembler.feed(text), *assembler.flush()]
+            # 纯标点/符号送进 edge-tts 只会拿到空音频并抛 NoAudioReceived，直接不送
+            if any(ch.isalnum() for ch in sentence)
+        ]
         response = web.StreamResponse(
             status=200,
             headers={

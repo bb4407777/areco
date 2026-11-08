@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { AudioBlockedError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
+import { AudioBlockedError, EmptyAudioError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
 import { splitForSpeech } from '../audio/sentences'
 import { WavElementPlayer, isIOSLike } from '../audio/wavPlayer'
 
@@ -101,6 +101,7 @@ export class SpeechQueue {
    */
   private async speak(text: string, generation: number, signal: AbortSignal): Promise<void> {
     const sentences = splitForSpeech(text)
+    if (!sentences.length) return
     const lookahead = 2
     const inflight: Array<Promise<AudioResult>> = []
     let next = 0
@@ -118,7 +119,13 @@ export class SpeechQueue {
       const response = result.response
       if (!response.ok) throw new Error(`语音服务 HTTP ${response.status}`)
       if (!response.body) throw new Error('语音服务未返回音频流')
-      await this.player.play(response.body)
+      try {
+        await this.player.play(response.body)
+      } catch (err) {
+        // 这一句没合成出音频（纯符号、服务端跳过）：继续下一句，不弹「播报失败」
+        if (err instanceof EmptyAudioError) continue
+        throw err
+      }
     }
   }
 

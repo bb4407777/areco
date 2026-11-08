@@ -84,22 +84,43 @@ class TTSEngine:
         import av
         import edge_tts
 
-        codec = av.CodecContext.create("mp3", "r")
-        resampler = av.AudioResampler(format="s16", layout="mono", rate=self.cfg.out_rate)
-        comm = edge_tts.Communicate(text, voice=self.cfg.tts_voice, rate=self.cfg.tts_rate)
-        got_audio = False
-        try:
-            async for chunk in comm.stream():
-                if chunk["type"] != "audio":
-                    continue
-                got_audio = True
-                for pcm in self._decode(codec, resampler, chunk["data"]):
-                    yield pcm
-            if got_audio:
-                for pcm in self._flush(codec, resampler):
-                    yield pcm
-        except asyncio.CancelledError:
-            raise
+        # 没出过声的失败可以整句重试；已经推了音频就不能重来（客户端会听到重复）
+        last_error: Exception | None = None
+        for attempt in range(3):
+            codec = av.CodecContext.create("mp3", "r")
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=self.cfg.out_rate)
+            comm = edge_tts.Communicate(text, voice=self.cfg.tts_voice, rate=self.cfg.tts_rate)
+            got_audio = False
+            emitted = False
+            try:
+                async for chunk in comm.stream():
+                    if chunk["type"] != "audio":
+                        continue
+                    got_audio = True
+                    for pcm in self._decode(codec, resampler, chunk["data"]):
+                        emitted = True
+                        yield pcm
+                if got_audio:
+                    for pcm in self._flush(codec, resampler):
+                        emitted = True
+                        yield pcm
+                if emitted:
+                    return
+                last_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if emitted:
+                    raise
+                last_error = exc
+                logger.warning("edge 合成失败（第 %d 次）：%s", attempt + 1, exc)
+            await asyncio.sleep(0.4 * (attempt + 1))
+
+        # 三次都拿不到音频：这句本来就没得念（纯符号等），静默跳过，不往上抛错
+        if last_error is None:
+            logger.info("edge 无音频返回，跳过：%r", text[:20])
+        else:
+            logger.warning("edge 三次无音频，跳过：%r（%s）", text[:20], last_error)
 
     @staticmethod
     def _pcm_bytes(frame) -> bytes:

@@ -1,4 +1,4 @@
-import { PcmCancelledError, type SpeechPlayer } from './pcmPlayer'
+import { EmptyAudioError, PcmCancelledError, type SpeechPlayer } from './pcmPlayer'
 
 /** 24k PCM16LE 单声道加 44 字节 WAV 头；长度按实际字节填，Safari 才能算准时长。 */
 export function pcm16ToWav(pcm: Uint8Array, sampleRate = 24000): Blob {
@@ -61,7 +61,7 @@ export class WavElementPlayer implements SpeechPlayer {
         }
       }
       if (generation !== this.generation) throw new PcmCancelledError()
-      if (!total) throw new Error('语音服务未返回音频')
+      if (!total) throw new EmptyAudioError()
 
       const pcm = new Uint8Array(total)
       let offset = 0
