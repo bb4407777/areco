@@ -36,10 +36,12 @@ export class WavElementPlayer implements SpeechPlayer {
   private audio: HTMLAudioElement | null = null
   private url: string | null = null
   private generation = 0
+  /** play() 里等 onended 的收口函数：stop() 时必须调它，否则 await 永远悬着、队列卡死 */
+  private settle: (() => void) | null = null
 
   async unlock(): Promise<void> {
-    // 媒体通道无需 AudioContext 解锁；这里只清理上一段。
-    this.release()
+    // 媒体通道无需 AudioContext 解锁；这里只清理上一段（走 stop，暂停而不是丢掉引用）。
+    this.stop()
   }
 
   async play(stream: ReadableStream<Uint8Array>): Promise<void> {
@@ -69,11 +71,15 @@ export class WavElementPlayer implements SpeechPlayer {
       }
 
       const url = URL.createObjectURL(pcm16ToWav(pcm))
-      const audio = new Audio(url)
-      this.audio = audio
+      // 复用同一个 <audio> 元素：逐句播报时每句新建 Audio，iOS 会对新元素重新查自动播放许可，
+      // 第二句起就可能被拦（表现为播一句就没声）。整段播报共用解锁过的那个元素。
+      this.release()
+      const audio = this.ensureAudio()
       this.url = url
+      audio.src = url
 
       await new Promise<void>((resolve, reject) => {
+        this.settle = resolve
         audio.onended = () => resolve()
         audio.onerror = () => reject(new Error('音频播放失败'))
         audio.play().catch((err: unknown) => {
@@ -82,8 +88,17 @@ export class WavElementPlayer implements SpeechPlayer {
       })
       if (generation !== this.generation) throw new PcmCancelledError()
     } finally {
-      if (generation === this.generation && this.audio) this.release()
+      if (this.settle) this.settle = null
     }
+  }
+
+  /** 元素只建一次并长期留着；stop() 只暂停，不丢引用。 */
+  private ensureAudio(): HTMLAudioElement {
+    if (!this.audio) {
+      this.audio = new Audio()
+      this.audio.preload = 'auto'
+    }
+    return this.audio
   }
 
   stop(): void {
@@ -95,6 +110,10 @@ export class WavElementPlayer implements SpeechPlayer {
       audio.pause()
       audio.src = ''
     }
+    // 先收口挂起的 play()，再放手引用：否则新一段播报永远排在这一段后面（表现为点了没反应）
+    const settle = this.settle
+    this.settle = null
+    settle?.()
     this.release()
   }
 
@@ -103,7 +122,6 @@ export class WavElementPlayer implements SpeechPlayer {
       URL.revokeObjectURL(this.url)
       this.url = null
     }
-    this.audio = null
   }
 }
 

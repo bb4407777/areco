@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { AudioBlockedError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
+import { splitForSpeech } from '../audio/sentences'
 import { WavElementPlayer, isIOSLike } from '../audio/wavPlayer'
+
+type AudioResult = { response: Response } | { error: unknown }
 
 export interface SpeechItem {
   messageId: string
@@ -90,6 +93,51 @@ export class SpeechQueue {
     return this.playedAuto.has(messageId)
   }
 
+  /**
+   * 逐句请求音频并顺序播放。
+   *
+   * 一条消息只发一次 /api/tts 时，iOS 的 <audio> 要等整段合成完才出声（600 字 76 秒）；
+   * 切成句子后首句合成完即可播，另留 LOOKAHEAD 句预取，播放与合成并行。
+   */
+  private async speak(text: string, generation: number, signal: AbortSignal): Promise<void> {
+    const sentences = splitForSpeech(text)
+    const lookahead = 2
+    const inflight: Array<Promise<AudioResult>> = []
+    let next = 0
+    const launch = () => {
+      while (inflight.length < lookahead && next < sentences.length) {
+        inflight.push(this.requestAudio(sentences[next++], signal))
+      }
+    }
+    launch()
+    while (inflight.length) {
+      const result = await inflight.shift()!
+      if (generation !== this.generation || signal.aborted) throw new PcmCancelledError()
+      launch()
+      if ('error' in result) throw result.error
+      const response = result.response
+      if (!response.ok) throw new Error(`语音服务 HTTP ${response.status}`)
+      if (!response.body) throw new Error('语音服务未返回音频流')
+      await this.player.play(response.body)
+    }
+  }
+
+  /** 单句请求。错误收进返回值而不是抛出：预取是提前创建的，未消费的 rejection 会变成未处理异常。 */
+  private async requestAudio(text: string, signal: AbortSignal): Promise<AudioResult> {
+    try {
+      const response = await this.fetchImpl('/api/tts', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+        signal,
+      })
+      return { response }
+    } catch (error) {
+      return { error }
+    }
+  }
+
   private pump() {
     if (this.pumping) return
     this.pumping = true
@@ -107,17 +155,7 @@ export class SpeechQueue {
           await this.player.unlock()
           if (generation !== this.generation) continue
           this.events.onBlocked?.(false)
-          const response = await this.fetchImpl('/api/tts', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: entry.item.text }),
-            signal: controller.signal,
-          })
-          if (generation !== this.generation) continue
-          if (!response.ok) throw new Error(`语音服务 HTTP ${response.status}`)
-          if (!response.body) throw new Error('语音服务未返回音频流')
-          await this.player.play(response.body)
+          await this.speak(entry.item.text, generation, controller.signal)
           if (generation !== this.generation) continue
           succeeded = true
         } catch (err) {
