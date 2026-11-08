@@ -608,6 +608,31 @@ export interface OpcTrackRow {
   lastError: string
 }
 
+/** 常驻会话岗（depts.json standing_session=true）：同轨续用一条会话，换轨才新开 */
+export interface OpcSessionRow {
+  /** 岗位键，如 finance / health / courtonline */
+  dept: string
+  /** 岗位名（depts.json 的 name） */
+  name: string
+  engine: string
+  model: string
+  /** 登记的会话 id；还没跑过时为空 */
+  sessionId: string
+  /** 累计轮次（colleague-sessions.json 的 rounds） */
+  rounds: number
+  /** 最近一次续用时间 "YYYY-MM-DDTHH:mm:ss" */
+  updated: string
+  /** 会话文件在历史页的位置；文件未落盘时为空 */
+  sessionSource?: string
+  sessionProject?: string
+  /** 该岗当前在跑的工单（在办列表里命中时有值） */
+  runningTaskId?: string
+  runningTitle?: string
+  /** 该岗最近一单（台账） */
+  lastRunAt?: string
+  lastRunOk?: boolean
+}
+
 export interface OpcSnapshot {
   ts: number
   runs: OpcRun[]
@@ -616,6 +641,8 @@ export interface OpcSnapshot {
   /** 今日（本地日历日）跑单：总数与成功数 */
   today: { runs: number; ok: number }
   tracks: OpcTrackRow[]
+  /** 常驻会话岗现状（按最近续用时间倒序） */
+  sessions: OpcSessionRow[]
   warning?: string
 }
 

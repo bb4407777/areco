@@ -9,13 +9,15 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { OpcRun, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
+import type { OpcRun, OpcSessionRow, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
 
 const RUN_LIMIT = 200
 const TASK_LIMIT = 120
 const TAIL_BYTES = 2 * 1024 * 1024
 const LOG_TAIL_BYTES = 256 * 1024
 const ACTIVE_STATUS = ['ready', 'claimed', 'running', 'in_progress', 'blocked']
+/** 判定「该岗在跑」的状态（ready/blocked 是排队与阻断，不算在跑） */
+const ACTIVE_RUNNING = ['claimed', 'running', 'in_progress']
 
 function opcRoot(): string {
   return process.env.ARECO_OPC_ROOT || path.join(os.homedir(), 'skills', 'opc')
@@ -141,7 +143,9 @@ export function locateSession(sessionId: string, engine = ''): { source: string;
   if (!sessionId) return null
   const hit = sessionCache.get(sessionId)
   if (hit !== undefined) return hit
-  const roots = SESSION_ROOTS[engine] ?? Object.values(SESSION_ROOTS).flat()
+  // 先按引擎自己的根找，再兜底扫全部根（会话可能由换轨前的另一引擎开出，如财务旧会话落在 qoder-cn）
+  const primary = SESSION_ROOTS[engine] ?? []
+  const roots = primary.concat(Object.values(SESSION_ROOTS).flat().filter((r) => !primary.includes(r)))
   let found: { source: string; project: string } | null = null
   for (const root of roots) {
     let projects: string[] = []
@@ -338,6 +342,64 @@ function readTaskTitles(ids: string[]): Map<string, string> {
   return out
 }
 
+interface RawDept {
+  name?: string
+  standing_session?: boolean
+  status?: string
+  engine?: string
+  qoder_model?: string
+}
+
+interface RawSessionEntry {
+  session_id?: string
+  rounds?: number
+  engine?: string
+  updated?: string
+}
+
+/**
+ * 常驻会话岗：depts.json 里 standing_session=true 的岗位 + colleague-sessions.json 的会话登记。
+ * 会话文件位置按 id 直查（locateSession），供前端「打开对话记录」跳到历史页。
+ */
+function readSessions(runs: OpcRun[], tasks: OpcTaskRow[]): OpcSessionRow[] {
+  const depts = readJson<Record<string, RawDept>>(path.join(opcRoot(), 'config', 'depts.json')) ?? {}
+  const book = readJson<Record<string, RawSessionEntry>>(path.join(opcRoot(), 'data', 'colleague-sessions.json')) ?? {}
+  const rows: OpcSessionRow[] = []
+  for (const [dept, cfg] of Object.entries(depts)) {
+    if (!cfg || cfg.standing_session !== true) continue
+    const ent = book[dept] ?? {}
+    const sessionId = typeof ent.session_id === 'string' ? ent.session_id : ''
+    const engine = (typeof ent.engine === 'string' && ent.engine) || cfg.engine || ''
+    const ref = sessionId ? locateSession(sessionId, engine) : null
+    const running = tasks.find((t) => t.assignee === dept && ACTIVE_RUNNING.includes(t.status))
+    const last = runs.find((r) => r.dept === dept)
+    rows.push({
+      dept,
+      name: cfg.name || dept,
+      engine,
+      model: cfg.qoder_model ?? '',
+      sessionId,
+      rounds: Number(ent.rounds) || 0,
+      updated: typeof ent.updated === 'string' ? ent.updated : '',
+      sessionSource: ref?.source,
+      sessionProject: ref?.project,
+      runningTaskId: running?.id,
+      runningTitle: running?.title,
+      lastRunAt: last?.ts,
+      lastRunOk: last?.ok,
+    })
+  }
+  // 在跑的排前，其余按最近一单倒序（没跑过的沉底）
+  rows.sort(
+    (a, b) =>
+      Number(Boolean(b.runningTaskId)) - Number(Boolean(a.runningTaskId)) ||
+      (b.lastRunAt ?? '').localeCompare(a.lastRunAt ?? '') ||
+      (b.updated || '').localeCompare(a.updated || '') ||
+      a.dept.localeCompare(b.dept)
+  )
+  return rows
+}
+
 export function snapshot(): OpcSnapshot {
   const { runs, today, byTrack, warning: runWarn } = readRuns()
   const { tasks, counts, warning: taskWarn } = readTasks()
@@ -360,6 +422,7 @@ export function snapshot(): OpcSnapshot {
     counts,
     today,
     tracks: readTracks(byTrack),
+    sessions: readSessions(runs, tasks),
     warning: runWarn ?? taskWarn,
   }
 }

@@ -7,7 +7,15 @@ import { useRouter } from 'vue-router'
 import { NButton, NInput, NSwitch, useMessage } from 'naive-ui'
 import { api } from '../api'
 import { useUiStore } from '../stores/ui'
-import type { OpcRun, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
+import type {
+  OpcRun,
+  OpcSessionRow,
+  OpcSnapshot,
+  OpcTaskLog,
+  OpcTaskRow,
+  OpcTrackRow,
+  TranscriptMessage,
+} from '../../../shared/protocol'
 
 const message = useMessage()
 const ui = useUiStore()
@@ -20,7 +28,14 @@ const selectedId = ref<string | null>(null)
 const log = ref<OpcTaskLog | null>(null)
 const logLoading = ref(false)
 const logError = ref('')
+/** 常驻会话的对话记录（选中常驻会话时加载，展示尾部消息） */
+const transcript = ref<TranscriptMessage[] | null>(null)
+const transcriptLoading = ref(false)
+const transcriptError = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
+
+/** 常驻会话在列表里的选中 id 前缀，与工单 id 分开 */
+const SESS_PREFIX = 'sess:'
 
 const STATUS_TEXT: Record<string, string> = {
   ready: '待派',
@@ -52,6 +67,21 @@ const todayRuns = computed<OpcRun[]>(() => {
 const activeTasks = computed<OpcTaskRow[]>(() =>
   (snap.value?.tasks ?? []).filter((r) => hit(`${r.title}\n${r.assignee}\n${r.id}`))
 )
+
+/** 常驻会话岗（服务端按 depts.json 的 standing_session 汇总） */
+const sessions = computed<OpcSessionRow[]>(() =>
+  (snap.value?.sessions ?? []).filter((s) => hit(`${s.name}\n${s.dept}\n${s.lastRunAt ?? ''}`))
+)
+
+const selectedSession = computed<OpcSessionRow | null>(() => {
+  const id = selectedId.value
+  if (!id?.startsWith(SESS_PREFIX)) return null
+  const dept = id.slice(SESS_PREFIX.length)
+  return (snap.value?.sessions ?? []).find((s) => s.dept === dept) ?? null
+})
+
+/** 详情只展示会话尾部，完整对话点进历史页 */
+const transcriptTail = computed<TranscriptMessage[]>(() => (transcript.value ?? []).slice(-30))
 
 /** 今日跑单按 taskId 去重（同一单重跑只留最后一次） */
 function uniqRuns(rows: OpcRun[]): OpcRun[] {
@@ -91,7 +121,9 @@ const updatedAt = computed(() =>
 /** 选中项：先找在办工单，再找跑单 */
 const selectedTask = computed<OpcTaskRow | null>(() => (snap.value?.tasks ?? []).find((t) => t.id === selectedId.value) ?? null)
 const selectedRun = computed<OpcRun | null>(() => (snap.value?.runs ?? []).find((r) => r.taskId === selectedId.value) ?? null)
-const detailTitle = computed(() => selectedTask.value?.title || selectedRun.value?.title || selectedId.value || '')
+const detailTitle = computed(
+  () => selectedSession.value?.name || selectedTask.value?.title || selectedRun.value?.title || selectedId.value || ''
+)
 
 function fmtTime(ts: number): string {
   if (!ts) return '—'
@@ -138,6 +170,63 @@ async function loadLog(id: string): Promise<void> {
   }
 }
 
+/** 常驻会话的对话记录：按 session_id 定位落盘文件，读尾部消息 */
+async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
+  transcript.value = null
+  transcriptError.value = ''
+  if (!s) return
+  if (!s.sessionId) {
+    transcriptError.value = '还没有会话记录（该岗第一次接单时开新会话）'
+    return
+  }
+  if (!s.sessionSource || !s.sessionProject) {
+    transcriptError.value = '会话文件未落盘（可能已被清理）'
+    return
+  }
+  transcriptLoading.value = true
+  try {
+    const page = await api.get<{ messages: TranscriptMessage[] }>(
+      `/api/history/${s.sessionSource}/${s.sessionProject}/${s.sessionId}/transcript`
+    )
+    transcript.value = page.messages ?? []
+  } catch (e) {
+    transcriptError.value = (e as Error).message
+  } finally {
+    transcriptLoading.value = false
+  }
+}
+
+function selectSession(dept: string): void {
+  const id = `${SESS_PREFIX}${dept}`
+  if (selectedId.value !== id) selectedId.value = id
+  void loadTranscript(selectedSession.value)
+}
+
+/** 消息正文（工具轮没有文字时退化成工具名） */
+function msgText(m: TranscriptMessage): string {
+  const texts: string[] = []
+  for (const p of m.parts) if (p.kind === 'text' || p.kind === 'notice') texts.push(p.text)
+  if (texts.length) return clip(texts.join('\n').trim())
+  const tools = m.parts.flatMap((p) => (p.kind === 'tool_use' ? [p.name] : []))
+  return tools.length ? `〔工具〕${tools.join('、')}` : ''
+}
+
+function clip(text: string, max = 1200): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+function msgTime(m: TranscriptMessage): string {
+  return m.timestamp ? fmtTime(Date.parse(m.timestamp)) : ''
+}
+
+function openSessionRow(s: OpcSessionRow): void {
+  if (!s.sessionId || !s.sessionSource || !s.sessionProject) return
+  router.push({
+    path: `/history/${s.sessionSource}/${s.sessionProject}/${s.sessionId}`,
+    query: { title: s.name || s.dept },
+  })
+}
+
 /** 该单的引擎会话在历史页的位置（服务端按 session_id 查落盘文件所得） */
 const sessionTarget = computed(() => {
   const r = selectedRun.value
@@ -157,6 +246,8 @@ function openSession(): void {
 function select(id: string): void {
   if (selectedId.value === id) return
   selectedId.value = id
+  transcript.value = null
+  transcriptError.value = ''
   void loadLog(id)
 }
 
@@ -164,12 +255,22 @@ function back(): void {
   selectedId.value = null
   log.value = null
   logError.value = ''
+  transcript.value = null
+  transcriptError.value = ''
 }
 
 watch(selectedId, (id) => {
   // 自动刷新后选中项消失（单子已完成掉出在办列表）时，留在详情页不弹回
   if (id && !selectedTask.value && !selectedRun.value && snap.value) return
 })
+
+// 常驻会话续用了新的一轮（updated 变化）就跟着重载对话尾部
+watch(
+  () => selectedSession.value?.updated,
+  () => {
+    if (selectedSession.value) void loadTranscript(selectedSession.value)
+  }
+)
 
 function restartTimer(): void {
   if (timer) clearInterval(timer)
@@ -242,6 +343,29 @@ onUnmounted(() => {
             </button>
           </div>
 
+          <div v-if="sessions.length" class="group">
+            <div class="group-head">常驻会话<span class="group-n">{{ sessions.length }}</span></div>
+            <button
+              v-for="s in sessions"
+              :key="s.dept"
+              type="button"
+              class="item"
+              :class="{ active: selectedId === SESS_PREFIX + s.dept }"
+              @click="selectSession(s.dept)"
+            >
+              <div class="item-top">
+                <span class="item-title">{{ s.name }}</span>
+                <span class="item-time">{{ s.updated ? fmtTime(Date.parse(s.updated)) : '未开始' }}</span>
+              </div>
+              <div class="item-meta">
+                <span class="tag" :class="s.runningTaskId ? 'running' : 'ok'">{{ s.runningTaskId ? '在跑' : '常驻' }}</span>
+                <span class="item-dept">{{ s.dept }}</span>
+                <span>第 {{ s.rounds }} 轮</span>
+                <span v-if="s.lastRunAt" class="item-track">最近 {{ fmtTime(Date.parse(s.lastRunAt)) }}</span>
+              </div>
+            </button>
+          </div>
+
           <div v-if="doneRuns.length" class="group">
             <div class="group-head">今日完成<span class="group-n">{{ doneRuns.length }}</span></div>
             <button
@@ -303,9 +427,56 @@ onUnmounted(() => {
           <h2 class="detail-title">{{ detailTitle }}</h2>
           <span v-if="selectedTask" class="tag" :class="selectedTask.status">{{ STATUS_TEXT[selectedTask.status] ?? selectedTask.status }}</span>
           <span v-else-if="selectedRun" class="tag" :class="selectedRun.ok ? 'ok' : 'bad'">{{ selectedRun.ok ? '成' : selectedRun.errKind || '败' }}</span>
-          <span class="detail-id">{{ selectedId }}</span>
+          <span v-else-if="selectedSession" class="tag" :class="selectedSession.runningTaskId ? 'running' : 'ok'">
+            {{ selectedSession.runningTaskId ? '在跑' : '常驻' }}
+          </span>
+          <span class="detail-id">{{ selectedSession ? selectedSession.dept : selectedId }}</span>
         </div>
 
+        <!-- 常驻会话：岗位台账 + 对话尾部 -->
+        <template v-if="selectedSession">
+          <div class="kv">
+            <div class="kv-row"><span class="k">岗位</span><span class="v">{{ selectedSession.name }} <span class="muted">{{ selectedSession.dept }}</span></span></div>
+            <div class="kv-row"><span class="k">会话</span><span class="v mono">{{ selectedSession.sessionId || '—' }}</span></div>
+            <div class="kv-row"><span class="k">轮次</span><span class="v">第 {{ selectedSession.rounds }} 轮</span></div>
+            <div class="kv-row"><span class="k">最近</span><span class="v">{{ selectedSession.updated ? fmtTime(Date.parse(selectedSession.updated)) : '—' }}</span></div>
+            <div class="kv-row"><span class="k">引擎</span><span class="v mono">{{ selectedSession.engine }}{{ selectedSession.model ? ` · ${selectedSession.model}` : '' }}</span></div>
+            <div v-if="selectedSession.runningTaskId" class="kv-row">
+              <span class="k">在跑</span><span class="v">{{ selectedSession.runningTitle || selectedSession.runningTaskId }}</span>
+            </div>
+            <div v-if="selectedSession.lastRunAt" class="kv-row">
+              <span class="k">最近一单</span>
+              <span class="v">{{ fmtTime(Date.parse(selectedSession.lastRunAt)) }} · {{ selectedSession.lastRunOk ? '成' : '败' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="k">完整对话</span>
+              <span class="v">
+                <button v-if="selectedSession.sessionSource" type="button" class="link" @click="openSessionRow(selectedSession)">打开对话记录 ›</button>
+                <span v-else class="muted">会话文件未落盘</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="log-head">
+            <span>对话记录</span>
+            <span v-if="transcript" class="log-meta">尾部 {{ transcriptTail.length }} 条 / 共 {{ transcript.length }} 条</span>
+          </div>
+          <div class="log-wrap">
+            <div v-if="transcriptLoading" class="empty">读取中…</div>
+            <div v-else-if="transcriptTail.length" class="chat">
+              <div v-for="(m, i) in transcriptTail" :key="i" class="msg" :class="m.role">
+                <div class="msg-head">
+                  <span class="msg-role">{{ m.role === 'user' ? '指令' : '回复' }}</span>
+                  <span class="msg-time">{{ msgTime(m) }}</span>
+                </div>
+                <div class="msg-text">{{ msgText(m) }}</div>
+              </div>
+            </div>
+            <div v-else class="empty">{{ transcriptError || '没有对话记录' }}</div>
+          </div>
+        </template>
+
+        <template v-else>
         <div class="kv">
           <template v-if="selectedTask">
             <div class="kv-row"><span class="k">岗位</span><span class="v">{{ selectedTask.assignee || '—' }}</span></div>
@@ -342,6 +513,7 @@ onUnmounted(() => {
           <pre v-else-if="log" class="log-body">{{ log.lines.join('\n') }}</pre>
           <div v-else class="empty">{{ logError || '没有日志' }}</div>
         </div>
+        </template>
       </template>
 
       <!-- 空态：轨道健康 + 今日概览 -->
@@ -652,6 +824,43 @@ onUnmounted(() => {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+}
+/* 常驻会话：对话记录 */
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.msg {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+}
+.msg.user {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.msg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 3px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.msg-role {
+  color: var(--muted);
+}
+.msg-time {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.msg-text {
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
 }
 .overview {
   flex: 1;
