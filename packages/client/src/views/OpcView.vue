@@ -264,11 +264,11 @@ watch(selectedId, (id) => {
   if (id && !selectedTask.value && !selectedRun.value && snap.value) return
 })
 
-// 常驻会话续用了新的一轮（updated 变化）就跟着重载对话尾部
+// 常驻会话续用了新的一轮（updated 变化）就跟着重载对话尾部；首次点开由 selectSession 自己加载
 watch(
   () => selectedSession.value?.updated,
   () => {
-    if (selectedSession.value) void loadTranscript(selectedSession.value)
+    if (selectedSession.value && transcript.value) void loadTranscript(selectedSession.value)
   }
 )
 
