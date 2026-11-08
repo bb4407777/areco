@@ -2,14 +2,16 @@
 // OPC 后台页（2026-11-08 改版）：与「会话」「历史」同构——左侧列表、右侧详情。
 // 数据源全在服务端 services/opc.ts（只读 ~/skills/opc 与 ~/.hermes/kanban/logs）；
 // 这里只展示与按需拉单张工单的日志尾部，不提供任何写操作。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NInput, NSwitch, useMessage } from 'naive-ui'
+import ChatMessage from '../components/ChatMessage.vue'
 import { api } from '../api'
 import { useUiStore } from '../stores/ui'
 import type {
   OpcRun,
   OpcSessionRow,
+  OpcSessionSendResult,
   OpcSnapshot,
   OpcTaskLog,
   OpcTaskRow,
@@ -32,6 +34,13 @@ const logError = ref('')
 const transcript = ref<TranscriptMessage[] | null>(null)
 const transcriptLoading = ref(false)
 const transcriptError = ref('')
+/** 对话输入（按岗存草稿，切走再回来不丢） */
+const draft = ref('')
+const drafts: Record<string, string> = {}
+const sending = ref(false)
+/** 刚发出、还没进会话记录的那一句（界面上先占一行，跑完被真实消息替换） */
+const pendingText = ref('')
+const chatEl = ref<HTMLElement | null>(null)
 let timer: ReturnType<typeof setInterval> | undefined
 
 /** 常驻会话在列表里的选中 id 前缀，与工单 id 分开 */
@@ -189,6 +198,12 @@ async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
       `/api/history/${s.sessionSource}/${s.sessionProject}/${s.sessionId}/transcript`
     )
     transcript.value = page.messages ?? []
+    // 刚发出的那句已经进了会话记录 → 撤掉占位行
+    if (pendingText.value && transcript.value.some((m) => m.role === 'user' && msgTextOf(m).includes(pendingText.value))) {
+      pendingText.value = ''
+    }
+    await nextTick()
+    if (chatEl.value) chatEl.value.scrollTop = chatEl.value.scrollHeight
   } catch (e) {
     transcriptError.value = (e as Error).message
   } finally {
@@ -196,28 +211,63 @@ async function loadTranscript(s: OpcSessionRow | null): Promise<void> {
   }
 }
 
+function msgTextOf(m: TranscriptMessage): string {
+  return m.parts.flatMap((p) => (p.kind === 'text' || p.kind === 'notice' ? [p.text] : [])).join('\n')
+}
+
+function draftOf(dept: string): string {
+  return drafts[dept] ?? ''
+}
+
+watch(draft, (v) => {
+  const s = selectedSession.value
+  if (s) drafts[s.dept] = v
+})
+
 function selectSession(dept: string): void {
   const id = `${SESS_PREFIX}${dept}`
   if (selectedId.value !== id) selectedId.value = id
+  draft.value = draftOf(dept)
   void loadTranscript(selectedSession.value)
 }
 
-/** 消息正文（工具轮没有文字时退化成工具名） */
-function msgText(m: TranscriptMessage): string {
-  const texts: string[] = []
-  for (const p of m.parts) if (p.kind === 'text' || p.kind === 'notice') texts.push(p.text)
-  if (texts.length) return clip(texts.join('\n').trim())
-  const tools = m.parts.flatMap((p) => (p.kind === 'tool_use' ? [p.name] : []))
-  return tools.length ? `〔工具〕${tools.join('、')}` : ''
+/** 发一句话：入看板派给该岗，worker 用同一条常驻会话续聊（与 areco 对话栏同一套手感） */
+async function sendMessage(): Promise<void> {
+  const s = selectedSession.value
+  const text = draft.value.trim()
+  if (!s || !text || sending.value) return
+  sending.value = true
+  try {
+    const res = await api.post<OpcSessionSendResult>(`/api/opc/sessions/${s.dept}/message`, { text })
+    draft.value = ''
+    pendingText.value = text
+    message.success(res.taskId ? `已派给${s.name}（${res.taskId}），跑完自动刷新` : `已派给${s.name}`)
+    await refresh()
+  } catch (e) {
+    message.error((e as Error).message)
+  } finally {
+    sending.value = false
+  }
 }
 
-function clip(text: string, max = 1200): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text
+/** 首行取标题：与 PromptBar 的「Enter 发送、Shift+Enter 换行」一致 */
+function onComposerKeydown(e: KeyboardEvent): void {
+  if (e.isComposing) return
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    void sendMessage()
+  }
 }
 
-function msgTime(m: TranscriptMessage): string {
-  return m.timestamp ? fmtTime(Date.parse(m.timestamp)) : ''
+/** textarea 自增高（同 PromptBar 手感，封顶 160px 后内部滚动） */
+const composerEl = ref<HTMLTextAreaElement | null>(null)
+function autoGrow(): void {
+  const el = composerEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 160)}px`
 }
+watch(draft, () => nextTick(autoGrow))
 
 function openSessionRow(s: OpcSessionRow): void {
   if (!s.sessionId || !s.sessionSource || !s.sessionProject) return
@@ -248,6 +298,7 @@ function select(id: string): void {
   selectedId.value = id
   transcript.value = null
   transcriptError.value = ''
+  pendingText.value = ''
   void loadLog(id)
 }
 
@@ -444,6 +495,9 @@ onUnmounted(() => {
             <div v-if="selectedSession.runningTaskId" class="kv-row">
               <span class="k">在跑</span><span class="v">{{ selectedSession.runningTitle || selectedSession.runningTaskId }}</span>
             </div>
+            <div v-if="selectedSession.queuedTaskId" class="kv-row">
+              <span class="k">排队</span><span class="v">{{ selectedSession.queuedTitle || selectedSession.queuedTaskId }}</span>
+            </div>
             <div v-if="selectedSession.lastRunAt" class="kv-row">
               <span class="k">最近一单</span>
               <span class="v">{{ fmtTime(Date.parse(selectedSession.lastRunAt)) }} · {{ selectedSession.lastRunOk ? '成' : '败' }}</span>
@@ -461,18 +515,30 @@ onUnmounted(() => {
             <span>对话记录</span>
             <span v-if="transcript" class="log-meta">尾部 {{ transcriptTail.length }} 条 / 共 {{ transcript.length }} 条</span>
           </div>
-          <div class="log-wrap">
+          <div ref="chatEl" class="log-wrap chat-wrap">
             <div v-if="transcriptLoading" class="empty">读取中…</div>
-            <div v-else-if="transcriptTail.length" class="chat">
-              <div v-for="(m, i) in transcriptTail" :key="i" class="msg" :class="m.role">
-                <div class="msg-head">
-                  <span class="msg-role">{{ m.role === 'user' ? '指令' : '回复' }}</span>
-                  <span class="msg-time">{{ msgTime(m) }}</span>
-                </div>
-                <div class="msg-text">{{ msgText(m) }}</div>
+            <div v-else-if="transcriptTail.length || pendingText" class="chat">
+              <ChatMessage v-for="(m, i) in transcriptTail" :key="i" :message="m" />
+              <div v-if="pendingText" class="pending">
+                <span class="pending-tag">已发出</span>
+                <span class="pending-text">{{ pendingText }}</span>
               </div>
             </div>
             <div v-else class="empty">{{ transcriptError || '没有对话记录' }}</div>
+          </div>
+
+          <div class="composer">
+            <textarea
+              ref="composerEl"
+              v-model="draft"
+              class="composer-input"
+              rows="1"
+              :placeholder="`对${selectedSession.name}说点什么…（Enter 发送，Shift+Enter 换行）`"
+              @keydown="onComposerKeydown"
+            />
+            <button type="button" class="send" :disabled="sending || !draft.trim()" @click="sendMessage">
+              {{ sending ? '发送中…' : '发送' }}
+            </button>
           </div>
         </template>
 
@@ -825,42 +891,77 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-all;
 }
-/* 常驻会话：对话记录 */
+/* 常驻会话：对话记录（气泡用 ChatMessage，与对话栏同一套版式） */
+.chat-wrap {
+  margin-bottom: 8px;
+}
 .chat {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 12px;
 }
-.msg {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 9px;
-}
-.msg.user {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-}
-.msg-head {
+.pending {
   display: flex;
-  align-items: baseline;
   gap: 8px;
-  margin-bottom: 3px;
-  font-size: 10.5px;
-  color: var(--faint);
-}
-.msg-role {
+  align-items: flex-start;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
   color: var(--muted);
 }
-.msg-time {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
+.pending-tag {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--accent);
 }
-.msg-text {
-  font-size: 11.5px;
-  line-height: 1.55;
+.pending-text {
+  flex: 1;
+  min-width: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 18px 14px;
+}
+.composer-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel);
   color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  outline: none;
+}
+.composer-input:focus {
+  border-color: var(--accent);
+}
+.send {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.send:disabled {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--faint);
+  cursor: not-allowed;
 }
 .overview {
   flex: 1;

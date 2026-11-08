@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import type { OpcRun, OpcSessionRow, OpcSnapshot, OpcTaskLog, OpcTaskRow, OpcTrackRow } from '../../../shared/protocol'
 
@@ -372,6 +373,7 @@ function readSessions(runs: OpcRun[], tasks: OpcTaskRow[]): OpcSessionRow[] {
     const engine = (typeof ent.engine === 'string' && ent.engine) || cfg.engine || ''
     const ref = sessionId ? locateSession(sessionId, engine) : null
     const running = tasks.find((t) => t.assignee === dept && ACTIVE_RUNNING.includes(t.status))
+    const queued = tasks.find((t) => t.assignee === dept && t.status === 'ready')
     const last = runs.find((r) => r.dept === dept)
     rows.push({
       dept,
@@ -385,19 +387,58 @@ function readSessions(runs: OpcRun[], tasks: OpcTaskRow[]): OpcSessionRow[] {
       sessionProject: ref?.project,
       runningTaskId: running?.id,
       runningTitle: running?.title,
+      queuedTaskId: queued?.id,
+      queuedTitle: queued?.title,
       lastRunAt: last?.ts,
       lastRunOk: last?.ok,
     })
   }
-  // 在跑的排前，其余按最近一单倒序（没跑过的沉底）
+  // 在跑／排队在前，其余按最近一单倒序（没跑过的沉底）
+  const live = (s: OpcSessionRow) => Number(Boolean(s.runningTaskId)) * 2 + Number(Boolean(s.queuedTaskId))
   rows.sort(
     (a, b) =>
-      Number(Boolean(b.runningTaskId)) - Number(Boolean(a.runningTaskId)) ||
+      live(b) - live(a) ||
       (b.lastRunAt ?? '').localeCompare(a.lastRunAt ?? '') ||
       (b.updated || '').localeCompare(a.updated || '') ||
       a.dept.localeCompare(b.dept)
   )
   return rows
+}
+
+const OPC_PY = process.env.ARECO_OPC_PY || '/opt/homebrew/bin/python3.13'
+
+/**
+ * 常驻会话对话：把一句话当工单派给该岗，worker 用同一条常驻会话续聊（同轨续用、换轨新开）。
+ * 走 chat-dispatch.py 这个唯一投递口——principal_only 岗（网上立案）只有带 --principal 才收。
+ */
+export function sendSessionMessage(dept: string, text: string): { taskId: string; title: string; receipt: string } {
+  const depts = readJson<Record<string, RawDept>>(path.join(opcRoot(), 'config', 'depts.json')) ?? {}
+  const cfg = depts[dept]
+  if (!cfg) throw new Error(`没有这个岗位：${dept}`)
+  if (cfg.standing_session !== true) throw new Error(`「${cfg.name || dept}」不是常驻会话岗`)
+  const bodyText = text.trim()
+  if (!bodyText) throw new Error('内容不能为空')
+  if (bodyText.length > 8000) throw new Error('内容过长（上限 8000 字）')
+
+  const firstLine = bodyText.split('\n').find((l) => l.trim())?.trim() ?? ''
+  const title = firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine
+  const body = `〔常驻会话对话〕高律师在 OPC 页面直接发来的一句话，按本岗职责直接办或直接答，不要另开话题。\n\n${bodyText}`
+  const script = path.join(opcRoot(), 'scripts', 'chat-dispatch.py')
+  if (!fs.existsSync(script)) throw new Error(`派单口不存在：${script}`)
+
+  const r = spawnSync(OPC_PY, [script, '--assignee', dept, '--title', title, '--stdin', '--principal'], {
+    input: body,
+    encoding: 'utf8',
+    timeout: 90_000,
+    cwd: opcRoot(),
+  })
+  if (r.error) throw new Error(`派单失败：${r.error.message}`)
+  if (r.status !== 0) {
+    const msg = (r.stderr || r.stdout || '').trim().split('\n').slice(-3).join(' ')
+    throw new Error(msg || `派单失败（退出码 ${r.status}）`)
+  }
+  const m = /已入队\s+(t_[A-Za-z0-9]+)/.exec(r.stdout ?? '')
+  return { taskId: m?.[1] ?? '', title, receipt: (r.stdout ?? '').trim() }
 }
 
 export function snapshot(): OpcSnapshot {

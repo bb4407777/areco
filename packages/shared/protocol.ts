@@ -628,6 +628,9 @@ export interface OpcSessionRow {
   /** 该岗当前在跑的工单（在办列表里命中时有值） */
   runningTaskId?: string
   runningTitle?: string
+  /** 该岗排队中的工单（同岗串行，前单未跑完时） */
+  queuedTaskId?: string
+  queuedTitle?: string
   /** 该岗最近一单（台账） */
   lastRunAt?: string
   lastRunOk?: boolean
@@ -652,4 +655,14 @@ export interface OpcTaskLog {
   lines: string[]
   /** 日志超过读取窗口，lines 只是尾部 */
   truncated: boolean
+}
+
+/** 常驻会话发一句话：入看板派给该岗，worker 用同一条会话续聊 */
+export interface OpcSessionSendResult {
+  /** 新入队的工单 id */
+  taskId: string
+  /** 工单标题（取消息首行） */
+  title: string
+  /** chat-dispatch 回执原文（在途数／排队位次） */
+  receipt: string
 }
