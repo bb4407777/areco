@@ -2,7 +2,8 @@
 // offset 单位 = UTF-16 code unit（node-pty onData 已是完整解码 string，两端计数天然一致）。
 import type { TrafficState } from './traffic'
 
-export const PROTOCOL_VERSION = 1
+// 2 = sendline 带回执（sendline-ack）与 ping/pong 心跳
+export const PROTOCOL_VERSION = 2
 
 // 流控水位（字符数）
 export const FLOW_HIGH_WATER = 256 * 1024

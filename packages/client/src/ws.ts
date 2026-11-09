@@ -27,6 +27,8 @@ class WsClient {
   private pendingSends = new Map<string, AckWaiter>()
   private pingTimer: number | null = null
   private lastPongAt = Date.now()
+  /** 服务端是否会回 sendline-ack：init 里报协议版本 ≥2 才算，旧服务端不读回执（否则每条都误判没送到） */
+  private ackSupported = false
 
   connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
@@ -48,6 +50,9 @@ class WsClient {
       } catch {
         return
       }
+      if (msg.type === 'init') {
+        this.ackSupported = (msg.protocolVersion ?? 0) >= 2
+      }
       if (msg.type === 'pong') {
         this.lastPongAt = Date.now()
         return
@@ -63,6 +68,7 @@ class WsClient {
       // 不得清掉新连接引用（否则 send 全静默失败、旧连接成孤儿）
       if (this.ws !== ws) return
       this.connected.value = false
+      this.ackSupported = false
       this.ws = null
       this.stopPing()
       // 连接没了，等回执的一律判没送到，调用方好把文字放回输入框
@@ -95,6 +101,8 @@ class WsClient {
   /** 发一句话并等服务端回执：true = 服务端确实收下；false = 没送到（连接断/回执超时），调用方留着原文 */
   sendline(sessionId: string, text: string): Promise<boolean> {
     if (this.ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false)
+    // 旧服务端（协议 <2）不认 id、不回执：按老路子发出即算成功，免得每条都误报「没送出去」
+    if (!this.ackSupported) return Promise.resolve(this.send({ type: 'sendline', sessionId, text }))
     const id = `${Date.now().toString(36)}-${++this.seq}`
     return new Promise<boolean>((resolve) => {
       const timer = window.setTimeout(() => {
@@ -167,6 +175,7 @@ class WsClient {
     const old = this.ws
     this.ws = null
     this.connected.value = false
+    this.ackSupported = false
     this.stopPing()
     this.settleAll(false)
     if (old) {

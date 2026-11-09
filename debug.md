@@ -157,3 +157,10 @@ iOS 上从相册选图会离开 WebView，WS 被系统掐断；回来时 `readyS
   45s 无 pong 认定假连接；`reconnectIfStale()` 供回前台时用。
 - `PromptBar.vue`：等回执才清输入框；没送到就留着原文并提示「再按一次」。
 - `main.ts`：visible／pageshow／online 改走 `reconnectIfStale()`。
+
+### 追加（同日 17:42）：新前端 + 旧服务端 → 每条都误报「没送出去」
+
+8790 没重启（进程 17:28 起、bundle 17:39 才构建），服务端不会回 `sendline-ack`；
+新前端等 8s 超时，于是明明送达也弹「没送出去」。修法：`PROTOCOL_VERSION` 升到 2，
+客户端从 `init.protocolVersion` 判断——低于 2 就退回老的「发出即成功」，不做回执判定。
+之后两端版本必须同时更新（客户端缓存旧版则仍按老办法，不会误报）。
