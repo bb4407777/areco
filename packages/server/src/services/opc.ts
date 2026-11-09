@@ -71,6 +71,8 @@ interface RawTrack {
   model?: string
   label?: string
   surface?: string
+  /** 每日放行点 "HH:MM"（积分按日发放的轨）：该时刻前整轨不派单 */
+  daily_open?: string
 }
 
 interface RawTracksFile {
@@ -209,6 +211,15 @@ function readRuns(): { runs: OpcRun[]; today: { runs: number; ok: number }; byTr
   return { runs: all.reverse().slice(0, RUN_LIMIT), today: { runs: stats.runs, ok: stats.ok }, byTrack: stats.byTrack }
 }
 
+function dailyOpenAt(def: RawTrack, now: number): number {
+  const hm = String(def.daily_open ?? '').trim()
+  if (!hm) return 0
+  const [h, m] = hm.split(':').map(Number)
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return 0
+  const d = new Date(now)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0, 0).getTime()
+}
+
 function readTracks(usedToday: Record<string, number> = {}): OpcTrackRow[] {
   const file = readJson<RawTracksFile>(path.join(opcRoot(), 'config', 'tracks.json'))
   const health = readJson<Record<string, RawTrackHealth>>(path.join(opcRoot(), 'data', 'track-health.json')) ?? {}
@@ -221,12 +232,15 @@ function readTracks(usedToday: Record<string, number> = {}): OpcTrackRow[] {
     const h = health[id]
     const cooldownUntil = Number(h?.cooldown_until) || 0
     const lastErrorKind = h?.last_error_kind ?? ''
+    // 状态口径与调度器 lib/track_pool.py 对齐：先看每日放行点，再看冷却是否到期；
+    // 冷却过了就是 ok，last_error_kind 只是上次错误的历史（不清它，但不再据此判死）。
+    const openAt = dailyOpenAt(def, now)
     const status = !h
       ? 'missing'
-      : cooldownUntil * 1000 > now
-        ? 'cooldown'
-        : lastErrorKind
-          ? 'error'
+      : openAt > now
+        ? 'closed'
+        : cooldownUntil * 1000 > now
+          ? 'cooldown'
           : 'ok'
     return {
       id,
@@ -238,7 +252,7 @@ function readTracks(usedToday: Record<string, number> = {}): OpcTrackRow[] {
       usedToday: usedToday[id] ?? 0,
       fallback: Number(h?.fallback) || 0,
       failures: Number(h?.consecutive_failures) || 0,
-      cooldownUntil,
+      cooldownUntil: status === 'closed' ? openAt / 1000 : cooldownUntil,
       status,
       lastProbe: h?.last_probe ?? '',
       lastErrorKind,

@@ -203,11 +203,14 @@ function fmtDur(sec: number): string {
 }
 
 function trackState(t: OpcTrackRow): string {
+  if (t.status === 'closed') {
+    const left = Math.max(0, Math.round(t.cooldownUntil - Date.now() / 1000))
+    return `未到放行点 ${fmtDur(left)}`
+  }
   if (t.status === 'cooldown') {
     const left = Math.max(0, Math.round(t.cooldownUntil - Date.now() / 1000))
-    return `冷却 ${left}s`
+    return `冷却 ${fmtDur(left)}`
   }
-  if (t.status === 'error') return t.lastErrorKind || '异常'
   if (t.status === 'missing') return '未探测'
   return '正常'
 }
@@ -752,7 +755,7 @@ onUnmounted(() => {
             :key="t.id"
             class="track"
             :class="t.status"
-            :title="`模型 ${t.model || '账户默认'}\n冷却至 ${t.cooldownUntil ? new Date(t.cooldownUntil * 1000).toLocaleString('zh-CN') : '—'}\n最近错误 ${t.lastError || '无'}`"
+            :title="`模型 ${t.model || '账户默认'}\n${t.status === 'closed' ? '放行点' : '冷却至'} ${t.cooldownUntil ? new Date(t.cooldownUntil * 1000).toLocaleString('zh-CN') : '—'}\n最近错误 ${t.lastError || '无'}`"
           >
             <span class="track-name">{{ t.id }}</span>
             <span class="track-model mono">{{ t.model || '账户默认' }}</span>
@@ -835,7 +838,7 @@ onUnmounted(() => {
 .chip.cooldown {
   border-color: #e8a33d;
 }
-.chip.error,
+.chip.closed,
 .chip.missing {
   color: var(--faint);
 }
@@ -1170,7 +1173,7 @@ onUnmounted(() => {
 .track.cooldown {
   border-color: #e8a33d;
 }
-.track.error,
+.track.closed,
 .track.missing {
   color: var(--faint);
 }

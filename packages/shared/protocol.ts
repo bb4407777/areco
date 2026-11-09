@@ -587,7 +587,7 @@ export interface OpcTaskRow {
   hasLog: boolean
 }
 
-export type OpcTrackStatus = 'ok' | 'cooldown' | 'error' | 'missing'
+export type OpcTrackStatus = 'ok' | 'closed' | 'cooldown' | 'missing'
 
 export interface OpcTrackRow {
   id: string

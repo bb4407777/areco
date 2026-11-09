@@ -52,7 +52,7 @@ function fixture(): { root: string; logs: string } {
   fs.writeFileSync(
     path.join(root, 'data', 'track-health.json'),
     JSON.stringify({
-      'codebuddy-ds': { used: 9, fallback: 1, last_error_kind: '' },
+      'codebuddy-ds': { used: 9, fallback: 1, last_error_kind: 'quota', cooldown_until: 1 },
       'qoder-cn': { used: 3, consecutive_failures: 2, last_error_kind: 'quota', cooldown_until: 9999999999 },
     })
   )
