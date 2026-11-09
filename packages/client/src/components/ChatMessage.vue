@@ -132,11 +132,10 @@ function toggleOption(blockIdx: number, label: string) {
   const next = cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label]
   selected.value = { ...selected.value, [blockIdx]: next }
 }
-function sendAnswer(text: string) {
+async function sendAnswer(text: string) {
   if (!props.sessionId || !text.trim()) return
-  if (!wsClient.send({ type: 'sendline', sessionId: props.sessionId, text })) {
-    toast.warning('连接已断开，正在重连——文字已保留，稍后再试')
-    wsClient.reconnectNow()
+  if (!(await wsClient.sendline(props.sessionId, text))) {
+    toast.warning('这条没送出去——连接已重置，请再点一次')
   }
 }
 function submitMulti(blockIdx: number) {

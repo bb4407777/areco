@@ -88,3 +88,72 @@ kimi -S session_<新uuid>  →  error: failed to start shell: Session "..." not 
 10. **会话 id 前缀查日志**：areco session.id（uuid）≠ agent 的原生文件 id。日志里 `[locate] <前缀>`
     是 areco id；原生文件名（codebuddy `<uuid>.jsonl`、kimi `session_<uuid>/wire.jsonl`）是 agent 自己的 id，
     两者靠 locate 绑定关联，别混。
+
+---
+
+## 2026-11-09 · 恢复会话后消息发不出去（回车变换行）
+
+### 现象
+
+areco 里 WorkBuddy/codebuddy 会话退出后自动恢复，恢复期间发出去的消息停在输入框里
+（或带一个空行），命令一直不提交；已有的「看输入框、尾字不在就补按回车」的复看机制
+（`submitUntilAccepted`）没救回来。
+
+### 实测（pty + @xterm/headless，probe 脚本 /tmp/probe*.cjs）
+
+- 恢复（`codebuddy --resume`）首屏重放期间写入的正文**整段被 TUI 丢掉**：1.5s 时写入，
+  3s 看屏幕输入框仍是空的，正文+回车并帧、分开写都一样。4s 后按回车也没用——消息已经没了。
+- 输入框形态：正文行 `> text`，上下一行是 `────` 分隔线，下面 `? for shortcuts  ← for agents`。
+  自动恢复重放到首屏画完约 8–12s（信任页更久），比 `MIN_BOOT_MS`（8s）和旧 `ENTER_MAX_WAIT_MS`（8s）都长。
+
+### 根因
+
+1. 恢复期间正文写在输入框还不存在的时候 → 被丢；旧逻辑只在「框里有尾字」时才按，**从不在
+   正文丢失后补写**，5 分钟窗口空转；
+2. 等满上限仍无条件按一次回车，且之后每秒按一次，撞上 TUI 重绘残帧就并成粘贴 → 换行，
+   正是用户说的「成为换行」。
+
+### 修复（`packages/server/src/services/session.ts`）
+
+- `sendline` 记录写入时输入框是否已存在（`boxAtWrite`）；
+- `submitUntilAccepted(snippet, body, boxAbsentAtWrite)`：
+  - 认不出输入框（首屏/信任页）→ **不按回车**（按了就是换行），到 20s 才给非 TUI harness 盲按兜底；
+  - 框空且从没见过尾字、写入时框也没画出来 → 判定正文被丢，补写（最多 5 次，间隔 3s）；
+  - 尾字还在框里 → 补按回车，但要求 pty 安静 ≥250ms（`SUBMIT_QUIET_MS`）才按，避开重绘合帧；
+  - 5 分钟仍不成功时把尾屏 12 行打进日志，便于下次直接看现场。
+
+### 仍未解（下次遇同类先看这里）
+
+- 恢复首屏多久画完与历史长度正相关，20s 盲按窗是经验值；真遇到更长的恢复，看
+  `[submit] 5 分钟仍未提交` 日志里的尾屏再调。
+
+---
+
+## 2026-11-09 · 傍晚那条带两张图的回复没到（又一次「发了没反应」）
+
+### 现象
+
+17:30、17:31 分别上传 IMG_0123／IMG_0124，回车发送——界面没报错，服务端**什么都没收到**；
+17:35 手打重发同一条，正常送达（日志 `sendline 触发自动恢复`）。
+
+### 定位（日志时间 UTC，本地要 +8）
+
+- 17:28:41 服务重启，17:29:31 手机（192.168.11.86）重连成功，17:32:10 这条连接关闭。
+- 17:30–17:33 服务端**零 sendline 帧**：既没有「在跑直投」也没有「需恢复」——不是注入失败，
+  是消息帧根本没到。同一时段 HTTP 上传是通的（两个文件都落在 data/uploads/）。
+- 17:35 那条能到，说明服务端代码路径正常。
+
+### 根因
+
+iOS 上从相册选图会离开 WebView，WS 被系统掐断；回来时 `readyState` 仍是 OPEN（TCP 半死），
+`wsClient.send()` 返回 true——文字被吞，界面无任何提示。旧 `reconnectNow()` 见 OPEN 就 return，
+连不上也不重连；服务端心跳要 60s 才回收，这段窗口里发什么丢什么。
+
+### 修复
+
+- 协议：`sendline` 带 `id`，服务端收下即回 `sendline-ack`；新增 `ping`／`pong`。
+- 服务端 `gateway.ts`：每条 sendline 打一行日志（含字数、在跑/需恢复），两条路径都回 ack。
+- 客户端 `ws.ts`：`sendline()` 返回 Promise，8s 没回执判未送达并强断重连；20s 一次 ping，
+  45s 无 pong 认定假连接；`reconnectIfStale()` 供回前台时用。
+- `PromptBar.vue`：等回执才清输入框；没送到就留着原文并提示「再按一次」。
+- `main.ts`：visible／pageshow／online 改走 `reconnectIfStale()`。

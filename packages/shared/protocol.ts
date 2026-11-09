@@ -191,6 +191,12 @@ export interface SendlineMsg {
   type: 'sendline'
   sessionId: string
   text: string
+  /** 客户端请求号：服务端收下即回 sendline-ack，客户端据此判「真的送到了」，没 ack 就把文字放回输入框 */
+  id?: string
+}
+/** 心跳：客户端每 20s 打一次，用来识别「socket 看着 OPEN、其实早就断了」的假连接 */
+export interface PingMsg {
+  type: 'ping'
 }
 export interface ResizeMsg {
   type: 'resize'
@@ -205,7 +211,7 @@ export interface AckMsg {
   offset: number
 }
 
-export type ClientMsg = AttachMsg | DetachMsg | InputMsg | SendlineMsg | ResizeMsg | AckMsg
+export type ClientMsg = AttachMsg | DetachMsg | InputMsg | SendlineMsg | ResizeMsg | AckMsg | PingMsg
 
 // ---- 服务端 → 客户端 ----
 
@@ -250,6 +256,15 @@ export interface ErrorMsg {
   message: string
   sessionId?: string
 }
+/** sendline 已被服务端收下（不是「已注入 pty」，是「帧到了、排进队列了」） */
+export interface SendlineAckMsg {
+  type: 'sendline-ack'
+  sessionId: string
+  id?: string
+}
+export interface PongMsg {
+  type: 'pong'
+}
 
 export interface RoomMessageMsg {
   type: 'roomMessage'
@@ -274,6 +289,8 @@ export type ServerMsg =
   | SessionUpdateMsg
   | SessionRemovedMsg
   | ErrorMsg
+  | SendlineAckMsg
+  | PongMsg
   | RoomMessageMsg
   | RoomsMsg
   | RoomDispatchesMsg

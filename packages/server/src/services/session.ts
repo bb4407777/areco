@@ -99,6 +99,8 @@ export class Session extends EventEmitter {
   /** 本次 working 是终端键入（裸回车/粘贴）触发的：transcript 若无动静，监视器隔 2s 按尾部重算兜底 */
   workingFromInput = false
   lastLine = ''
+  /** 提交回车复看的世代号：新一轮 sendline 或会话退出即作废上一轮的复看 */
+  private enterGen = 0
   cols = DEFAULT_COLS
   rows = DEFAULT_ROWS
   promptCount = 0
@@ -306,9 +308,12 @@ export class Session extends EventEmitter {
     if (body && LINE_DISPATCH_HARNESSES.has(this.harness ?? '')) {
       body = body.replace(/\s*\r?\n\s*/g, '；')
     }
+    // 写正文这一刻输入框是否已经画出来：没画出来（恢复会话重放首屏/启动画面）时正文会被
+    // TUI 丢掉，后面要凭这个标记补写一次——必须在这里取，不能等几秒后再判。
+    const boxAtWrite = this.inputBoxText() !== null
     // markWorking:false —— working 态本方法已显式置好，且 body 已无尾回车不触发 write 拆分
     if (body) this.write(body, { markWorking: false })
-    this.writeEnterWhenSettled()
+    this.writeEnterWhenSettled(body, boxAtWrite)
     this.promptCount += 1
     if (!this.agentSessionId) this.setAgentBindingPrompt(text)
     // 占位名会话：第一句话即会话名（与历史对话标题同口径）。程序化注入（交接档案提示等）传 autoName:false 跳过。
@@ -332,27 +337,152 @@ export class Session extends EventEmitter {
    * ENTER_QUIET_MS 远小于 onceQuiet 的首屏 1200ms：只需跨过 TUI 的粘贴合帧窗口（实测数十 ms）。
    * ENTER_MAX_WAIT_MS 兜底：持续输出的会话不会让回车无限拖着不发。
    */
-  private writeEnterWhenSettled() {
-    const startAt = this.lastOutputAt
+  private writeEnterWhenSettled(body = '', boxAtWrite = true) {
+    const snippet = body.replace(/\s+/g, ' ').trim().slice(-8)
+    // 长 prompt（带附件的长路径等）TUI 逐字回显要好几秒，固定 2s 上限会在还在"粘贴"时
+    // 就把回车塞进去、被判成换行（2026-11-08 报障的形态）。上限随长度放宽到 8s。
+    const maxWait = Math.min(8000, Session.ENTER_MAX_WAIT_MS + body.length * 10)
     const startedTs = Date.now()
     const tryFire = () => {
       if (!this.isRunning) return
       const quietFor = Date.now() - this.lastOutputAt
       const waited = Date.now() - startedTs
-      // 输出已安静足够久，或等满兜底上限：补回车提交
-      if (quietFor >= Session.ENTER_QUIET_MS || waited >= Session.ENTER_MAX_WAIT_MS) {
-        try {
-          this.pty?.write('\r')
-        } catch {
-          /* 会话可能已退出 */
-        }
+      // 除了"输出安静"，还要看见刚写的尾字已进输入框（文本真的落地了）再按回车。
+      // 等满兜底上限也不再盲目按：交给 submitUntilAccepted 看输入框决定——恢复会话首屏
+      // 还没画完时按下去只会变成换行（2026-11-09 报障，见该方法注释）。
+      const accepted = snippet.length < 2 || this.inputBoxHasTail(snippet)
+      if ((quietFor >= Session.ENTER_QUIET_MS && accepted) || waited >= maxWait) {
+        this.submitUntilAccepted(snippet, body, !boxAtWrite)
         return
       }
       setTimeout(tryFire, Session.ENTER_QUIET_MS)
     }
-    // 首次等一个安静窗口起步（startAt 仅用于说明语义：从本次写入后的输出算起）
-    void startAt
     setTimeout(tryFire, Session.ENTER_QUIET_MS)
+  }
+
+  /**
+   * 提交到底（2026-11-08 实测复现：codebuddy TUI 会吞掉紧跟文本的第一下回车——文本停在
+   * 输入框里不动，隔一两秒再按一下才真提交；恢复会话时首屏慢、第一下更容易被吞）。
+   *
+   * 另外 agent 正在干活时 TUI 根本不收回车（文本先挂着，等这一轮结束才可能提交），
+   * 30s 的复看窗口会在「还在跑长任务」时提前放弃、留一条挂在输入框里的消息（2026-11-08
+   * 「用户确认是否在线」实锤，用户手动补了回车）。所以窗口放宽到 5 分钟、间隔逐步放慢；
+   * 每次按键前都要求输入框里仍是刚写入的尾字，已提交（框里没了）立刻收手。
+   */
+  private submitUntilAccepted(snippet: string, body = '', boxAbsentAtWrite = false) {
+    const gen = ++this.enterGen
+    const startedTs = Date.now()
+    const deadline = startedTs + 300_000
+    let seenInBox = false
+    let attempt = 0
+    let rewrites = 0
+    let lastPressAt = 0
+    let lastRewriteAt = 0
+    /**
+     * 补回车。默认要求 pty 已安静一小段再按：TUI 还在重绘（恢复会话重放首屏）时，
+     * 回车会跟残帧并成一次粘贴、沦为换行——这正是「按住回车只出换行、命令发不出去」的形态
+     * （2026-11-09 报障）。force 只给「认不出输入框」的盲按兜底用。
+     */
+    const press = (force = false) => {
+      if (!force && Date.now() - this.lastOutputAt < Session.SUBMIT_QUIET_MS) return
+      attempt++
+      lastPressAt = Date.now()
+      try {
+        this.pty?.write('\r')
+      } catch {
+        /* 会话可能已退出 */
+      }
+    }
+    const rewrite = () => {
+      rewrites++
+      lastRewriteAt = Date.now()
+      try {
+        this.pty?.write(body)
+      } catch {
+        /* 会话可能已退出 */
+      }
+    }
+    // 尾字太短判不出输入框：维持老做法，直接补一下回车（权限框的 continue / 裸回车场景）
+    if (snippet.length < 2) {
+      press()
+      return
+    }
+    const tick = () => {
+      if (!this.isRunning || gen !== this.enterGen) return
+      const box = this.inputBoxText()
+      const flatBox = box === null ? null : box.replace(/\s+/g, '')
+      const flatSnippet = snippet.replace(/\s+/g, '')
+      if (flatBox !== null && flatBox.includes(flatSnippet)) {
+        // 尾字还在输入框里＝没提交（第一下回车被 TUI 吞了/还在粘贴合帧），再按
+        seenInBox = true
+        press()
+      } else if (seenInBox) {
+        log.info(`[submit] 已提交（补按 ${attempt} 次）`)
+        return
+      } else if (flatBox === null) {
+        // 输入框还没画出来：绝不按回车（按下去就是换行，2026-11-09 报障）。
+        // 非 TUI harness 认不出输入框的，过了等待窗才慢慢盲按兜底。
+        if (Date.now() - startedTs > Session.ENTER_BOX_WAIT_MS && Date.now() - lastPressAt > 5000) press(true)
+      } else if (flatBox === '') {
+        // 框是空的：写在启动画面里的正文被 TUI 丢掉了，重写一次；正常已提交的不要重发
+        if (
+          boxAbsentAtWrite &&
+          !seenInBox &&
+          rewrites < 5 &&
+          Date.now() - startedTs >= 2500 &&
+          Date.now() - lastRewriteAt > 3000
+        ) {
+          // 正文从没在框里出现过、框又空着——只可能是启动画面把它丢了；补写不算重发
+          log.info(`[submit] 正文未落地，重写第 ${rewrites + 1} 次（尾字「${snippet}」）`)
+          rewrite()
+        } else if (!boxAbsentAtWrite && Date.now() - startedTs >= 3000) {
+          log.info(`[submit] 已提交（补按 ${attempt} 次）`)
+          return
+        }
+      } else {
+        // 框里有内容但认不出尾字（折行/附件 chip/宽字符）：继续按，成功为止。
+        // 2026-11-08 高律师令「每次回复都弄一个 5 分钟不断点的，反正成功为止」
+        if (Date.now() - lastPressAt >= 1000) press()
+      }
+      if (Date.now() >= deadline) {
+        log.warn(
+          `[submit] 5 分钟仍未提交，放弃补按（补按 ${attempt} 次；重写 ${rewrites} 次；输入框${seenInBox ? '一直挂着该文本' : '从未见到该文本'}；尾字「${snippet}」）\n${this.screenTail(12).join('\n')}`,
+        )
+        return
+      }
+      // 前 10 秒看勤一点（吞回车多发生在开头），之后放慢到 3 秒一拍，别把终端刷爆
+      setTimeout(tick, Date.now() - startedTs < 10_000 ? Session.ENTER_RETRY_MS : 3000)
+    }
+    setTimeout(tick, Session.ENTER_RETRY_MS)
+  }
+
+  /**
+   * 输入框正文（"> " 标记之后、底部分隔线之前的内容）；认不出输入框形态时返回 null。
+   * 窗口取 16 行：TUI 底部还有分隔线、快捷键提示等，只取 6 行会够不着输入框。
+   */
+  private inputBoxText(): string | null {
+    const tail = this.screenTail(16)
+    let promptIdx = -1
+    for (let i = 0; i < tail.length; i++) {
+      if (/^\s*[>❯](\s|$)/.test(tail[i] ?? '')) promptIdx = i
+    }
+    if (promptIdx < 0) return null
+    const out = [(tail[promptIdx] ?? '').replace(/^\s*[>❯]\s?/, '')]
+    for (let i = promptIdx + 1; i < tail.length; i++) {
+      const line = tail[i] ?? ''
+      if (/^[─━═-]{4,}$/.test(line.trim())) break
+      if (/shift\+Tab|bypass permissions|for agents/.test(line)) break
+      out.push(line)
+    }
+    return out.join('\n')
+  }
+
+  /** 输入框里是否还留着刚写入的尾字；按去空白后比对，折行／CJK 宽字符切断也能认出来 */
+  private inputBoxHasTail(snippet: string): boolean {
+    const flat = snippet.replace(/\s+/g, '')
+    const box = this.inputBoxText()
+    if (box === null) return this.screenTail(6).join('\n').replace(/\s+/g, '').includes(flat)
+    return box.replace(/\s+/g, '').includes(flat)
   }
 
   /** 演化改名（session-namer 专用）：未被手动 rename 锁定才生效；autoNamed 保持 true 可持续演化 */
@@ -477,6 +607,12 @@ export class Session extends EventEmitter {
   private static readonly ENTER_QUIET_MS = 120
   /** 提交回车兜底上限：持续输出的会话不让回车无限拖着；到点无条件补 \r */
   private static readonly ENTER_MAX_WAIT_MS = 2000
+  /** 提交复看间隔：第一下回车被 TUI 吞掉后，隔这么久再看一眼输入框、必要时再按一下 */
+  private static readonly ENTER_RETRY_MS = 1000
+  /** 等输入框画出来的时限：恢复会话重放首屏时回车按早了只会变成换行，这段窗口内不盲按 */
+  private static readonly ENTER_BOX_WAIT_MS = 20_000
+  /** 补按回车的安静门槛：比首按更严，确保 TUI 已画完这一帧，回车才被当成独立击键 */
+  private static readonly SUBMIT_QUIET_MS = 250
   onceQuiet(fn: () => void, quietMs = 1200, maxWaitMs = 30_000) {
     let quietTimer: ReturnType<typeof setTimeout> | null = null
     let done = false

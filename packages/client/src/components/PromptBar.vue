@@ -28,13 +28,17 @@ watch(() => props.sessionId, (id, prevId) => {
 // 输入变化实时回写草稿：切视图触发组件卸载前草稿已在 store，切回即恢复
 watch(text, (v) => ui.setDraft(props.sessionId, v))
 
-function send() {
-  if (props.disabled) return
+const sending = ref(false)
+
+async function send() {
+  if (props.disabled || sending.value) return
   const value = text.value
-  // WS 断开时 send 返回 false：保留输入框内容，触发立即重连，别静默丢字
-  if (!wsClient.send({ type: 'sendline', sessionId: props.sessionId, text: value })) {
-    message.warning('连接已断开，正在重连——文字已保留，稍后再按发送')
-    wsClient.reconnectNow()
+  sending.value = true
+  // 等服务端回执再清输入框：没送到（断线/假连接/回执超时）就留着原文，不再静默丢字
+  const ok = await wsClient.sendline(props.sessionId, value)
+  sending.value = false
+  if (!ok) {
+    message.warning('这条没送出去，内容还在输入框里——连接已重置，再按一次发送')
     return
   }
   if (value.trim()) ui.rememberPrompt(value)

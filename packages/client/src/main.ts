@@ -46,11 +46,12 @@ wsClient.onMessage((msg) => sessions.handleServerMsg(msg))
 wsClient.onMessage((msg) => rooms.handleServerMsg(msg))
 wsClient.connect()
 
-// iOS PWA/Safari 切后台会静默杀 WS；回前台立即重连，不等指数退避
+// iOS PWA/Safari 切后台会静默杀 WS；回前台立即重连，不等指数退避。
+// 用 reconnectIfStale：连接看着还是 OPEN、其实早断了的话，reconnectNow 会直接 return 放过去。
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') wsClient.reconnectNow()
+  if (document.visibilityState === 'visible') wsClient.reconnectIfStale()
 })
-window.addEventListener('pageshow', () => wsClient.reconnectNow())
-window.addEventListener('online', () => wsClient.reconnectNow())
+window.addEventListener('pageshow', () => wsClient.reconnectIfStale())
+window.addEventListener('online', () => wsClient.reconnectIfStale())
 
 app.mount('#app')

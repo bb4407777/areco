@@ -162,6 +162,9 @@ export class Gateway {
         let session = this.manager.get(msg.sessionId)
         this.controllers.set(msg.sessionId, conn)
         const att = conn.attached.get(msg.sessionId)
+        // 收下即回执：客户端拿不到这条就在输入框里留着原文，不再「看着发出去了其实没到」
+        const ack = () => this.send(conn, { type: 'sendline-ack', sessionId: msg.sessionId, id: msg.id })
+        log.info(`[sendline] 收到 ${msg.sessionId.slice(0, 8)}，${msg.text.length} 字，${session.isRunning ? '在跑直投' : '需恢复'}`)
         if (!session.isRunning) {
           // 死会话发消息 = 想继续聊：自动 resume 拉起（无恢复凭据退化为全新重启，见 manager.restart），
           // onceQuiet 等首屏画完再注入——与 room-relay 离线成员投递同口径，客户端无感续聊
@@ -181,10 +184,16 @@ export class Gateway {
               /* 注入前进程又退了，丢弃 */
             }
           })
+          ack()
           break
         }
         if (att) session.resize(att.cols, att.rows)
         session.sendline(msg.text)
+        ack()
+        break
+      }
+      case 'ping': {
+        this.send(conn, { type: 'pong' })
         break
       }
       case 'resize': {
