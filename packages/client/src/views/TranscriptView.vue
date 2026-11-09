@@ -827,6 +827,11 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--border);
   cursor: text;
   outline: none;
+  /* 尾屏只有十几行，滚动条占宽又碍眼：照旧能滚，只是不画条 */
+  scrollbar-width: none;
+}
+.peek-screen::-webkit-scrollbar {
+  display: none;
 }
 /* 键盘接管时给一圈色边，让人知道键进终端了 */
 .peek-screen.focused {
