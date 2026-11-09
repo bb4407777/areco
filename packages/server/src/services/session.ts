@@ -710,6 +710,29 @@ export class Session extends EventEmitter {
     return lines
   }
 
+  /**
+   * 影子终端当前可见的一屏（不含回滚历史）。
+   * 对话面板「完整画面」用这个而不是 screenTail：TUI 原地重绘留下的旧行只在回滚区，
+   * 读尾部会把它们一起读进来，看着就是残影。
+   */
+  screenViewport(): string[] {
+    if (!this.shadow) return []
+    const buffer = this.shadow.buffer.active
+    const rows = Math.max(1, this.rows)
+    const top = Math.max(0, Math.min(buffer.baseY, Math.max(0, buffer.length - rows)))
+    const lines: string[] = []
+    for (let y = top; y < top + rows && y < buffer.length; y++) {
+      lines.push(buffer.getLine(y)?.translateToString(true) ?? '')
+    }
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop()
+    return lines
+  }
+
+  /** 影子终端已渲染的字节数（视作帧号）：轮询时没变化就不用重画，省得旧帧挂在那儿显残影 */
+  shadowSeq(): number {
+    return this.shadowProcessed
+  }
+
   /** 尾屏是否停在选择/确认对话框（claude 权限框/信任页只画在 TUI 里、不进 transcript）：黄灯兜底用 */
   hasPendingChoiceOnScreen(): boolean {
     return screenHasPendingChoice(this.screenTail(10))

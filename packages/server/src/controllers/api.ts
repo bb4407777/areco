@@ -377,18 +377,21 @@ export class ApiControllers {
     })
 
   // 对话模式「终端尾屏」：直读影子终端 buffer，供不切页查看 TUI 选项/确认提示。
-  // 默认给 300 行（≈6 屏），想看更早的用 ?lines=N（上限 2000，shadow 回滚 5000 行）；
-  // ?full=1 取当前终端一屏（rows 行）——「完整显示」用，正好是一屏画面，不多不少
+  // ?full=1 取当前可见的一屏（不给回滚区，避免原地重绘的旧行被读成残影）；
+  // 默认给 300 行、?lines=N 取更多历史（上限 2000，shadow 回滚 5000 行）
   screen = (ctx: Context) =>
     guard(ctx, () => {
       const session = this.manager.get(ctx.params.id)
       if (ctx.query.full === '1') {
-        ok(ctx, { lines: session.screenTail(session.rows) } satisfies ScreenTailPayload)
+        ok(ctx, {
+          lines: session.screenViewport(),
+          seq: session.shadowSeq(),
+        } satisfies ScreenTailPayload)
         return
       }
       const want = Number(ctx.query.lines)
       const lines = Number.isFinite(want) ? Math.min(2000, Math.max(8, Math.floor(want))) : 300
-      ok(ctx, { lines: session.screenTail(lines) } satisfies ScreenTailPayload)
+      ok(ctx, { lines: session.screenTail(lines), seq: session.shadowSeq() } satisfies ScreenTailPayload)
     })
 
   // 独立会话程序化注入（2026-07-26 #2wlt 高律师批）：给 roomId=None 的会话一个带审计的

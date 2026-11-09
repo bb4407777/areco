@@ -213,6 +213,8 @@ const screenLines = ref<string[]>([])
 const screenError = ref(false)
 const screenEl = ref<HTMLPreElement | null>(null)
 let screenInFlight = false
+/** 上一帧的画面序号：影子终端没吃新字节就不重画，避免旧帧停在屏上像残影 */
+let screenSeq = -1
 
 async function fetchScreen() {
   if (screenInFlight) return
@@ -220,9 +222,11 @@ async function fetchScreen() {
   const id = sessionId.value
   screenInFlight = true
   try {
-    // 取终端一屏（rows 行），框随内容长高，框里不滚——就是 TUI 当前那一屏
+    // 取终端当前一屏（可见区，不含回滚历史），框随内容长高，框里不滚
     const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen?full=1`)
     if (gen !== sessionGen) return
+    if (data.seq !== undefined && data.seq === screenSeq && screenLines.value.length) return
+    screenSeq = data.seq ?? -1
     screenLines.value = data.lines
     screenError.value = false
   } catch {
@@ -233,7 +237,14 @@ async function fetchScreen() {
   }
 }
 watch(showScreen, (open) => {
-  if (open) void fetchScreen()
+  if (!open) {
+    stopScreenPoll()
+    stopScreenInput()
+    return
+  }
+  screenSeq = -1
+  void fetchScreen()
+  startScreenPoll()
 })
 
 // 键盘接管尾屏：点画面即聚焦隐藏输入框，按键按终端序列原样投给 pty（方向键/回车/^C 都能用），
@@ -242,6 +253,20 @@ const screenInput = ref<HTMLTextAreaElement | null>(null)
 const screenFocused = ref(false)
 let screenTimer: number | null = null
 let screenPoll: number | null = null
+
+/** 面板开着就一直轮询：800ms 一拍，配合 seq 判重，画面不跳也不留旧帧 */
+function startScreenPoll() {
+  if (screenPoll !== null) return
+  screenPoll = window.setInterval(() => {
+    if (!screenInFlight) void fetchScreen()
+  }, 800)
+}
+
+function stopScreenPoll() {
+  if (screenPoll === null) return
+  clearInterval(screenPoll)
+  screenPoll = null
+}
 
 function scheduleScreenRefresh(delay = 350) {
   if (screenTimer !== null) clearTimeout(screenTimer)
@@ -293,11 +318,6 @@ function stopScreenInput() {
   screenInput.value?.blur()
 }
 
-// 面板收起就别继续接管键盘
-watch(showScreen, (open) => {
-  if (!open) stopScreenInput()
-})
-
 function onScreenKeydown(e: KeyboardEvent) {
   if (e.isComposing || e.metaKey) return // 输入法在组字、⌘ 组合交给浏览器
   if (e.ctrlKey && e.key.length === 1) {
@@ -326,19 +346,11 @@ function onScreenInput(e: Event) {
 
 function onScreenFocus() {
   screenFocused.value = true
-  if (screenPoll === null) {
-    screenPoll = window.setInterval(() => {
-      if (!screenInFlight) void fetchScreen()
-    }, 1500)
-  }
+  startScreenPoll()
 }
 
 function onScreenBlur() {
   screenFocused.value = false
-  if (screenPoll !== null) {
-    clearInterval(screenPoll)
-    screenPoll = null
-  }
 }
 
 onBeforeUnmount(() => {

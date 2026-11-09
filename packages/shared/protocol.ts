@@ -375,6 +375,8 @@ export interface StatsSummary {
 /** 对话模式「终端尾屏」：GET /api/sessions/:id/screen 响应体 */
 export interface ScreenTailPayload {
   lines: string[]
+  /** 影子终端已吃进的字节数；前端据此判断「画面没变就别重绘」 */
+  seq?: number
 }
 
 // ---- 项目协作（Phase 6）：项目 = 人 + 活会话成员；消息 SoT 在服务端 tasks.db（team=room-<id>） ----
