@@ -281,6 +281,14 @@ function focusScreen() {
   screenInput.value?.focus()
 }
 
+/** 展开面板就算接管键盘：点「终端画面」这一下本身就是用户手势，可直接聚焦隐藏输入框 */
+async function toggleScreen() {
+  showScreen.value = !showScreen.value
+  if (!showScreen.value) return
+  await nextTick()
+  focusScreen()
+}
+
 function stopScreenInput() {
   screenInput.value?.blur()
 }
@@ -634,7 +642,7 @@ onBeforeUnmount(() => {
     />
 
     <div v-if="isLive" class="screen-peek">
-      <button class="peek-toggle" type="button" @click="showScreen = !showScreen">
+      <button class="peek-toggle" type="button" @click="toggleScreen">
         <span>⌨️ 终端画面</span>
         <span v-if="awaitingChoice" class="peek-badge">有选项待选</span>
         <span class="peek-caret">{{ showScreen ? '▾' : '▸' }}</span>
