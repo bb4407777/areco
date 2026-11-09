@@ -845,7 +845,10 @@ onBeforeUnmount(() => {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
   line-height: 1.45;
-  white-space: pre;
+  /* 终端列宽可能比手机屏宽（会话在桌面端定过 144 列）：长行折行铺满，
+     宁可断在折行处，也别把右边一截截掉 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   color: var(--fold-text);
   background: var(--term-bg);
   border-top: 1px solid var(--border);
@@ -860,15 +863,18 @@ onBeforeUnmount(() => {
 .peek-wrap {
   position: relative;
 }
-/* 隐藏输入框：只为唤出键盘/接输入法，屏幕上看不见；放画面右下角避免 iOS 缩放 */
+/* 隐藏输入框：透明铺满画面，点画面即聚焦（1px 尺寸会被 iOS 拒绝聚焦，键盘唤不出来） */
 .peek-input {
   position: absolute;
-  right: 8px;
-  bottom: 8px;
-  width: 1px;
-  height: 1px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   padding: 0;
   border: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-size: 16px; /* 小于 16px 聚焦时 iOS 会放大页面 */
   opacity: 0;
   resize: none;
   overflow: hidden;
