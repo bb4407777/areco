@@ -90,6 +90,19 @@ struct WebAppView: UIViewRepresentable {
             onLoadFailure()
         }
 
+        /// 麦克风授权：语音输入的 getUserMedia 走这里。WKWebView 默认拒（不实现就永远拿不到麦克风），
+        /// 只放麦克风，摄像头与其他一律拒。
+        @available(iOS 15.0, *)
+        func webView(
+            _ webView: WKWebView,
+            requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+            initiatedByFrame frame: WKFrameInfo,
+            type: WKMediaCaptureType,
+            decisionHandler: @escaping (WKPermissionDecision) -> Void
+        ) {
+            decisionHandler(type == .microphone ? .grant : .deny)
+        }
+
         /// target=_blank / window.open：笼统地在当前 WebView 打开，避免点了没反应
         func webView(
             _ webView: WKWebView,

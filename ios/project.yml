@@ -15,6 +15,7 @@ targets:
       properties:
         CFBundleDisplayName: Areco
         NSLocalNetworkUsageDescription: 需要连接同一 Wi-Fi 下的 Mac 上的 areco 座舱。
+        NSMicrophoneUsageDescription: 语音输入：把说的话识别成文字填进输入框。
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

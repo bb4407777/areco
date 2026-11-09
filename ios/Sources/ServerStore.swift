@@ -18,8 +18,9 @@ struct Endpoint: Equatable {
     let mode: ServerMode
 }
 
-/// 服务器地址不再手填：固定两个地址、固定顺序——先局域网，不通再公网。
-///   局域网用 mDNS 名（Mac 换 IP 也不用改），公网是 Cloudflare 域名。
+/// 服务器地址不再手填：固定两个地址、固定顺序——先公网 https，不通再局域网。
+///   公网是 Cloudflare 域名，https 是安全上下文，麦克风（语音输入）只有这条线能用；
+///   局域网 mDNS 名是 http，WebKit 不给麦克风，只作回退。
 /// 手填地址仍然保留，填了就压过自动逻辑（出差/临时换机时用）。
 @MainActor
 final class ServerStore: ObservableObject {
@@ -52,17 +53,17 @@ final class ServerStore: ObservableObject {
             return
         }
 
-        if await probe(Self.lanURL, timeout: 3) {
-            activate(Endpoint(url: Self.lanURL, mode: .lan))
-            return
-        }
-
         if await probe(Self.publicURL, timeout: 5) {
             activate(Endpoint(url: Self.publicURL, mode: .wan))
             return
         }
 
-        phase = .failed("局域网和公网都没连上")
+        if await probe(Self.lanURL, timeout: 3) {
+            activate(Endpoint(url: Self.lanURL, mode: .lan))
+            return
+        }
+
+        phase = .failed("公网和局域网都没连上")
     }
 
     func saveCustom(_ raw: String) {
@@ -76,17 +77,17 @@ final class ServerStore: ObservableObject {
         customURL = ""
     }
 
-    /// WebView 加载失败：局域网挂了就退公网，公网也挂了才算真失败
+    /// WebView 加载失败：公网挂了就退局域网，局域网也挂了才算真失败
     func handlePageFailure(of endpoint: Endpoint) {
-        guard endpoint.mode != .wan else {
-            phase = .failed("公网也打不开页面")
+        guard endpoint.mode != .lan else {
+            phase = .failed("局域网也打不开页面")
             return
         }
         Task {
-            if await probe(Self.publicURL, timeout: 5) {
-                activate(Endpoint(url: Self.publicURL, mode: .wan))
+            if await probe(Self.lanURL, timeout: 3) {
+                activate(Endpoint(url: Self.lanURL, mode: .lan))
             } else {
-                phase = .failed("局域网与公网都打不开页面")
+                phase = .failed("公网与局域网都打不开页面")
             }
         }
     }

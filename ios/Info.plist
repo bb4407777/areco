@@ -27,6 +27,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>需要连接同一 Wi-Fi 下的 Mac 上的 areco 座舱。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>语音输入：把说的话识别成文字填进输入框。</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

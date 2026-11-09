@@ -34,8 +34,10 @@ xcrun devicectl device install app --device <devicectl 的 UUID> \
 
 ## 手机端使用
 
-- **不用填地址**：固定两个地址、固定顺序——先 `http://gaodeMacBook-Pro.local:8790`（局域网，1.5 秒超时），
-  不通再换 `https://areco.gaochengbin.com`（公网，5 秒超时）。局域网用 mDNS 名，Mac 换 IP 也不用改。
+- **不用填地址**：固定两个地址、固定顺序——先 `https://areco.gaochengbin.com`（公网，5 秒超时），
+  不通再换 `http://gaodeMacBook-Pro.local:8790`（局域网，3 秒超时）。
+  公网优先是因为 https 才有麦克风（语音输入）；局域网 http 是回退，那里点麦克风会提示环境不支持。
+- **语音输入**：需要麦克风权限（首次点麦克风弹系统授权），仅公网 https 下可用。
 - 右下角齿轮只在自动连不上、或要连别的机器时才用：可手动指定地址，也可切回「自动」。
 - 首次会弹「本地网络」授权，局域网访问必须允许。
 - 登录一次后 cookie 落盘，杀掉 App 再开仍是登录态；会话/终端数据都在 Mac 上，换手机不影响。
