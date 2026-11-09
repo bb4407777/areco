@@ -63,6 +63,7 @@ export class Gateway {
   mount(server: HttpServer) {
     server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       const url = new URL(req.url ?? '/', 'http://placeholder')
+      if (url.pathname === '/ws/asr') return // 语音输入专用通道，由 AsrGateway 处理
       if (url.pathname !== '/ws') {
         socket.destroy()
         return

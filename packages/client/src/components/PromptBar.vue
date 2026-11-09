@@ -7,7 +7,9 @@ import { useMessage } from 'naive-ui'
 import { wsClient } from '../ws'
 import { useUiStore } from '../stores/ui'
 import { useFileDrop } from '../composables/useFileDrop'
+import { useVoiceDictation } from '../composables/useVoiceDictation'
 import FileDropOverlay from './FileDropOverlay.vue'
+import MicButton from './MicButton.vue'
 
 const props = defineProps<{ sessionId: string; disabled?: boolean; placeholder?: string }>()
 
@@ -52,6 +54,27 @@ function autoGrow() {
 }
 watch(text, () => nextTick(autoGrow))
 
+// 语音输入：按钮在附件左边；识别结果只写进输入框，不自动发送
+const {
+  listening: voiceListening,
+  starting: voiceStarting,
+  toggle: toggleVoice,
+} = useVoiceDictation({
+  getText: () => text.value,
+  setText: (value) => {
+    text.value = value
+  },
+  onError: (msg) => message.error(msg),
+})
+
+async function onMicClick() {
+  try {
+    await toggleVoice()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  }
+}
+
 // 文件拖放/选件上传（document 级拖放 + 文件夹递归 + 落盘回填），逻辑在 useFileDrop
 const { dragging, uploading, fileInputEl, pickFiles, onInputChange } = useFileDrop({
   text,
@@ -87,6 +110,12 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div class="promptbar">
     <input ref="fileInputEl" type="file" multiple hidden @change="onInputChange" />
+    <MicButton
+      :listening="voiceListening"
+      :busy="voiceStarting"
+      :disabled="disabled"
+      @toggle="onMicClick"
+    />
     <button
       class="attach-btn"
       type="button"

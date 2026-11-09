@@ -26,6 +26,8 @@ import { Gateway } from './ws/gateway'
 import { FileService } from './services/files'
 import { ProjectFileService } from './services/project-files'
 import { TtsService } from './services/tts'
+import { AsrService } from './services/asr'
+import { AsrGateway } from './ws/asr-gateway'
 import { ProcessControllers } from './controllers/processes'
 import { OpcControllers } from './controllers/opc'
 import { TtsController } from './controllers/tts'
@@ -98,6 +100,8 @@ async function main() {
   const roomControllers = new RoomControllers(rooms, roomRelay, manager, templates, projectFiles)
   const tts = new TtsService()
   const ttsController = new TtsController(tts)
+  const asr = new AsrService()
+  const asrGateway = new AsrGateway(asr, auth, config)
   const processControllers = new ProcessControllers()
   const opcControllers = new OpcControllers()
 
@@ -180,6 +184,7 @@ async function main() {
   })
 
   const server = http.createServer(app.callback())
+  asrGateway.mount(server)
   gateway.mount(server)
 
   manager.restore()
@@ -209,6 +214,8 @@ async function main() {
       .catch(() => undefined)
       .then(() => {
         tts.stop()
+        asr.stop()
+        asrGateway.shutdown()
         roomRelay.stop()
         gateway.shutdown()
         server.close(() => {
