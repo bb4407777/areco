@@ -212,6 +212,8 @@ const showScreen = ref(false)
 const screenLines = ref<string[]>([])
 const screenError = ref(false)
 const screenEl = ref<HTMLPreElement | null>(null)
+// 紧凑 16 行是原设计：只为看清 TUI 的选项框/确认提示，不挤占对话区；想看完整画面再手动展开
+const screenExpanded = ref(false)
 let screenInFlight = false
 
 async function fetchScreen() {
@@ -223,7 +225,8 @@ async function fetchScreen() {
   const stickBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 48
   screenInFlight = true
   try {
-    const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen`)
+    const lines = screenExpanded.value ? 400 : 16
+    const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen?lines=${lines}`)
     if (gen !== sessionGen) return
     screenLines.value = data.lines
     screenError.value = false
@@ -242,6 +245,8 @@ async function fetchScreen() {
 watch(showScreen, (open) => {
   if (open) void fetchScreen()
 })
+
+watch(screenExpanded, () => void fetchScreen())
 
 // 键盘接管尾屏：点画面即聚焦隐藏输入框，按键按终端序列原样投给 pty（方向键/回车/^C 都能用），
 // 打完顺手重拉一次尾屏——TUI 的选项框只画在屏幕上，不进 transcript，得靠这一小块看回显
@@ -674,7 +679,12 @@ onBeforeUnmount(() => {
           ></textarea>
         </div>
         <div class="peek-hint">
-          {{ screenFocused ? '⌨️ 键盘已接管这个终端画面 · 点别处退出' : '点画面即可用键盘操作（方向键／回车／^C 都直送终端）' }}
+          <span class="peek-hint-text">{{
+            screenFocused ? '⌨️ 键盘已接管这个终端画面 · 点别处退出' : '点画面即可用键盘操作（方向键／回车／^C 都直送终端）'
+          }}</span>
+          <button class="peek-exit" type="button" @click="screenExpanded = !screenExpanded">
+            {{ screenExpanded ? '只看选项框' : '展开全部' }}
+          </button>
           <button v-if="screenFocused" class="peek-exit" type="button" @click="stopScreenInput">退出键盘</button>
         </div>
         <MobileKeyBar :session-id="sessionId" />
@@ -873,8 +883,12 @@ onBeforeUnmount(() => {
   color: var(--faint);
   font-size: 11px;
 }
+.peek-hint-text {
+  flex: 1;
+  min-width: 0;
+}
 .peek-exit {
-  margin-left: auto;
+  flex: 0 0 auto;
   padding: 2px 8px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
