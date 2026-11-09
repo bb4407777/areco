@@ -17,6 +17,7 @@ import {
   historyCwd,
   kimiParseLine,
   kimiWorkDirOf,
+  codebuddyWorkDirOf,
   listHistory,
   piParseLine,
   piWorkDirOf,
@@ -554,6 +555,7 @@ export class ApiControllers {
         else if (entry.source === 'codex') entry.resumable = codexOk
         // workbuddy 会话按 cwd-slug 归档，缺 cwd（旧数据）恢复会找不到会话，不给恢复
         else if (entry.source === 'workbuddy') entry.resumable = workbuddyOk && Boolean(entry.cwd)
+        else if (entry.source === 'codebuddy') entry.resumable = workbuddyOk && Boolean(entry.cwd)
         else entry.resumable = resumableSources.get(entry.source) ?? false
       }
       ok(ctx, page)
@@ -724,6 +726,27 @@ export class ApiControllers {
         }))
         return
       }
+      // codebuddy 原生层：同一套 codebuddy CLI，`--resume <uuid>` 回原 cwd 续写原会话文件。
+      // 不走 chatlog（codebuddy 是原生 JSONL 层），id 即裸 uuid，无源前缀。
+      if (source === 'codebuddy') {
+        const filePath = resolveCodebuddySessionFile(project, id)
+        const cwd = codebuddyWorkDirOf(filePath)
+        if (!cwd) throw new Error('该会话未记录工作目录，无法恢复')
+        const body = (ctx.request.body ?? {}) as { templateId?: string; name?: string }
+        const template = body.templateId ? this.templates.get(body.templateId) : this.templateByCommand('codebuddy')
+        if (!template) throw new Error('没有可用的 codebuddy 模板')
+        const existing = this.manager.list().find((s) => s.agentSessionId === id)
+        if (existing) {
+          throw new Error(`该历史会话已属于看板会话「${existing.name}」，请在原卡片恢复，不能重复绑定`)
+        }
+        ok(ctx, this.manager.spawn(template.id, {
+          cwd,
+          name: body.name,
+          extraArgs: template.harness === 'workbuddy' ? undefined : ['--resume', id],
+          resumeAgentSessionId: template.harness === 'workbuddy' ? id : undefined,
+        }))
+        return
+      }
       // codex / workbuddy（chatlog 层）：原生 resume——codex `resume <uuid>`，codebuddy `--resume <uuid>`；
       // chatlog id 带源前缀（codex-/workbuddy-），剥掉才是原生会话 id；workbuddy 必须回原 cwd（按 cwd-slug 归档）
       if (source === 'codex' || source === 'workbuddy') {
@@ -791,7 +814,7 @@ export class ApiControllers {
       } else if (source === 'codebuddy') {
         // codebuddy 不在 historyRoots 里（原生层单独解析），必须走自己的入口
         const filePath = resolveCodebuddySessionFile(project, id)
-        messages = readHistoryAllMessages(filePath, undefined, (line) => parseWorkbuddy(line)[0] ?? null)
+        messages = parseWorkbuddy(fs.readFileSync(filePath, 'utf8'))
         cwd = codebuddyWorkDirOf(filePath)
       } else if (source === 'kimi') {
         const filePath = resolveKimiWire(project, id)

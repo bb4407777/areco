@@ -212,30 +212,19 @@ const showScreen = ref(false)
 const screenLines = ref<string[]>([])
 const screenError = ref(false)
 const screenEl = ref<HTMLPreElement | null>(null)
-// 紧凑 16 行是原设计：只为看清 TUI 的选项框/确认提示，不挤占对话区；想看完整画面再手动展开
-const screenExpanded = ref(false)
 let screenInFlight = false
 
 async function fetchScreen() {
   if (screenInFlight) return
   const gen = sessionGen
   const id = sessionId.value
-  // 刷新前先看有没有人翻到上面读旧内容：贴着底才跟着往下走，上翻读的时候不抢滚动位置
-  const el = screenEl.value
-  const stickBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 48
   screenInFlight = true
   try {
-    // 展开＝取终端一屏（rows 行），框随内容长高、不在框里滚；紧凑＝16 行看选项框
-    const query = screenExpanded.value ? 'full=1' : 'lines=16'
-    const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen?${query}`)
+    // 取终端一屏（rows 行），框随内容长高，框里不滚——就是 TUI 当前那一屏
+    const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen?full=1`)
     if (gen !== sessionGen) return
     screenLines.value = data.lines
     screenError.value = false
-    if (stickBottom) {
-      await nextTick()
-      const box = screenEl.value
-      if (box) box.scrollTop = box.scrollHeight
-    }
   } catch {
     if (gen !== sessionGen) return
     screenError.value = true
@@ -246,8 +235,6 @@ async function fetchScreen() {
 watch(showScreen, (open) => {
   if (open) void fetchScreen()
 })
-
-watch(screenExpanded, () => void fetchScreen())
 
 // 键盘接管尾屏：点画面即聚焦隐藏输入框，按键按终端序列原样投给 pty（方向键/回车/^C 都能用），
 // 打完顺手重拉一次尾屏——TUI 的选项框只画在屏幕上，不进 transcript，得靠这一小块看回显
@@ -657,7 +644,7 @@ onBeforeUnmount(() => {
           <pre
             ref="screenEl"
             class="peek-screen"
-            :class="{ focused: screenFocused, expanded: screenExpanded }"
+            :class="{ focused: screenFocused }"
             tabindex="0"
             role="textbox"
             aria-label="终端画面，点击后键盘直接输入"
@@ -683,9 +670,6 @@ onBeforeUnmount(() => {
           <span class="peek-hint-text">{{
             screenFocused ? '⌨️ 键盘已接管这个终端画面 · 点别处退出' : '点画面即可用键盘操作（方向键／回车／^C 都直送终端）'
           }}</span>
-          <button class="peek-exit" type="button" @click="screenExpanded = !screenExpanded">
-            {{ screenExpanded ? '只看选项框' : '展开全部' }}
-          </button>
           <button v-if="screenFocused" class="peek-exit" type="button" @click="stopScreenInput">退出键盘</button>
         </div>
         <MobileKeyBar :session-id="sessionId" />
@@ -837,8 +821,7 @@ onBeforeUnmount(() => {
 .peek-screen {
   margin: 0;
   padding: 8px 12px;
-  max-height: min(45vh, 420px);
-  overflow: auto;
+  overflow: visible;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
   line-height: 1.45;
@@ -848,16 +831,6 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--border);
   cursor: text;
   outline: none;
-  /* 尾屏只有十几行，滚动条占宽又碍眼：照旧能滚，只是不画条 */
-  scrollbar-width: none;
-}
-.peek-screen::-webkit-scrollbar {
-  display: none;
-}
-/* 展开全部＝整屏铺开，框随内容长高，不在框里滚（要往下看就滚页面） */
-.peek-screen.expanded {
-  max-height: none;
-  overflow: visible;
 }
 /* 键盘接管时给一圈色边，让人知道键进终端了 */
 .peek-screen.focused {
