@@ -21,6 +21,7 @@ import TypingIndicator from '../components/TypingIndicator.vue'
 import ViewModeSwitch from '../components/ViewModeSwitch.vue'
 import { useRenameDialog } from '../composables/useRenameDialog'
 import { useSpawnWorker, HANDOFF_ROLES } from '../composables/useSpawnWorker'
+import { wsClient } from '../ws'
 import { TranscriptSpeechTracker } from '../utils/speechText'
 import { useSpeechStore } from '../stores/speech'
 
@@ -150,6 +151,8 @@ watch(sessionId, (newId, oldId) => {
   start = 0
   firstIndex.value = 0
   messages.value = []
+  if (settleTimer !== null) clearTimeout(settleTimer)
+  settleTimer = null
   speechTracker.invalidate()
   speechCompletionPending = false
   exists.value = true
@@ -168,6 +171,23 @@ function scrollToBottom(behavior?: ScrollBehavior) {
   if (!el) return
   stickBottom = true
   el.scrollTo({ top: el.scrollHeight, behavior })
+}
+
+// 首屏/整页替换后内容还会继续长高（图片、字体、代码块、iOS 视口回弹），一次性滚底常常
+// 停在半截：上面某条被切掉、下面还有没入镜。短时内多次对账，直到真的贴底或用户手动上翻。
+let settleTimer: number | null = null
+function settleToBottom() {
+  const startedTs = Date.now()
+  if (settleTimer !== null) clearTimeout(settleTimer)
+  const tick = () => {
+    settleTimer = null
+    if (!stickBottom) return // 用户已手动上翻，不打扰
+    const el = scroller.value
+    if (!el) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 1) scrollToBottom()
+    if (Date.now() - startedTs < 1500) settleTimer = window.setTimeout(tick, 120)
+  }
+  tick()
 }
 
 // 流高度变化（键盘弹收、附件条展开、窗口缩放）：贴底的跟到底，否则只对账「回到最新」按钮
@@ -213,6 +233,109 @@ async function fetchScreen() {
 watch(showScreen, (open) => {
   if (open) void fetchScreen()
 })
+
+// 键盘接管尾屏：点画面即聚焦隐藏输入框，按键按终端序列原样投给 pty（方向键/回车/^C 都能用），
+// 打完顺手重拉一次尾屏——TUI 的选项框只画在屏幕上，不进 transcript，得靠这一小块看回显
+const screenInput = ref<HTMLTextAreaElement | null>(null)
+const screenFocused = ref(false)
+let screenTimer: number | null = null
+let screenPoll: number | null = null
+
+function scheduleScreenRefresh(delay = 350) {
+  if (screenTimer !== null) clearTimeout(screenTimer)
+  screenTimer = window.setTimeout(() => {
+    screenTimer = null
+    void fetchScreen()
+  }, delay)
+}
+
+function sendRaw(data: string) {
+  if (!data) return
+  if (!wsClient.send({ type: 'input', sessionId: sessionId.value, data })) {
+    message.warning('终端输入没送出去——连接已重置，再点一次画面')
+    wsClient.reconnectNow()
+    return
+  }
+  scheduleScreenRefresh()
+}
+
+const KEY_SEQ: Record<string, string> = {
+  Enter: '\r',
+  Backspace: '\u007f',
+  Tab: '\t',
+  Escape: '\u001b',
+  ArrowUp: '\u001b[A',
+  ArrowDown: '\u001b[B',
+  ArrowRight: '\u001b[C',
+  ArrowLeft: '\u001b[D',
+  Home: '\u001b[H',
+  End: '\u001b[F',
+  PageUp: '\u001b[5~',
+  PageDown: '\u001b[6~',
+  Delete: '\u001b[3~',
+}
+
+function focusScreen() {
+  screenInput.value?.focus()
+}
+
+function stopScreenInput() {
+  screenInput.value?.blur()
+}
+
+// 面板收起就别继续接管键盘
+watch(showScreen, (open) => {
+  if (!open) stopScreenInput()
+})
+
+function onScreenKeydown(e: KeyboardEvent) {
+  if (e.isComposing || e.metaKey) return // 输入法在组字、⌘ 组合交给浏览器
+  if (e.ctrlKey && e.key.length === 1) {
+    const code = e.key.toUpperCase().charCodeAt(0)
+    if (code >= 64 && code <= 95) {
+      e.preventDefault()
+      sendRaw(String.fromCharCode(code - 64)) // ^C=0x03、^D=0x04…按终端惯例送控制符
+      return
+    }
+  }
+  const seq = KEY_SEQ[e.key]
+  if (seq) {
+    e.preventDefault()
+    sendRaw(seq)
+    return
+  }
+  // 其余可打印字符/粘贴/输入法结果走 input 事件，避免与 keydown 重复发送
+}
+
+function onScreenInput(e: Event) {
+  const el = e.target as HTMLTextAreaElement
+  const value = el.value
+  el.value = ''
+  if (value) sendRaw(value)
+}
+
+function onScreenFocus() {
+  screenFocused.value = true
+  if (screenPoll === null) {
+    screenPoll = window.setInterval(() => {
+      if (!screenInFlight) void fetchScreen()
+    }, 1500)
+  }
+}
+
+function onScreenBlur() {
+  screenFocused.value = false
+  if (screenPoll !== null) {
+    clearInterval(screenPoll)
+    screenPoll = null
+  }
+}
+
+onBeforeUnmount(() => {
+  if (screenTimer !== null) clearTimeout(screenTimer)
+  if (screenPoll !== null) clearInterval(screenPoll)
+})
+
 
 // Claude 系 AskUserQuestion 的选项等在终端里，transcript 尾消息可检出 → 面板条亮标提醒
 const awaitingChoice = computed(() => {
@@ -319,7 +442,7 @@ async function poll() {
         // 必须先撤下加载态：loading=true 时模板渲染的是 spinner，消息未上 DOM，滚底会落空
         loading.value = false
         await nextTick()
-        if (isFirstLoad || wasAtBottom) scrollToBottom()
+        if (isFirstLoad || wasAtBottom) settleToBottom()
         else onScroll() // 未跟滚：内容替换后对账「回到最新」按钮可见性
         // 尾页短到不能滚动时，滚动事件永远不会来；补一次，免得停在半屏且上不去
         if (isFirstLoad) {
@@ -441,9 +564,13 @@ onMounted(() => {
   }
   document.addEventListener('focusin', onFocusIn)
 })
+// 换会话即停播：播报是「这一屏」的事，人走了不该还在耳边念上一屏（2026-11-08 高律师报障）
+watch(sessionId, () => speech.stop())
 onBeforeUnmount(() => {
+  speech.stop()
   if (timer !== null) clearInterval(timer)
   if (scrollFrame) cancelAnimationFrame(scrollFrame)
+  if (settleTimer !== null) clearTimeout(settleTimer)
   if (olderUnlock !== null) clearTimeout(olderUnlock)
   streamObserver?.disconnect()
   streamObserver = null
@@ -511,9 +638,35 @@ onBeforeUnmount(() => {
         <span class="peek-caret">{{ showScreen ? '▾' : '▸' }}</span>
       </button>
       <template v-if="showScreen">
-        <pre class="peek-screen">{{
-          screenError ? '（终端画面接口未就绪：服务端重启后生效）' : screenLines.join('\n') || '（暂无画面）'
-        }}</pre>
+        <div class="peek-wrap">
+          <pre
+            class="peek-screen"
+            :class="{ focused: screenFocused }"
+            tabindex="0"
+            role="textbox"
+            aria-label="终端画面，点击后键盘直接输入"
+            @click="focusScreen"
+            @keydown="onScreenKeydown"
+          >{{
+            screenError ? '（终端画面接口未就绪：服务端重启后生效）' : screenLines.join('\n') || '（暂无画面）'
+          }}</pre>
+          <textarea
+            ref="screenInput"
+            class="peek-input"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            @input="onScreenInput"
+            @keydown="onScreenKeydown"
+            @focus="onScreenFocus"
+            @blur="onScreenBlur"
+          ></textarea>
+        </div>
+        <div class="peek-hint">
+          {{ screenFocused ? '⌨️ 键盘已接管这个终端画面 · 点别处退出' : '点画面即可用键盘操作（方向键／回车／^C 都直送终端）' }}
+          <button v-if="screenFocused" class="peek-exit" type="button" @click="stopScreenInput">退出键盘</button>
+        </div>
         <MobileKeyBar :session-id="sessionId" />
       </template>
     </div>
@@ -672,6 +825,48 @@ onBeforeUnmount(() => {
   color: var(--fold-text);
   background: var(--term-bg);
   border-top: 1px solid var(--border);
+  cursor: text;
+  outline: none;
+}
+/* 键盘接管时给一圈色边，让人知道键进终端了 */
+.peek-screen.focused {
+  border-top-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.peek-wrap {
+  position: relative;
+}
+/* 隐藏输入框：只为唤出键盘/接输入法，屏幕上看不见；放画面右下角避免 iOS 缩放 */
+.peek-input {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+}
+.peek-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--faint);
+  font-size: 11px;
+}
+.peek-exit {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
 }
 .stream-tail {
   height: 8px;
