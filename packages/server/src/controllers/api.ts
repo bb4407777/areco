@@ -376,10 +376,15 @@ export class ApiControllers {
     })
 
   // 对话模式「终端尾屏」：直读影子终端 buffer，供不切页查看 TUI 选项/确认提示。
-  // 默认给 300 行（≈6 屏），想看更早的用 ?lines=N（上限 2000，shadow 回滚 5000 行）
+  // 默认给 300 行（≈6 屏），想看更早的用 ?lines=N（上限 2000，shadow 回滚 5000 行）；
+  // ?full=1 取当前终端一屏（rows 行）——「完整显示」用，正好是一屏画面，不多不少
   screen = (ctx: Context) =>
     guard(ctx, () => {
       const session = this.manager.get(ctx.params.id)
+      if (ctx.query.full === '1') {
+        ok(ctx, { lines: session.screenTail(session.rows) } satisfies ScreenTailPayload)
+        return
+      }
       const want = Number(ctx.query.lines)
       const lines = Number.isFinite(want) ? Math.min(2000, Math.max(8, Math.floor(want))) : 300
       ok(ctx, { lines: session.screenTail(lines) } satisfies ScreenTailPayload)
@@ -783,6 +788,11 @@ export class ApiControllers {
         messages = readChatlogTranscript(source, project, id).messages
         // chatlog 聚合层也保留原会话 cwd；跨 agent 接续必须回原工作区，不能落到目标模板默认 cwd。
         cwd = chatlogCwd(source, project, id)
+      } else if (source === 'codebuddy') {
+        // codebuddy 不在 historyRoots 里（原生层单独解析），必须走自己的入口
+        const filePath = resolveCodebuddySessionFile(project, id)
+        messages = readHistoryAllMessages(filePath, undefined, (line) => parseWorkbuddy(line)[0] ?? null)
+        cwd = codebuddyWorkDirOf(filePath)
       } else if (source === 'kimi') {
         const filePath = resolveKimiWire(project, id)
         messages = readHistoryAllMessages(filePath, undefined, kimiParseLine)

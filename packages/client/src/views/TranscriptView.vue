@@ -225,8 +225,9 @@ async function fetchScreen() {
   const stickBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 48
   screenInFlight = true
   try {
-    const lines = screenExpanded.value ? 400 : 16
-    const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen?lines=${lines}`)
+    // 展开＝取终端一屏（rows 行），框随内容长高、不在框里滚；紧凑＝16 行看选项框
+    const query = screenExpanded.value ? 'full=1' : 'lines=16'
+    const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen?${query}`)
     if (gen !== sessionGen) return
     screenLines.value = data.lines
     screenError.value = false
@@ -656,7 +657,7 @@ onBeforeUnmount(() => {
           <pre
             ref="screenEl"
             class="peek-screen"
-            :class="{ focused: screenFocused }"
+            :class="{ focused: screenFocused, expanded: screenExpanded }"
             tabindex="0"
             role="textbox"
             aria-label="终端画面，点击后键盘直接输入"
@@ -852,6 +853,11 @@ onBeforeUnmount(() => {
 }
 .peek-screen::-webkit-scrollbar {
   display: none;
+}
+/* 展开全部＝整屏铺开，框随内容长高，不在框里滚（要往下看就滚页面） */
+.peek-screen.expanded {
+  max-height: none;
+  overflow: visible;
 }
 /* 键盘接管时给一圈色边，让人知道键进终端了 */
 .peek-screen.focused {
