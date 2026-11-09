@@ -375,11 +375,14 @@ export class ApiControllers {
       ok(ctx, result)
     })
 
-  // 对话模式「终端尾屏」：直读影子终端 buffer 尾行，供不切页查看 TUI 选项/确认提示
+  // 对话模式「终端尾屏」：直读影子终端 buffer，供不切页查看 TUI 选项/确认提示。
+  // 默认给 300 行（≈6 屏），想看更早的用 ?lines=N（上限 2000，shadow 回滚 5000 行）
   screen = (ctx: Context) =>
     guard(ctx, () => {
       const session = this.manager.get(ctx.params.id)
-      ok(ctx, { lines: session.screenTail(16) } satisfies ScreenTailPayload)
+      const want = Number(ctx.query.lines)
+      const lines = Number.isFinite(want) ? Math.min(2000, Math.max(8, Math.floor(want))) : 300
+      ok(ctx, { lines: session.screenTail(lines) } satisfies ScreenTailPayload)
     })
 
   // 独立会话程序化注入（2026-07-26 #2wlt 高律师批）：给 roomId=None 的会话一个带审计的

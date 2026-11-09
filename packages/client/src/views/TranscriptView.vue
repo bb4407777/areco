@@ -211,18 +211,27 @@ function onFocusIn(e: FocusEvent) {
 const showScreen = ref(false)
 const screenLines = ref<string[]>([])
 const screenError = ref(false)
+const screenEl = ref<HTMLPreElement | null>(null)
 let screenInFlight = false
 
 async function fetchScreen() {
   if (screenInFlight) return
   const gen = sessionGen
   const id = sessionId.value
+  // 刷新前先看有没有人翻到上面读旧内容：贴着底才跟着往下走，上翻读的时候不抢滚动位置
+  const el = screenEl.value
+  const stickBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 48
   screenInFlight = true
   try {
     const data = await api.get<ScreenTailPayload>(`/api/sessions/${id}/screen`)
     if (gen !== sessionGen) return
     screenLines.value = data.lines
     screenError.value = false
+    if (stickBottom) {
+      await nextTick()
+      const box = screenEl.value
+      if (box) box.scrollTop = box.scrollHeight
+    }
   } catch {
     if (gen !== sessionGen) return
     screenError.value = true
@@ -640,6 +649,7 @@ onBeforeUnmount(() => {
       <template v-if="showScreen">
         <div class="peek-wrap">
           <pre
+            ref="screenEl"
             class="peek-screen"
             :class="{ focused: screenFocused }"
             tabindex="0"
@@ -816,7 +826,7 @@ onBeforeUnmount(() => {
 .peek-screen {
   margin: 0;
   padding: 8px 12px;
-  max-height: 220px;
+  max-height: min(45vh, 420px);
   overflow: auto;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
