@@ -144,6 +144,28 @@ const SESSION_ROOTS: Record<string, { source: string; dir: string }[]> = {
 const sessionCache = new Map<string, { source: string; project: string } | null>()
 
 /**
+ * dsh（DeepSeek Harness，后台工人现役轨）不是 <project>/<id>.jsonl，而是
+ * <root>/<cwd-slug>/<session-id>/session.v4.jsonl.zstd（目录 + zstd），单列一段先查。
+ * 目录数几十个、existsSync 毫秒级，命中即随 sessionCache 一起缓存。
+ */
+const DSH_SESSIONS = path.join(os.homedir(), '.dsh', 'sessions')
+
+function locateDshSession(sessionId: string): { source: string; project: string } | null {
+  if (!sessionId.startsWith('session-')) return null
+  try {
+    for (const d of fs.readdirSync(DSH_SESSIONS, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue
+      if (fs.existsSync(path.join(DSH_SESSIONS, d.name, sessionId, 'session.v4.jsonl.zstd'))) {
+        return { source: 'dsh', project: d.name }
+      }
+    }
+  } catch {
+    /* 没装 dsh：按未命中处理 */
+  }
+  return null
+}
+
+/**
  * 会话文件位置：各引擎落盘都是 <root>/<cwd-slug>/<session-id>.jsonl。
  * 全量扫一遍 ~/.codebuddy/projects 要两分钟（1.5 万会话 / 6.3G），所以只按 id
  * 逐个 slug 目录做 existsSync（几百个目录，毫秒级），命中即缓存。
@@ -156,6 +178,12 @@ export function locateSession(sessionId: string, engine = ''): { source: string;
   // engine 传进来的常是轨 id（qoder-intl／codebuddy-ds-ai），先归到引擎族再查根目录
   const family = engine.startsWith('codebuddy') ? 'codebuddy'
     : engine.startsWith('qoder') ? 'qoder' : engine
+  // dsh 布局与其它引擎不同构，先单独认一次（命中率最高的是现役 dsh-wb 轨）
+  const dshHit = locateDshSession(sessionId)
+  if (dshHit) {
+    sessionCache.set(sessionId, dshHit)
+    return dshHit
+  }
   const primary = SESSION_ROOTS[family] ?? []
   const roots = primary.concat(Object.values(SESSION_ROOTS).flat().filter((r) => !primary.includes(r)))
   let found: { source: string; project: string } | null = null

@@ -243,6 +243,26 @@ export function resolveCodebuddySessionFile(project: string, id: string): string
   return filePath
 }
 
+// ---- dsh 原生层 ----
+// dsh（DeepSeek Harness，OPC 后台工人现役轨）落盘是
+// ~/.dsh/sessions/<cwd-slug>/<session-id>/session.v4.jsonl.zstd——目录 + zstd 压缩，
+// 既不是 <root>/<project>/<id>.jsonl，也不能按字节游标分页，故整解压后一次出全量。
+const DSH_SESSION_ID = /^session-[0-9a-fA-F-]+$/
+
+export function dshSessionsRoot(): string {
+  return path.join(os.homedir(), '.dsh', 'sessions')
+}
+
+/** dsh source/project/id → 校验后的会话文件绝对路径（防路径穿越） */
+export function resolveDshSessionFile(project: string, id: string, root = dshSessionsRoot()): string {
+  if (!SAFE_SEGMENT.test(project) || project.includes('..')) throw new Error('项目名不合法')
+  if (!DSH_SESSION_ID.test(id)) throw new Error('会话 id 不合法')
+  const filePath = path.join(root, project, id, 'session.v4.jsonl.zstd')
+  if (!filePath.startsWith(root + path.sep)) throw new Error('路径不合法')
+  if (!fs.existsSync(filePath)) throw new Error('历史会话不存在')
+  return filePath
+}
+
 // ---- kimi 原生层 ----
 // kimi 落盘三层布局：~/.kimi-code/sessions/<wd_slug>/session_<uuid>/{state.json, agents/main/wire.jsonl}，
 // 塞不进 scanRaw 的 <root>/<project>/<id>.jsonl 两层假设，仿 qclaw 独立扫描 + controller 独立分支。

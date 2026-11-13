@@ -11,7 +11,7 @@ import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
 import { DATA_DIR, saveConfig } from '../config'
 import { readTranscriptFile, transcriptPath } from '../services/transcript'
-import { agentKindOf, codexSessionIdOf, locateClaudeLayoutTranscript, locateClaudeTranscript, parseCodex, parseQclaw, parseWorkbuddy, readAgentTranscript } from '../services/agent-transcript'
+import { agentKindOf, codexSessionIdOf, dshRawFromCache, locateClaudeLayoutTranscript, locateClaudeTranscript, parseCodex, parseDsh, parseQclaw, parseWorkbuddy, readAgentTranscript } from '../services/agent-transcript'
 import {
   defaultHistoryRoots,
   historyCwd,
@@ -24,6 +24,7 @@ import {
   readHistoryAllMessages,
   readHistoryPage,
   resolveCodebuddySessionFile,
+  resolveDshSessionFile,
   resolveHistoryFile,
   resolveKimiWire,
   resolvePiSessionFile,
@@ -662,6 +663,14 @@ export class ApiControllers {
       // mcode 原生层：MiniMax Code 本地 sqlite 一站读全（消息量小，不按字节分页）
       if (source === 'mcode') {
         ok(ctx, readMcdeTranscript(id))
+        return
+      }
+      // dsh 原生层：OPC 后台工人现役轨，落盘 ~/.dsh/sessions/<cwd-slug>/<session-id>/session.v4.jsonl.zstd。
+      // 目录 + zstd 压缩，塞不进 <root>/<project>/<id>.jsonl 的字节分页假设，整解压一次出全量。
+      if (source === 'dsh') {
+        const filePath = resolveDshSessionFile(project, id)
+        const messages = parseDsh(dshRawFromCache(filePath))
+        ok(ctx, { messages, start: 0, end: messages.length, hasMore: false })
         return
       }
       // codebuddy 原生层：后台工人的无头会话（WorkBuddy 事件行，parseWorkbuddy 解析）。

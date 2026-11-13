@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { kimiEntries, kimiParseLine, kimiWorkDirOf, qoderEntries, readHistoryPage, resolveKimiWire } from './history'
+import { kimiEntries, kimiParseLine, kimiWorkDirOf, qoderEntries, readHistoryPage, resolveDshSessionFile, resolveKimiWire } from './history'
 
 /** 造一个 kimi 落盘 fixture：<tmp>/sessions/<wd>/<sessionId>/{state.json, agents/main/wire.jsonl} */
 function kimiFixture(): { root: string; wd: string; sid: string; wire: string } {
@@ -187,5 +187,23 @@ test('qoder 列表：cwd 取 workspace-directories，标题取首条用户输入
     assert.equal(entries[0].resumable, false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('resolveDshSessionFile 认 dsh 的目录 + zstd 布局，非法段一律拒', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'areco-dsh-history-'))
+  const project = '--Users-example-project--'
+  const sid = 'session_0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d'.replace('_', '-')
+  const dir = path.join(root, project, sid)
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'session.v4.jsonl.zstd')
+  fs.writeFileSync(file, '')
+  try {
+    assert.equal(resolveDshSessionFile(project, sid, root), file)
+    assert.throws(() => resolveDshSessionFile(project, 'no-session-prefix', root), /会话 id 不合法/)
+    assert.throws(() => resolveDshSessionFile('../escape', sid, root), /项目名不合法/)
+    assert.throws(() => resolveDshSessionFile(project, 'session-ffffffff-0000-0000-0000-000000000000', root), /历史会话不存在/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
   }
 })

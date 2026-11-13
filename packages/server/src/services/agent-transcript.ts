@@ -996,6 +996,14 @@ export function parseDsh(raw: string): TranscriptMessage[] {
           out.push(msgOf('assistant', [{ kind: 'tool_use', name, input: input.slice(0, MAX_TOOL_TEXT) }], ts))
         }
       }
+    } else if (type === 'tool/result') {
+      // 工具结果单独成事件（message.content 里是 text 块）：展示归左侧，与 codebuddy 同口径
+      const msg = (data.message ?? {}) as Record<string, unknown>
+      const text = dshTextContent(msg.content)
+      const isError = String((msg.source as { kind?: string })?.kind ?? '') === 'error'
+      if (text.trim()) {
+        out.push(msgOf('user', [{ kind: 'tool_result', text: text.slice(0, MAX_TOOL_TEXT), isError }], ts))
+      }
     } else if (type === 'assistant/thinking') {
       const t = String(data.text ?? '')
       if (t.trim()) out.push(msgOf('assistant', [{ kind: 'thinking', text: t.slice(0, MAX_PART_TEXT) }], ts))
@@ -1018,8 +1026,8 @@ function parseDshEvents(events: DshEvent[]): TranscriptMessage[] {
   return parseDsh(events.map((e) => JSON.stringify(e)).join('\n'))
 }
 
-/** dsh 支持：traffic 读取时用解码缓存，避免每 tick spawnSync zstd。 */
-function dshRawFromCache(file: string): string {
+/** dsh 支持：traffic 读取时用解码缓存，避免每 tick spawnSync zstd。历史页也走这里取正文。 */
+export function dshRawFromCache(file: string): string {
   const events = decodeDshEvents(file)
   return events.map((e) => JSON.stringify(e)).join('\n')
 }
