@@ -304,6 +304,9 @@ export class Session extends EventEmitter {
     if (this.status !== 'running' && this.status !== 'spawning') {
       throw new Error('会话未在运行')
     }
+    // 发送这一刻 agent 是否已经在跑一轮：codebuddy 自 v2.111 起「运行中 Enter＝实时 steer」，
+    // 不必等这轮结束；只有旧版才吞回车。据此决定「即时提交」还是「等 pty 安静再补回车」。
+    const busyAtSend = this.trafficState === 'working'
     this.setTrafficState('working')
     this.workingFromInput = false // 明确提交任务：transcript 随即落盘，不做空转兜底重算
     // 尾部 CR/LF 一律剥掉，回车由本方法统一补一个：否则文本带尾回车时 write() 的尾回车
@@ -325,7 +328,7 @@ export class Session extends EventEmitter {
     const boxAtWrite = boxBefore !== null
     // markWorking:false —— working 态本方法已显式置好，且 body 已无尾回车不触发 write 拆分
     if (body) this.write(body, { markWorking: false })
-    this.writeEnterWhenSettled(body, boxAtWrite, boxBefore)
+    this.writeEnterWhenSettled(body, boxAtWrite, boxBefore, busyAtSend)
     this.promptCount += 1
     if (!this.agentSessionId) this.setAgentBindingPrompt(text)
     // 占位名会话：第一句话即会话名（与历史对话标题同口径）。程序化注入（交接档案提示等）传 autoName:false 跳过。
@@ -349,12 +352,22 @@ export class Session extends EventEmitter {
    * ENTER_QUIET_MS 远小于 onceQuiet 的首屏 1200ms：只需跨过 TUI 的粘贴合帧窗口（实测数十 ms）。
    * ENTER_MAX_WAIT_MS 兜底：持续输出的会话不会让回车无限拖着不发。
    */
-  private writeEnterWhenSettled(body = '', boxAtWrite = true, boxBefore: string | null = null) {
+  private writeEnterWhenSettled(body = '', boxAtWrite = true, boxBefore: string | null = null, busy = false) {
     const snippet = body.replace(/\s+/g, ' ').trim().slice(-8)
     // 长 prompt（带附件的长路径等）TUI 逐字回显要好几秒，固定 2s 上限会在还在"粘贴"时
     // 就把回车塞进去、被判成换行（2026-11-08 报障的形态）。上限随长度放宽到 8s。
     const maxWait = Math.min(8000, Session.ENTER_MAX_WAIT_MS + body.length * 10)
     const startedTs = Date.now()
+    // 运行中提交（steer）：agent 一直在输出，pty 永远等不到「安静」，等下去只会把字挂在
+    // 输入框里（旧版吞回车时代的对策）。写完隔一小段就让回车作为独立击键落地，
+    // codebuddy ≥2.111 会把它当实时 steer 插进当前轮。
+    if (busy) {
+      setTimeout(() => {
+        if (!this.isRunning) return
+        this.submitUntilAccepted(snippet, body, !boxAtWrite, boxBefore, true)
+      }, Session.ENTER_STEER_DELAY_MS)
+      return
+    }
     const tryFire = () => {
       if (!this.isRunning) return
       const quietFor = Date.now() - this.lastOutputAt
@@ -381,10 +394,17 @@ export class Session extends EventEmitter {
    * 「用户确认是否在线」实锤，用户手动补了回车）。所以窗口放宽到 5 分钟、间隔逐步放慢；
    * 每次按键前都要求输入框里仍是刚写入的尾字，已提交（框里没了）立刻收手。
    */
-  private submitUntilAccepted(snippet: string, body = '', boxAbsentAtWrite = false, boxBefore: string | null = null) {
+  private submitUntilAccepted(
+    snippet: string,
+    body = '',
+    boxAbsentAtWrite = false,
+    boxBefore: string | null = null,
+    busy = false,
+  ) {
     const gen = ++this.enterGen
     const startedTs = Date.now()
-    const deadline = startedTs + 300_000
+    // 运行中走 steer：回车下得去就算送达，不需要 5 分钟长跑；窗口留 1 分钟够复看一轮。
+    const deadline = startedTs + (busy ? 60_000 : 300_000)
     let seenInBox = false
     let attempt = 0
     let rewrites = 0
@@ -397,9 +417,10 @@ export class Session extends EventEmitter {
      * 补回车。默认要求 pty 已安静一小段再按：TUI 还在重绘（恢复会话重放首屏）时，
      * 回车会跟残帧并成一次粘贴、沦为换行——这正是「按住回车只出换行、命令发不出去」的形态
      * （2026-11-09 报障）。force 只给「认不出输入框」的盲按兜底用。
+     * busy（运行中 steer）不设安静门槛：这轮一直在输出，等安静等于永远不按。
      */
     const press = (force = false) => {
-      if (!force && Date.now() - this.lastOutputAt < Session.SUBMIT_QUIET_MS) return
+      if (!force && !busy && Date.now() - this.lastOutputAt < Session.SUBMIT_QUIET_MS) return
       attempt++
       lastPressAt = Date.now()
       try {
@@ -473,7 +494,7 @@ export class Session extends EventEmitter {
       // 前 10 秒看勤一点（吞回车多发生在开头），之后放慢到 3 秒一拍，别把终端刷爆
       setTimeout(tick, Date.now() - startedTs < 10_000 ? Session.ENTER_RETRY_MS : 3000)
     }
-    setTimeout(tick, Session.ENTER_RETRY_MS)
+    setTimeout(tick, busy ? 0 : Session.ENTER_RETRY_MS)
   }
 
   /**
@@ -631,6 +652,8 @@ export class Session extends EventEmitter {
   private static readonly ENTER_RETRY_MS = 1000
   /** 等输入框画出来的时限：恢复会话重放首屏时回车按早了只会变成换行，这段窗口内不盲按 */
   private static readonly ENTER_BOX_WAIT_MS = 20_000
+  /** 运行中（steer）提交的起手延迟：与 write() 的尾回车拆分同口径，让 \r 作为独立击键落地 */
+  private static readonly ENTER_STEER_DELAY_MS = 300
   /** 补按回车的安静门槛：比首按更严，确保 TUI 已画完这一帧，回车才被当成独立击键 */
   private static readonly SUBMIT_QUIET_MS = 250
   onceQuiet(fn: () => void, quietMs = 1200, maxWaitMs = 30_000) {
