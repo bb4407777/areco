@@ -24,6 +24,7 @@ import { useSpawnWorker, HANDOFF_ROLES } from '../composables/useSpawnWorker'
 import { wsClient } from '../ws'
 import { TranscriptSpeechTracker } from '../utils/speechText'
 import { useSpeechStore } from '../stores/speech'
+import { isIOSLike } from '../audio/wavPlayer'
 
 const POLL_MS = 2500
 
@@ -34,6 +35,8 @@ const ui = useUiStore()
 const message = useMessage()
 const speech = useSpeechStore()
 const speechTracker = new TranscriptSpeechTracker()
+// 「兼容」开关只在 iPhone/iPad 上露出：桌面端 Web Audio 不受静音键影响，没有这个诉求
+const iosLike = isIOSLike()
 let speechCompletionPending = false
 const { openRename } = useRenameDialog()
 const { isRoleMode, handoffRole } = useSpawnWorker()
@@ -572,6 +575,10 @@ function onAutoSpeechChange(event: Event) {
   speech.setAutoEnabled((event.target as HTMLInputElement).checked)
 }
 
+function onCompatSpeechChange(event: Event) {
+  speech.setCompat((event.target as HTMLInputElement).checked)
+}
+
 function switchMode(mode: SessionViewMode) {
   // 只换本次路由，不写回默认（默认显示模式由设置页统一管，重进按默认，2026-07-24 维护者定）
   if (mode === 'terminal') router.push(`/session/${sessionId.value}`)
@@ -610,6 +617,9 @@ onBeforeUnmount(() => {
       <span class="spacer" />
       <label class="auto-speech" title="只播新完成的正式文本；刷新后仍关闭">
         <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />自动
+      </label>
+      <label v-if="iosLike" class="auto-speech" title="手机静音键拨到静音时，流式播报可能没声；勾上改用整句播放，代价是句间有停顿">
+        <input type="checkbox" :checked="speech.compat" @change="onCompatSpeechChange" />兼容
       </label>
       <ViewModeSwitch mode="chat" @switch="switchMode" />
       <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">

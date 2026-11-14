@@ -1,9 +1,28 @@
 import { defineStore } from 'pinia'
 import { AudioBlockedError, EmptyAudioError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
 import { splitForSpeech } from '../audio/sentences'
-import { WavElementPlayer, isIOSLike } from '../audio/wavPlayer'
+import { WavElementPlayer } from '../audio/wavPlayer'
 
 type AudioResult = { response: Response } | { error: unknown }
+
+/**
+ * 播放方式：默认流式 Web Audio（句间无缝）。
+ * 「兼容」退回整句 <audio>：iOS 侧边静音开关老版本会把 Web Audio 掐掉，那种情况勾上它，
+ * 代价是每句要等合成完再从头播，句间有停顿。
+ */
+const COMPAT_KEY = 'areco.speech.compat'
+
+export function readCompat(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(COMPAT_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function makePlayer(compat: boolean): SpeechPlayer {
+  return compat ? new WavElementPlayer() : new PcmPlayer()
+}
 
 export interface SpeechItem {
   messageId: string
@@ -33,10 +52,16 @@ export class SpeechQueue {
   private readonly pendingAuto = new Set<string>()
 
   constructor(
-    private readonly player: SpeechPlayer = new PcmPlayer(),
+    private player: SpeechPlayer = new PcmPlayer(),
     private readonly fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
     private readonly events: SpeechEvents = {},
   ) {}
+
+  /** 换播放器（切换流式/兼容）：先掐断在播的，避免两套输出叠在一起。 */
+  setPlayer(player: SpeechPlayer) {
+    this.player.stop()
+    this.player = player
+  }
 
   playManual(item: SpeechItem) {
     if (!item.text.trim()) return
@@ -198,6 +223,7 @@ let queue: SpeechQueue | null = null
 export const useSpeechStore = defineStore('speech', {
   state: () => ({
     autoEnabled: false,
+    compat: readCompat(),
     playingId: null as string | null,
     blocked: false,
     error: null as string | null,
@@ -205,13 +231,12 @@ export const useSpeechStore = defineStore('speech', {
   actions: {
     core(): SpeechQueue {
       if (!queue) {
-        // iOS 上用 <audio> 播放（Web Audio 会被侧边静音开关掐掉），其余端仍是流式 Web Audio
-        const player: SpeechPlayer = isIOSLike() ? new WavElementPlayer() : new PcmPlayer()
-        queue = new SpeechQueue(player, globalThis.fetch.bind(globalThis), {
+        queue = new SpeechQueue(makePlayer(this.compat), globalThis.fetch.bind(globalThis), {
           onPlaying: (id) => { this.playingId = id },
           onBlocked: (blocked) => { this.blocked = blocked },
           onError: (error) => { this.error = error },
         })
+        queue.setAutoEnabled(this.autoEnabled)
       }
       return queue
     },
@@ -224,6 +249,20 @@ export const useSpeechStore = defineStore('speech', {
     setAutoEnabled(enabled: boolean) {
       this.autoEnabled = enabled
       this.core().setAutoEnabled(enabled)
+    },
+    /** 切播放方式：流式 ↔ 兼容（整句 <audio>）。立即生效，下次播报走新播放器。 */
+    setCompat(enabled: boolean) {
+      if (enabled === this.compat) return
+      this.compat = enabled
+      try {
+        globalThis.localStorage?.setItem(COMPAT_KEY, enabled ? '1' : '0')
+      } catch {
+        // 隐私模式下写不了，只影响下次刷新，不影响本次
+      }
+      if (queue) {
+        queue.stop()
+        queue.setPlayer(makePlayer(enabled))
+      }
     },
     stop() {
       this.core().stop()
