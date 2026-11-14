@@ -10,6 +10,8 @@ type AckWaiter = { resolve: (ok: boolean) => void; timer: number }
 
 const ACK_FLUSH_MS = 50
 const SENDLINE_ACK_MS = 8000
+/** 回车回执等待：正常同机房往返 <50ms，1.2s 还没回执＝这一帧丢在半死连接上了 */
+const ENTER_ACK_MS = 1200
 const PING_MS = 20_000
 const PONG_STALE_MS = 45_000
 
@@ -29,6 +31,8 @@ class WsClient {
   private lastPongAt = Date.now()
   /** 服务端是否会回 sendline-ack：init 里报协议版本 ≥2 才算，旧服务端不读回执（否则每条都误判没送到） */
   private ackSupported = false
+  /** 服务端是否会回 input-ack：协议 ≥3 才算 */
+  private inputAckSupported = false
 
   connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
@@ -57,7 +61,7 @@ class WsClient {
         this.lastPongAt = Date.now()
         return
       }
-      if (msg.type === 'sendline-ack') {
+      if (msg.type === 'sendline-ack' || msg.type === 'input-ack') {
         this.settle(msg.id, true)
         return
       }
@@ -69,6 +73,7 @@ class WsClient {
       if (this.ws !== ws) return
       this.connected.value = false
       this.ackSupported = false
+      this.inputAckSupported = false
       this.ws = null
       this.stopPing()
       // 连接没了，等回执的一律判没送到，调用方好把文字放回输入框
@@ -115,6 +120,58 @@ class WsClient {
       if (!this.send({ type: 'sendline', sessionId, text, id })) {
         this.settle(id, false)
       }
+    })
+  }
+
+  /**
+   * 单独发一个回车，并等回执。终端里「字明明画在框里、就是发不出去」的一大来源是这一帧
+   * 丢在半死连接上——iOS 切后台回来 socket 看着 OPEN，write 出去就没了，服务端日志一个字没有
+   * （2026-11-14 实锤）。等不到 input-ack 就换一条干净连接补发，最多 3 次。
+   * 只补发回车本身，绝不重发正文：用户自己在框里打的字一个字都不碰。
+   */
+  async sendEnter(sessionId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (this.ws?.readyState !== WebSocket.OPEN) {
+        this.reconnectNow()
+        await this.waitOpen(3000)
+      }
+      if (await this.inputFrame(sessionId, '\r')) return true
+      // 没回执＝这帧没落地（或回执丢了）：换条连接再来一下。多按的那下落在空框上无害，
+      // 比「按了没反应」强——用户自己补按也是这样。
+      this.forceReconnect()
+      await this.waitOpen(3000)
+    }
+    return false
+  }
+
+  /** 发一个按键帧；带 id 的等 input-ack，超时即判没送到 */
+  private inputFrame(sessionId: string, data: string): Promise<boolean> {
+    if (this.ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false)
+    if (!this.inputAckSupported) return Promise.resolve(this.send({ type: 'input', sessionId, data }))
+    const id = `${Date.now().toString(36)}-${++this.seq}`
+    return new Promise<boolean>((resolve) => {
+      const timer = window.setTimeout(() => {
+        this.pendingSends.delete(id)
+        resolve(false)
+      }, ENTER_ACK_MS)
+      this.pendingSends.set(id, { resolve, timer })
+      if (!this.send({ type: 'input', sessionId, data, id })) this.settle(id, false)
+    })
+  }
+
+  /** 等连接就绪：回前台时退避还挂着长延迟，这里最多等 ms 毫秒 */
+  private waitOpen(ms: number): Promise<boolean> {
+    if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve(true)
+    return new Promise<boolean>((resolve) => {
+      const timer = window.setTimeout(() => {
+        off()
+        resolve(false)
+      }, ms)
+      const off = this.onOpen(() => {
+        clearTimeout(timer)
+        off()
+        resolve(true)
+      })
     })
   }
 
@@ -176,6 +233,7 @@ class WsClient {
     this.ws = null
     this.connected.value = false
     this.ackSupported = false
+    this.inputAckSupported = false
     this.stopPing()
     this.settleAll(false)
     if (old) {

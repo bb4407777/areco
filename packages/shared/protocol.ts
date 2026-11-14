@@ -3,7 +3,8 @@
 import type { TrafficState } from './traffic'
 
 // 2 = sendline 带回执（sendline-ack）与 ping/pong 心跳
-export const PROTOCOL_VERSION = 2
+// 3 = 终端按键也带回执（input-ack）：半死连接上丢一个回车帧，客户端能发现并补发
+export const PROTOCOL_VERSION = 3
 
 // 流控水位（字符数）
 export const FLOW_HIGH_WATER = 256 * 1024
@@ -187,6 +188,8 @@ export interface InputMsg {
   type: 'input'
   sessionId: string
   data: string
+  /** 客户端请求号：带上就要求服务端收下后回 input-ack（目前只有单独的回车带） */
+  id?: string
 }
 export interface SendlineMsg {
   type: 'sendline'
@@ -263,6 +266,12 @@ export interface SendlineAckMsg {
   sessionId: string
   id?: string
 }
+/** 终端按键已落到 pty（不代表 TUI 已受理）：帧确实到了，客户端据此判「这一下没丢」 */
+export interface InputAckMsg {
+  type: 'input-ack'
+  sessionId: string
+  id?: string
+}
 export interface PongMsg {
   type: 'pong'
 }
@@ -291,6 +300,7 @@ export type ServerMsg =
   | SessionRemovedMsg
   | ErrorMsg
   | SendlineAckMsg
+  | InputAckMsg
   | PongMsg
   | RoomMessageMsg
   | RoomsMsg

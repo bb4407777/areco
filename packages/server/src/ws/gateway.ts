@@ -155,7 +155,19 @@ export class Gateway {
         this.controllers.set(msg.sessionId, conn)
         const att = conn.attached.get(msg.sessionId)
         if (att && session.isRunning) session.resize(att.cols, att.rows)
-        session.write(msg.data)
+        try {
+          session.write(msg.data)
+        } catch (err) {
+          // 会话不在跑（刚退出/正在重启）：不写回执，让客户端补发或提示，不再静默咽下这一下
+          if (msg.id) {
+            log.warn(
+              `[input] ${msg.sessionId.slice(0, 8)} 写入失败（${msg.data === '\r' ? '回车' : `${msg.data.length} 字`}）：${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+          break
+        }
+        // 按键回执：半死连接上丢一帧（尤其回车），客户端等不到回执就能重发；文本帧照旧不回执
+        if (msg.id) this.send(conn, { type: 'input-ack', sessionId: msg.sessionId, id: msg.id })
         break
       }
       case 'sendline': {

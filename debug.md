@@ -223,3 +223,41 @@ iOS 上从相册选图会离开 WebView，WS 被系统掐断；回来时 `readyS
 ### 验证
 
 `tsc` 过、229 测试全过、`npm run build` 成功；待重启 8790。
+
+---
+
+## 2026-11-14 三续 · 为什么「框里有字」也一直治不好：丢的不是回车受理，是那一帧
+
+### 结论
+
+前面所有修复都挂在「回车已经到了服务端」之后（读输入框、补按、重写）。但 11:41 与 19:55
+两次实锤是**服务端日志一个字都没有**：sendline 没有、`[typed] 回车` 没有。也就是说回车帧
+根本没到服务端，屏幕侧再怎么读也读不到一个不存在的键。
+
+终端按键这条路的 `input` 帧**没有任何回执**——sendline 有 `sendline-ack`，按键没有。
+iOS 切后台回来 socket 常处于「readyState 还是 OPEN、写出去就没了」的半死状态，
+`send()` 返回 true（它只看 readyState），帧却落海，客户端和服务端都不知道。
+
+「正在输入中…」也不是送达回执：它由 trafficState=working 点亮，按下发送就亮，
+和服务端收没收到无关——这正是「看起来发出去了」的错觉来源。
+
+### 改动（协议 v3）
+
+- `protocol.ts`：`PROTOCOL_VERSION` 2→3；`InputMsg` 加可选 `id`；新增 `InputAckMsg`（input-ack）。
+- `gateway.ts`：`input` 带 id 时，写进 pty 成功即回 `input-ack`；会话不在跑则 warn 且不回执
+  （不吞、不假装成功，客户端据此重发或提示）。
+- `ws.ts`：`inputAckSupported`（init 报 ≥3 才启用，旧服务端不受影响）；新增 `sendEnter()`
+  ——回车单独发、等 `input-ack` 1.2s，超时就换一条干净连接补发，最多 3 次；
+  新增 `waitOpen()` 等重连就绪。**只补发回车帧，绝不重发正文**，用户打到一半的字不动。
+- `MobileKeyBar.vue`：⏎ 键走 `sendEnter`，三次不成弹「回车未送达」。
+- `useTerminal.ts`：xterm 单独一个 `\r` 走 `sendEnter`；含正文的同帧回车保持整帧发送
+  （仍由服务端 write() 的 300ms 拆帧 + 补按兜底），不拆成两帧破坏防粘贴。
+
+### 为什么不自动读框补按
+
+框里有字 ≠ 该发出去——用户可能正在打草稿。任何「看着像卡住就替你按回车」的逻辑都会
+提交半截内容。所以只补「我们确实发过、且没拿到回执」的那一帧。
+
+### 验证
+
+`tsc`（server/client）过、229 测试全过、`npm run build` 成功；待重启 8790。

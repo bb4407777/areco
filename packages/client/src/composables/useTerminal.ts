@@ -509,6 +509,17 @@ export function useTerminal(sessionId: string) {
       /* WebGL 不可用（旧设备/受限 webview）：保持 DOM 渲染 */
     }
     term.onData((data) => {
+      // 单独一个回车走带回执的通道：半死连接上丢的往往就是这一帧，等不到回执就换连接补发。
+      // 只补发回车、不重发正文，框里打到一半的字一个字都不动。
+      if (data === '\r') {
+        lastXtermSentText = data
+        lastXtermSentTs = performance.now()
+        logInput({ kind: 'data', detail: escapeDetail(data), ok: true })
+        void wsClient.sendEnter(sessionId).then((ok) => {
+          if (!ok) logInput({ kind: 'data', detail: 'enter-ack-timeout', ok: false })
+        })
+        return
+      }
       // 断线时按键静默丢失是「输入进不到」主诉之一：失败即触发立即重连（顶部横幅已提示断线，这里不再弹 toast 刷屏）
       const ok = wsClient.send({ type: 'input', sessionId, data })
       // 记录 xterm 已发文本：fallback 兜底按此去重（见 fallbackIfXtermSilent）

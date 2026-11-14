@@ -9,18 +9,28 @@ const message = useMessage()
 
 const KEYS: { label: string; seq: string; wide?: boolean }[] = [
   { label: 'Esc', seq: '\x1b' },
-  { label: 'Tab', seq: '\t' },
-  { label: '⇧Tab', seq: '\x1b[Z' },
   { label: '↑', seq: '\x1b[A' },
   { label: '↓', seq: '\x1b[B' },
   { label: '←', seq: '\x1b[D' },
   { label: '→', seq: '\x1b[C' },
+  { label: '⏎', seq: '\r' },
+  { label: 'Tab', seq: '\t' },
+  { label: '⇧Tab', seq: '\x1b[Z' },
   { label: '^C', seq: '\x03' },
   { label: '^D', seq: '\x04' },
-  { label: '⏎', seq: '\r' },
 ]
 
 function sendSeq(seq: string) {
+  // 回车走带回执的通道：这一帧丢了能发现并补发，不再出现「按了 ⏎ 框里字不动」
+  if (seq === '\r') {
+    void wsClient.sendEnter(props.sessionId).then((ok) => {
+      if (!ok) {
+        message.warning('回车未送达，连接异常，请再按一次')
+        wsClient.reconnectNow()
+      }
+    })
+    return
+  }
   if (!wsClient.send({ type: 'input', sessionId: props.sessionId, data: seq })) {
     message.warning('连接已断开，按键未送达，正在重连…')
     wsClient.reconnectNow()
