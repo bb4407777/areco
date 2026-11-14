@@ -309,6 +309,14 @@ export class Session extends EventEmitter {
     // submitUntilAccepted 兜底，这条直输路径此前一次都没兜。
     if (data === '\r') {
       const snippet = this.takeTypedSnippet()
+      // 现场取证（一次回车一行）：回车有没有到、输入框认不认得出、尾字在不在框里。
+      // 下次再有人报「卡住」，看这一行就能定位是没到、认不出框、还是框里确实挂着没提交。
+      const box = this.inputBoxText()
+      const flatBox = box === null ? null : box.replace(/\s+/g, '')
+      const state = box === null ? '认不出' : flatBox!.includes(snippet.replace(/\s+/g, '')) ? '含尾字' : '空/异'
+      log.info(
+        `[typed] 回车 ${this.id.slice(0, 8)} 尾字「${snippet}」框${state} harness=${this.harness ?? '-'}`,
+      )
       this.pty?.write(data)
       this.guardTypedSubmit(snippet)
       return
@@ -464,6 +472,8 @@ export class Session extends EventEmitter {
      * 不按，字就永远挂在输入框（2026-11-11 日志「补按 0 次；输入框一直挂着该文本」）。
      */
     const press = (force = false) => {
+      // 两下回车至少隔这么久：早期轮询已缩到 150ms 一拍，没这道闸会把 \r 连珠炮打进去
+      if (!force && Date.now() - lastPressAt < Session.ENTER_PRESS_GAP_MS) return
       const stale = seenSince > 0 && Date.now() - seenSince >= Session.SUBMIT_FORCE_AFTER_MS
       if (!force && !busy && !stale && Date.now() - this.lastOutputAt < Session.SUBMIT_QUIET_MS) return
       attempt++
@@ -506,7 +516,7 @@ export class Session extends EventEmitter {
         }
         press()
       } else if (seenInBox) {
-        log.info(`[submit] 已提交（补按 ${attempt} 次）`)
+        log.info(`[submit] 已提交（补按 ${attempt} 次，${Date.now() - startedTs}ms）`)
         return
       } else if (flatBox === null) {
         // 输入框还没画出来：绝不按回车（按下去就是换行，2026-11-09 报障）。
@@ -525,7 +535,7 @@ export class Session extends EventEmitter {
           log.info(`[submit] 正文未落地，重写第 ${rewrites + 1} 次（尾字「${snippet}」）`)
           rewrite()
         } else if (!boxAbsentAtWrite && Date.now() - startedTs >= 3000) {
-          log.info(`[submit] 已提交（补按 ${attempt} 次）`)
+          log.info(`[submit] 已提交（补按 ${attempt} 次，${Date.now() - startedTs}ms）`)
           return
         }
       } else {
@@ -540,9 +550,12 @@ export class Session extends EventEmitter {
         return
       }
       // 前 10 秒看勤一点（吞回车多发生在开头），之后放慢到 3 秒一拍，别把终端刷爆
-      setTimeout(tick, Date.now() - startedTs < 10_000 ? Session.ENTER_RETRY_MS : 3000)
+      // 前 3 秒密看（150ms 一拍）：正文回显一到位就按，用户不用盯着字停在框里等一秒；
+      // 之后再放慢到 1 秒、3 秒，别把终端刷爆。按键节奏由 press() 的间隔闸管。
+      const elapsed = Date.now() - startedTs
+      setTimeout(tick, elapsed < 3000 ? Session.ENTER_POLL_MS : elapsed < 10_000 ? Session.ENTER_RETRY_MS : 3000)
     }
-    setTimeout(tick, busy ? 0 : Session.ENTER_RETRY_MS)
+    setTimeout(tick, busy ? 0 : Session.ENTER_FIRST_TICK_MS)
   }
 
   /**
@@ -563,15 +576,16 @@ export class Session extends EventEmitter {
     let seenInBox = false
     let seenSince = 0
     let attempts = 0
-    let lastPressAt = 0
     const schedule = () => {
-      if (Date.now() - startedTs >= Session.TYPED_SUBMIT_WINDOW_MS) {
+      const elapsed = Date.now() - startedTs
+      if (elapsed >= Session.TYPED_SUBMIT_WINDOW_MS) {
         log.warn(
-          `[typed-submit] ${Math.round(Session.TYPED_SUBMIT_WINDOW_MS / 1000)}s 仍未提交，放弃补按（补按 ${attempts} 次；尾字「${snippet}」）\n${this.screenTail(12).join('\n')}`,
+          `[typed-submit] ${Math.round(Session.TYPED_SUBMIT_WINDOW_MS / 60_000)} 分钟仍未提交，放弃补按（补按 ${attempts} 次；尾字「${snippet}」）\n${this.screenTail(12).join('\n')}`,
         )
         return
       }
-      setTimeout(tick, Session.TYPED_SUBMIT_RETRY_MS)
+      // 前 10 秒看勤一点，之后放慢到 3 秒一拍（与 submitUntilAccepted 同节奏，别刷爆终端）
+      setTimeout(tick, elapsed < 10_000 ? Session.TYPED_SUBMIT_RETRY_MS : 3000)
     }
     const tick = () => {
       if (!this.isRunning || gen !== this.rawEnterGen) return
@@ -588,11 +602,9 @@ export class Session extends EventEmitter {
         const stale = Date.now() - seenSince >= Session.SUBMIT_FORCE_AFTER_MS
         if (
           (Date.now() - this.lastOutputAt >= Session.SUBMIT_QUIET_MS || stale) &&
-          Date.now() - lastPressAt >= Session.TYPED_SUBMIT_RETRY_MS &&
           attempts < Session.TYPED_SUBMIT_MAX_PRESS
         ) {
           attempts++
-          lastPressAt = Date.now()
           try {
             this.pty?.write('\r')
           } catch {
@@ -766,6 +778,12 @@ export class Session extends EventEmitter {
   private static readonly ENTER_MAX_WAIT_MS = 2000
   /** 提交复看间隔：第一下回车被 TUI 吞掉后，隔这么久再看一眼输入框、必要时再按一下 */
   private static readonly ENTER_RETRY_MS = 1000
+  /** 提交复看的第一拍：正文写完只隔这么久就去看输入框（旧值是整整 1 秒，字停在框里肉眼可见） */
+  private static readonly ENTER_FIRST_TICK_MS = 120
+  /** 前 3 秒的密看节奏：回显一落地就按回车，别让用户等满 1 秒 */
+  private static readonly ENTER_POLL_MS = 150
+  /** 两下提交回车的最小间隔：密看时防止 \r 连发被 TUI 当粘贴并帧 */
+  private static readonly ENTER_PRESS_GAP_MS = 600
   /** 等输入框画出来的时限：恢复会话重放首屏时回车按早了只会变成换行，这段窗口内不盲按 */
   private static readonly ENTER_BOX_WAIT_MS = 20_000
   /** 运行中（steer）提交的起手延迟：与 write() 的尾回车拆分同口径，让 \r 作为独立击键落地 */
@@ -774,11 +792,11 @@ export class Session extends EventEmitter {
   private static readonly SUBMIT_QUIET_MS = 250
   /** 尾字在输入框滞留超过这个时长即放开安静门槛强按（持续输出的会话永远等不到安静窗） */
   private static readonly SUBMIT_FORCE_AFTER_MS = 1500
-  /** 键盘直输回车的复看节奏：每 700ms 看一次输入框，最长 15s 收手 */
-  private static readonly TYPED_SUBMIT_RETRY_MS = 700
-  private static readonly TYPED_SUBMIT_WINDOW_MS = 15_000
-  /** 直输复看的补按上限：万一尾字正好是框里别处的旧字，最多补这几下就收手 */
-  private static readonly TYPED_SUBMIT_MAX_PRESS = 8
+  /** 键盘直输回车的复看节奏：前 10s 每秒看一次，之后 3s 一拍；窗口 5 分钟（长任务挂着也等轮末） */
+  private static readonly TYPED_SUBMIT_RETRY_MS = 1000
+  private static readonly TYPED_SUBMIT_WINDOW_MS = 300_000
+  /** 直输复看的补按上限：5 分钟 3s 一拍的封顶，别无限按 */
+  private static readonly TYPED_SUBMIT_MAX_PRESS = 100
   /** 按完回车多久内还没在输入框见到尾字，就认定文字已上送（或丢了），不再盲按换行 */
   private static readonly TYPED_SUBMIT_FIRST_SEEN_MS = 2500
   onceQuiet(fn: () => void, quietMs = 1200, maxWaitMs = 30_000) {

@@ -196,3 +196,30 @@ iOS 上从相册选图会离开 WebView，WS 被系统掐断；回来时 `readyS
 ### 验证
 
 `tsc --noEmit` 过、服务端 229 个测试全过、`npm run build` 出包成功；需重启 8790 生效。
+
+---
+
+## 2026-11-14 续 · 手机端「发送后字停在框里一两秒」的余量
+
+### 复查日志
+
+`[sendline] 收到 a3d0d9cb，33 字` 11:25:09.449 → `[submit] 已提交（补按 1 次）` 11:25:10.756。
+三条手机端消息全是「补按 1 次、约 1.3 秒」——不是没送到，也不是补按救回来的：
+
+- `press()` 里 `attempt++` 就在按键处，所以「补按 1 次」＝按了 1 下就成，
+  没有第二下；慢的是 `submitUntilAccepted` 的**第一拍要等 `ENTER_RETRY_MS`(1s)** 才去看输入框。
+- 加上 `writeEnterWhenSettled` 的 120ms 安静窗，用户按发送到真提交约 1.1–1.3s，
+  字就明晃晃停在终端输入框里，看着像卡住。
+- 恢复会话那条更久（11:24:23 收到 → 11:24:34 才提交）：那 11 秒是 CLI 冷启动，
+  网关等就绪再注入，与提交逻辑无关。
+
+### 改动（`packages/server/src/services/session.ts`）
+
+- `submitUntilAccepted` 第一拍 1s → 120ms（`ENTER_FIRST_TICK_MS`），前 3 秒 150ms 密看
+  （`ENTER_POLL_MS`），3–10s 回到 1s，之后 3s。
+- 新增 `ENTER_PRESS_GAP_MS`=600ms：密看时两下回车至少隔 600ms，防 `\r` 连发并帧。
+- 提交日志带上耗时：`已提交（补按 N 次，XXXms）`，下次看日志直接读延迟。
+
+### 验证
+
+`tsc` 过、229 测试全过、`npm run build` 成功；待重启 8790。
