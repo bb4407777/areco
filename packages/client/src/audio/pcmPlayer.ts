@@ -1,3 +1,5 @@
+import { holdMediaSession } from './mediaSession'
+
 export class AudioBlockedError extends Error {
   constructor() {
     super('浏览器尚未允许声音')
@@ -63,6 +65,8 @@ export class PcmPlayer implements SpeechPlayer {
     this.context ??= new AudioContext()
     if (this.context.state !== 'running') await this.context.resume()
     if (this.context.state !== 'running') throw new AudioBlockedError()
+    // 借媒体元素把音频会话钉在播放通道，静音键开着也能出声（见 mediaSession.ts）
+    holdMediaSession()
   }
 
   async play(stream: ReadableStream<Uint8Array>): Promise<void> {
