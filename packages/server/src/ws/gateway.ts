@@ -177,13 +177,21 @@ export class Gateway {
           }
           const revived = session
           log.info(`sendline 触发自动恢复 ${revived.id.slice(0, 8)}，就绪后注入`)
+          let injected = false
           revived.onceQuiet(() => {
+            injected = true
             try {
+              log.info(`恢复就绪，注入 ${revived.id.slice(0, 8)}（${msg.text.length} 字）`)
               revived.sendline(msg.text)
-            } catch {
-              /* 注入前进程又退了，丢弃 */
+            } catch (err) {
+              // 旧写法静默丢弃：注入前进程又退了，消息就此消失、日志无痕（2026-11-14 手机端实锤）
+              log.warn(`恢复后注入失败 ${revived.id.slice(0, 8)}：${err instanceof Error ? err.message : String(err)}`)
             }
           })
+          // 兜底留痕：onceQuiet 因会话中途退出而不再回调时，消息会凭空消失、日志一个字都没有
+          setTimeout(() => {
+            if (!injected) log.warn(`恢复后 45s 仍未注入 ${revived.id.slice(0, 8)}（${msg.text.length} 字），会话状态 ${revived.status}`)
+          }, 45_000)
           ack()
           break
         }

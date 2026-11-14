@@ -291,6 +291,7 @@ export class Session extends EventEmitter {
     if (data.length > 1 && data.endsWith('\r')) {
       this.noteTypedInput(data.slice(0, -1))
       const snippet = this.takeTypedSnippet()
+      log.info(`[typed] 同帧回车 ${this.id.slice(0, 8)} 正文 ${data.length - 1} 字，尾字「${snippet}」`)
       this.pty?.write(data.slice(0, -1))
       setTimeout(() => {
         try {
@@ -411,13 +412,25 @@ export class Session extends EventEmitter {
     // codebuddy ≥2.111 会把它当实时 steer 插进当前轮。
     if (busy) {
       setTimeout(() => {
-        if (!this.isRunning) return
+        if (!this.isRunning) {
+          log.warn(`[submit] steer 注入时会话已退出（尾字「${snippet}」）`)
+          return
+        }
         this.submitUntilAccepted(snippet, body, !boxAtWrite, boxBefore, true)
       }, Session.ENTER_STEER_DELAY_MS)
       return
     }
     const tryFire = () => {
-      if (!this.isRunning) return
+      // 会话正瞬断/重启时不能把回车丢掉：字已经写进 PTY，丢掉就永远挂在输入框里
+      // （2026-11-14 手机端实锤：恢复后注入只写进正文，回车一次没按，日志里连复看记录都没有）
+      if (!this.isRunning) {
+        if (Date.now() - startedTs < maxWait + 10_000) {
+          setTimeout(tryFire, Session.ENTER_QUIET_MS)
+        } else {
+          log.warn(`[submit] 会话未在运行，补回车放弃（尾字「${snippet}」）`)
+        }
+        return
+      }
       const quietFor = Date.now() - this.lastOutputAt
       const waited = Date.now() - startedTs
       // 除了"输出安静"，还要看见刚写的尾字已进输入框（文本真的落地了）再按回车。
@@ -451,6 +464,9 @@ export class Session extends EventEmitter {
   ) {
     const gen = ++this.enterGen
     const startedTs = Date.now()
+    log.info(
+      `[submit] 复看开始（${body.length} 字，尾字「${snippet}」，输入框${boxBefore === null ? '未画出' : '已画出'}）`,
+    )
     // 运行中走 steer：回车下得去就算送达，不需要 5 分钟长跑；窗口留 1 分钟够复看一轮。
     const deadline = startedTs + (busy ? 60_000 : 300_000)
     let seenInBox = false
@@ -499,7 +515,12 @@ export class Session extends EventEmitter {
       return
     }
     const tick = () => {
-      if (!this.isRunning || gen !== this.enterGen) return
+      if (!this.isRunning || gen !== this.enterGen) {
+        // 旧实现静默 return：字挂在框里、日志一个字都没有，事后无从查（2026-11-14 手机端实锤）。
+        // 复看被中止只可能是会话退出或被新一轮提交接管，两种都该留痕。
+        log.info(`[submit] 复看中止（${this.isRunning ? '被新一轮提交接管' : '会话退出'}，尾字「${snippet}」）`)
+        return
+      }
       const box = this.inputBoxText()
       let flatBox = box === null ? null : box.replace(/\s+/g, '')
       const flatSnippet = snippet.replace(/\s+/g, '')
@@ -588,10 +609,18 @@ export class Session extends EventEmitter {
       setTimeout(tick, elapsed < 10_000 ? Session.TYPED_SUBMIT_RETRY_MS : 3000)
     }
     const tick = () => {
-      if (!this.isRunning || gen !== this.rawEnterGen) return
+      if (!this.isRunning || gen !== this.rawEnterGen) {
+        log.info(`[typed-submit] 复看中止（${this.isRunning ? '被新一轮提交接管' : '会话退出'}，尾字「${snippet}」）`)
+        return
+      }
       const box = this.inputBoxText()
       // 认不出输入框（界面已切走/切到对话框）：不猜，收手
-      if (box === null) return
+      if (box === null) {
+        // 旧写法静默收手：事后连「为什么没补按」都查不到（2026-11-14 手机端实锤）。界面认不出
+        // 时可能正停在权限框/菜单上，回车会误触，所以只留痕不盲按。
+        log.warn(`[typed-submit] 认不出输入框，停止复看（尾字「${snippet}」）\n${this.screenTail(6).join('\n')}`)
+        return
+      }
       const flatBox = box.replace(/\s+/g, '')
       if (flatBox.includes(flatSnippet)) {
         // 尾字还在框里＝这下车被吞了，补按（忙/刷屏时不等安静窗）
@@ -618,6 +647,7 @@ export class Session extends EventEmitter {
         return
       } else if (Date.now() - startedTs >= Session.TYPED_SUBMIT_FIRST_SEEN_MS) {
         // 一直没见到尾字：文字可能被 TUI 丢了或从未上屏，盲按只会往框里塞换行
+        log.warn(`[typed-submit] 框里从未见到尾字「${snippet}」，停止复看`)
         return
       }
       schedule()
