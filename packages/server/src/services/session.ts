@@ -109,6 +109,10 @@ export class Session extends EventEmitter {
   lastLine = ''
   /** 提交回车复看的世代号：新一轮 sendline 或会话退出即作废上一轮的复看 */
   private enterGen = 0
+  /** 键盘直输回车复看的世代号：再按一次回车即作废上一轮（见 guardTypedSubmit） */
+  private rawEnterGen = 0
+  /** 终端直输最近键入的文字（剥掉 ESC 序列）：回车后核对是否还挂在输入框 */
+  private typedInput = ''
   cols = DEFAULT_COLS
   rows = DEFAULT_ROWS
   promptCount = 0
@@ -285,17 +289,47 @@ export class Session extends EventEmitter {
     // 同一 TCP 帧，用户表现为"字被吞/发送没反应"，2026-07-20 协议级复现）。
     // 与 sendline 同口径：尾回车延迟 300ms 单独写，模拟真实键入。单独一个 '\r' 不拆。
     if (data.length > 1 && data.endsWith('\r')) {
+      this.noteTypedInput(data.slice(0, -1))
+      const snippet = this.takeTypedSnippet()
       this.pty?.write(data.slice(0, -1))
       setTimeout(() => {
         try {
-          if (this.isRunning) this.pty?.write('\r')
+          if (this.isRunning) {
+            this.pty?.write('\r')
+            this.guardTypedSubmit(snippet)
+          }
         } catch {
           /* 会话可能已退出 */
         }
       }, 300)
       return
     }
+    // 键盘直输的回车同样要复看：TUI 会把「紧跟文字的回车」当粘贴的换行吞掉，
+    // 字停在输入框、屏幕上看得见却发不出去（2026-11-14 报障）。sendline 有
+    // submitUntilAccepted 兜底，这条直输路径此前一次都没兜。
+    if (data === '\r') {
+      const snippet = this.takeTypedSnippet()
+      this.pty?.write(data)
+      this.guardTypedSubmit(snippet)
+      return
+    }
+    this.noteTypedInput(data)
     this.pty?.write(data)
+  }
+
+  /** 记下终端直输的文字（剥掉 ESC 序列/控制字符），回车时取尾字核对是否还挂在输入框 */
+  private noteTypedInput(data: string) {
+    // eslint-disable-next-line no-control-regex
+    const text = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x1f\x7f]/g, '')
+    if (!text) return
+    this.typedInput = (this.typedInput + text).slice(-200)
+  }
+
+  /** 取刚敲的尾字（回车提交前的最后一段文字），取完即清，避免下一轮误判 */
+  private takeTypedSnippet(): string {
+    const tail = this.typedInput.replace(/\s+/g, ' ').trim().slice(-8)
+    this.typedInput = ''
+    return tail
   }
 
   sendline(text: string, opts?: { autoName?: boolean }) {
@@ -309,6 +343,9 @@ export class Session extends EventEmitter {
     const busyAtSend = this.trafficState === 'working'
     this.setTrafficState('working')
     this.workingFromInput = false // 明确提交任务：transcript 随即落盘，不做空转兜底重算
+    // 走程序化提交通道了，键盘直输那条路的复看作废，免得两套补按抢同一个输入框
+    this.rawEnterGen += 1
+    this.typedInput = ''
     // 尾部 CR/LF 一律剥掉，回车由本方法统一补一个：否则文本带尾回车时 write() 的尾回车
     // 拆分分支（见下）会再补一个，两个 \r 前后脚到达——codex 表现为"要按两次 enter"，
     // 或两回车并帧被 TUI 当粘贴、后一个沦为换行（2026-07-23 维护者报障 #1/#2 同源）。
@@ -328,6 +365,9 @@ export class Session extends EventEmitter {
     const boxAtWrite = boxBefore !== null
     // markWorking:false —— working 态本方法已显式置好，且 body 已无尾回车不触发 write 拆分
     if (body) this.write(body, { markWorking: false })
+    // write(body) 会把正文记进直输缓冲；程序化通道的提交由 submitUntilAccepted 管，这里清掉，
+    // 免得下一轮用户敲回车时把这条正文的尾字当成「自己刚敲的」
+    this.typedInput = ''
     this.writeEnterWhenSettled(body, boxAtWrite, boxBefore, busyAtSend)
     this.promptCount += 1
     if (!this.agentSessionId) this.setAgentBindingPrompt(text)
@@ -406,6 +446,8 @@ export class Session extends EventEmitter {
     // 运行中走 steer：回车下得去就算送达，不需要 5 分钟长跑；窗口留 1 分钟够复看一轮。
     const deadline = startedTs + (busy ? 60_000 : 300_000)
     let seenInBox = false
+    // 尾字第一次被看见在输入框里的时刻：用来判「一直挂着没被受理」
+    let seenSince = 0
     let attempt = 0
     let rewrites = 0
     let lastPressAt = 0
@@ -418,9 +460,12 @@ export class Session extends EventEmitter {
      * 回车会跟残帧并成一次粘贴、沦为换行——这正是「按住回车只出换行、命令发不出去」的形态
      * （2026-11-09 报障）。force 只给「认不出输入框」的盲按兜底用。
      * busy（运行中 steer）不设安静门槛：这轮一直在输出，等安静等于永远不按。
+     * stale：尾字在框里滞留超时——长任务刷屏的会话永远等不到安静窗，旧逻辑在这里一次都
+     * 不按，字就永远挂在输入框（2026-11-11 日志「补按 0 次；输入框一直挂着该文本」）。
      */
     const press = (force = false) => {
-      if (!force && !busy && Date.now() - this.lastOutputAt < Session.SUBMIT_QUIET_MS) return
+      const stale = seenSince > 0 && Date.now() - seenSince >= Session.SUBMIT_FORCE_AFTER_MS
+      if (!force && !busy && !stale && Date.now() - this.lastOutputAt < Session.SUBMIT_QUIET_MS) return
       attempt++
       lastPressAt = Date.now()
       try {
@@ -455,7 +500,10 @@ export class Session extends EventEmitter {
       if (flatBox !== null && !seenInBox && flatBefore !== null && flatBox === flatBefore) flatBox = ''
       if (flatBox !== null && flatBox.includes(flatSnippet)) {
         // 尾字还在输入框里＝没提交（第一下回车被 TUI 吞了/还在粘贴合帧），再按
-        seenInBox = true
+        if (!seenInBox) {
+          seenInBox = true
+          seenSince = Date.now()
+        }
         press()
       } else if (seenInBox) {
         log.info(`[submit] 已提交（补按 ${attempt} 次）`)
@@ -495,6 +543,74 @@ export class Session extends EventEmitter {
       setTimeout(tick, Date.now() - startedTs < 10_000 ? Session.ENTER_RETRY_MS : 3000)
     }
     setTimeout(tick, busy ? 0 : Session.ENTER_RETRY_MS)
+  }
+
+  /**
+   * 键盘直输的回车复看（终端模式下用户自己敲的命令）。
+   * 症状：命令字已经画在输入框里、屏幕看得见，就是发不出去——TUI 把紧随其后的回车当粘贴
+   * 换行吞了，第一下回车只落成换行，之后再没人补按（sendline 有 submitUntilAccepted，
+   * 直输这条路径此前没有任何兜底，2026-11-14 报障）。
+   * 做法：按回车时记下刚敲的尾字，随后看输入框——尾字还在框里 = 这下车没被受理，
+   * 等 pty 安静再补按，直到框里内容变了/被清空；一直没见到尾字则视为已受理，不盲按。
+   * 只认得出 agent 输入框（`>`/`❯`/`›` 提示符）的会话才启动，裸 shell、vim、菜单类不碰。
+   */
+  private guardTypedSubmit(snippet: string) {
+    if (snippet.length < 2) return
+    if (!this.harness) return // 非 agent 会话（裸 shell 等）不猜
+    const gen = ++this.rawEnterGen
+    const flatSnippet = snippet.replace(/\s+/g, '')
+    const startedTs = Date.now()
+    let seenInBox = false
+    let seenSince = 0
+    let attempts = 0
+    let lastPressAt = 0
+    const schedule = () => {
+      if (Date.now() - startedTs >= Session.TYPED_SUBMIT_WINDOW_MS) {
+        log.warn(
+          `[typed-submit] ${Math.round(Session.TYPED_SUBMIT_WINDOW_MS / 1000)}s 仍未提交，放弃补按（补按 ${attempts} 次；尾字「${snippet}」）\n${this.screenTail(12).join('\n')}`,
+        )
+        return
+      }
+      setTimeout(tick, Session.TYPED_SUBMIT_RETRY_MS)
+    }
+    const tick = () => {
+      if (!this.isRunning || gen !== this.rawEnterGen) return
+      const box = this.inputBoxText()
+      // 认不出输入框（界面已切走/切到对话框）：不猜，收手
+      if (box === null) return
+      const flatBox = box.replace(/\s+/g, '')
+      if (flatBox.includes(flatSnippet)) {
+        // 尾字还在框里＝这下车被吞了，补按（忙/刷屏时不等安静窗）
+        if (!seenInBox) {
+          seenInBox = true
+          seenSince = Date.now()
+        }
+        const stale = Date.now() - seenSince >= Session.SUBMIT_FORCE_AFTER_MS
+        if (
+          (Date.now() - this.lastOutputAt >= Session.SUBMIT_QUIET_MS || stale) &&
+          Date.now() - lastPressAt >= Session.TYPED_SUBMIT_RETRY_MS &&
+          attempts < Session.TYPED_SUBMIT_MAX_PRESS
+        ) {
+          attempts++
+          lastPressAt = Date.now()
+          try {
+            this.pty?.write('\r')
+          } catch {
+            return
+          }
+          log.info(`[typed-submit] 回车未受理，补按第 ${attempts} 次`)
+        }
+      } else if (seenInBox) {
+        // 尾字从框里消失＝已提交，收手
+        log.info(`[typed-submit] 已提交（补按 ${attempts} 次）`)
+        return
+      } else if (Date.now() - startedTs >= Session.TYPED_SUBMIT_FIRST_SEEN_MS) {
+        // 一直没见到尾字：文字可能被 TUI 丢了或从未上屏，盲按只会往框里塞换行
+        return
+      }
+      schedule()
+    }
+    schedule()
   }
 
   /**
@@ -656,6 +772,15 @@ export class Session extends EventEmitter {
   private static readonly ENTER_STEER_DELAY_MS = 300
   /** 补按回车的安静门槛：比首按更严，确保 TUI 已画完这一帧，回车才被当成独立击键 */
   private static readonly SUBMIT_QUIET_MS = 250
+  /** 尾字在输入框滞留超过这个时长即放开安静门槛强按（持续输出的会话永远等不到安静窗） */
+  private static readonly SUBMIT_FORCE_AFTER_MS = 1500
+  /** 键盘直输回车的复看节奏：每 700ms 看一次输入框，最长 15s 收手 */
+  private static readonly TYPED_SUBMIT_RETRY_MS = 700
+  private static readonly TYPED_SUBMIT_WINDOW_MS = 15_000
+  /** 直输复看的补按上限：万一尾字正好是框里别处的旧字，最多补这几下就收手 */
+  private static readonly TYPED_SUBMIT_MAX_PRESS = 8
+  /** 按完回车多久内还没在输入框见到尾字，就认定文字已上送（或丢了），不再盲按换行 */
+  private static readonly TYPED_SUBMIT_FIRST_SEEN_MS = 2500
   onceQuiet(fn: () => void, quietMs = 1200, maxWaitMs = 30_000) {
     let quietTimer: ReturnType<typeof setTimeout> | null = null
     let done = false
