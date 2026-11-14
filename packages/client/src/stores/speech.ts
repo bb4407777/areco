@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { AudioBlockedError, EmptyAudioError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
 import { splitForSpeech } from '../audio/sentences'
-import { WavElementPlayer } from '../audio/wavPlayer'
+import { WavElementPlayer, isIOSLike } from '../audio/wavPlayer'
 
 type AudioResult = { response: Response } | { error: unknown }
 
@@ -12,12 +12,19 @@ type AudioResult = { response: Response } | { error: unknown }
  */
 const COMPAT_KEY = 'areco.speech.compat'
 
+/**
+ * 默认值按端：iPhone/iPad 默认「兼容」整句播放——Web Audio 在 WKWebView 里可能被静音开关/音频会话
+ * 掐成无声，且没有可靠的程序化检测，先保「一定有声」。桌面端默认流式。
+ */
 export function readCompat(): boolean {
   try {
-    return globalThis.localStorage?.getItem(COMPAT_KEY) === '1'
+    const saved = globalThis.localStorage?.getItem(COMPAT_KEY)
+    if (saved === '1') return true
+    if (saved === '0') return false
   } catch {
-    return false
+    // 隐私模式读不了，走默认
   }
+  return isIOSLike()
 }
 
 export function makePlayer(compat: boolean): SpeechPlayer {

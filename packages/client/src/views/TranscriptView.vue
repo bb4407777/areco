@@ -618,7 +618,7 @@ onBeforeUnmount(() => {
       <label class="auto-speech" title="只播新完成的正式文本；刷新后仍关闭">
         <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />自动
       </label>
-      <label v-if="iosLike" class="auto-speech" title="手机静音键拨到静音时，流式播报可能没声；勾上改用整句播放，代价是句间有停顿">
+      <label v-if="iosLike" class="auto-speech" title="默认整句播放（静音键也有声、句间会顿）。取消勾选试流式：句间无缝，若没声就勾回来">
         <input type="checkbox" :checked="speech.compat" @change="onCompatSpeechChange" />兼容
       </label>
       <ViewModeSwitch mode="chat" @switch="switchMode" />

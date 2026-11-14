@@ -53,6 +53,10 @@ export class PcmPlayer implements SpeechPlayer {
   private generation = 0
   private sources = new Set<AudioBufferSourceNode>()
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  /** 唤醒 play() 里等 onended 的等待：音频会话被挂起时 onended 不会来 */
+  private interrupt: (() => void) | null = null
+  /** 播放中每秒看一次上下文状态，挂起即报「被拦」而不是无限等 */
+  private guardTimer: ReturnType<typeof setInterval> | null = null
 
   async unlock(): Promise<void> {
     if (typeof AudioContext === 'undefined') throw new Error('当前浏览器不支持 Web Audio')
@@ -71,6 +75,18 @@ export class PcmPlayer implements SpeechPlayer {
     const decoder = new Pcm16Decoder()
     const completions: Promise<void>[] = []
     let nextTime = context.currentTime + 0.04
+    // stop() 也要能把这里唤醒：音频会话被系统挂起时 source 的 onended 永远不来，
+    // 只靠 Promise.all(completions) 会把队列卡死在「播报中」，再点只会重复 stop。
+    const interrupted = new Promise<never>((_, reject) => {
+      this.interrupt = () => reject(new PcmCancelledError())
+    })
+    interrupted.catch(() => {})
+    const suspendGuard = new Promise<never>((_, reject) => {
+      this.guardTimer = setInterval(() => {
+        if (context.state !== 'running') reject(new AudioBlockedError())
+      }, 1000)
+    })
+    suspendGuard.catch(() => {})
 
     try {
       while (true) {
@@ -96,20 +112,28 @@ export class PcmPlayer implements SpeechPlayer {
         source.start(nextTime)
         nextTime += buffer.duration
       }
-      await Promise.all(completions)
+      await Promise.race([Promise.all(completions), interrupted, suspendGuard])
       if (generation !== this.generation) throw new PcmCancelledError()
     } catch (err) {
       if (generation !== this.generation) throw new PcmCancelledError()
       throw err
     } finally {
+      this.interrupt = null
+      if (this.guardTimer !== null) {
+        clearInterval(this.guardTimer)
+        this.guardTimer = null
+      }
       if (this.reader === reader) this.reader = null
     }
   }
 
   stop(): void {
     this.generation++
+    const interrupt = this.interrupt
+    this.interrupt = null
     const reader = this.reader
     this.reader = null
+    interrupt?.()
     if (reader) void reader.cancel().catch(() => {})
     for (const source of this.sources) {
       try {
