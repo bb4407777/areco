@@ -11,6 +11,7 @@ import { terminalInputStartsTask, screenHasPendingChoice, type TrafficState } fr
 import type { SpawnSpec } from './templates'
 import { promptLabel } from './history'
 import { isNameWorthy } from './session-namer'
+import { prepareSubmitAck, submitAckSeen, type SubmitAck } from './submit-ack'
 import { createLogger } from '../logger'
 
 const log = createLogger('session')
@@ -109,6 +110,8 @@ export class Session extends EventEmitter {
   lastLine = ''
   /** 提交回车复看的世代号：新一轮 sendline 或会话退出即作废上一轮的复看 */
   private enterGen = 0
+  /** 提交回执基线：写正文前取，之后只认这之后新落的 user 消息（见 submit-ack.ts） */
+  private submitAck: SubmitAck | null = null
   /** 键盘直输回车复看的世代号：再按一次回车即作废上一轮（见 guardTypedSubmit） */
   private rawEnterGen = 0
   /** 终端直输最近键入的文字（剥掉 ESC 序列）：回车后核对是否还挂在输入框 */
@@ -372,11 +375,15 @@ export class Session extends EventEmitter {
     // 不能当成「有内容却认不出尾字」反复盲按回车（会把用户正在打的字也发出去，2026-11-10 实测）。
     const boxBefore = this.inputBoxText()
     const boxAtWrite = boxBefore !== null
+    // 写正文之前先取转写基线：agent 提交那一刻会在自己的转写里落一条 user 消息，
+    // 那是「字到底进去了没有」的唯一确凿证据，屏幕只是渲染结果（见 submit-ack.ts）
+    this.submitAck = body ? prepareSubmitAck(this, body) : null
     // markWorking:false —— working 态本方法已显式置好，且 body 已无尾回车不触发 write 拆分
     if (body) this.write(body, { markWorking: false })
     // write(body) 会把正文记进直输缓冲；程序化通道的提交由 submitUntilAccepted 管，这里清掉，
     // 免得下一轮用户敲回车时把这条正文的尾字当成「自己刚敲的」
     this.typedInput = ''
+    this.emitSubmitState(busyAtSend ? 'queued' : 'pending')
     this.writeEnterWhenSettled(body, boxAtWrite, boxBefore, busyAtSend)
     this.promptCount += 1
     if (!this.agentSessionId) this.setAgentBindingPrompt(text)
@@ -392,6 +399,17 @@ export class Session extends EventEmitter {
       }
     }
     this.emitUpdate()
+  }
+
+  /** 提交状态广播：前端据此挂横幅（重试中／已排队／已受理／未送达），不再靠人盯着框猜 */
+  private emitSubmitState(state: 'pending' | 'queued' | 'ok' | 'failed', attempts = 0, elapsedMs = 0) {
+    this.emit('submit-state', {
+      type: 'submit-state',
+      sessionId: this.id,
+      state,
+      attempts,
+      elapsedMs,
+    })
   }
 
   /**
@@ -524,6 +542,15 @@ export class Session extends EventEmitter {
       const box = this.inputBoxText()
       let flatBox = box === null ? null : box.replace(/\s+/g, '')
       const flatSnippet = snippet.replace(/\s+/g, '')
+      // 转写里出现这条消息＝agent 真的收下了。以它为准立刻收工，不再往下看屏幕：
+      // 屏幕只是渲染，长文回显慢、框认错都会误判（2026-11-16，见 submit-ack.ts）。
+      if (this.submitAck && submitAckSeen(this.submitAck)) {
+        log.info(
+          `[submit] 转写已确认（${Date.now() - startedTs}ms，补按 ${attempt} 次，尾字「${snippet}」）`,
+        )
+        this.emitSubmitState('ok', attempt, Date.now() - startedTs)
+        return
+      }
       // 占位符空框：TUI 空输入框显示提示语（mcode 的「Ask Mcode to do anything」），
       // 框非空但内容与写入前一致 = 我们的字没落地（回车提交后框也回到同一句占位语）。
       // 不当空框处理就会掉进下面「有内容却认不出尾字」分支，每秒盲按回车——
@@ -538,6 +565,7 @@ export class Session extends EventEmitter {
         press()
       } else if (seenInBox) {
         log.info(`[submit] 已提交（补按 ${attempt} 次，${Date.now() - startedTs}ms）`)
+        this.emitSubmitState('ok', attempt, Date.now() - startedTs)
         return
       } else if (flatBox === null) {
         // 输入框还没画出来：绝不按回车（按下去就是换行，2026-11-09 报障）。
@@ -557,6 +585,7 @@ export class Session extends EventEmitter {
           rewrite()
         } else if (!boxAbsentAtWrite && Date.now() - startedTs >= 3000) {
           log.info(`[submit] 已提交（补按 ${attempt} 次，${Date.now() - startedTs}ms）`)
+          this.emitSubmitState('ok', attempt, Date.now() - startedTs)
           return
         }
       } else {
@@ -568,6 +597,7 @@ export class Session extends EventEmitter {
         log.warn(
           `[submit] 5 分钟仍未提交，放弃补按（补按 ${attempt} 次；重写 ${rewrites} 次；输入框${seenInBox ? '一直挂着该文本' : '从未见到该文本'}；尾字「${snippet}」）\n${this.screenTail(12).join('\n')}`,
         )
+        this.emitSubmitState('failed', attempt, Date.now() - startedTs)
         return
       }
       // 前 10 秒看勤一点（吞回车多发生在开头），之后放慢到 3 秒一拍，别把终端刷爆

@@ -272,6 +272,18 @@ export interface InputAckMsg {
   sessionId: string
   id?: string
 }
+/**
+ * 提交状态：pending=正文已写、等确认；queued=agent 在跑，已排队等本轮结束；
+ * ok=转写或界面已确认收下；failed=补按到窗口尽头仍未确认。
+ * 前端据此挂横幅，不用人盯着输入框猜（2026-11-16）。
+ */
+export interface SubmitStateMsg {
+  type: 'submit-state'
+  sessionId: string
+  state: 'pending' | 'queued' | 'ok' | 'failed'
+  attempts: number
+  elapsedMs: number
+}
 export interface PongMsg {
   type: 'pong'
 }
@@ -301,6 +313,7 @@ export type ServerMsg =
   | ErrorMsg
   | SendlineAckMsg
   | InputAckMsg
+  | SubmitStateMsg
   | PongMsg
   | RoomMessageMsg
   | RoomsMsg

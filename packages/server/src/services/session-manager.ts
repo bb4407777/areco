@@ -606,6 +606,9 @@ export class SessionManager extends EventEmitter {
       this.persist()
       this.emit('update', session.toSummary())
     })
+    session.on('submit-state', (msg) => {
+      this.emit('submit-state', msg)
+    })
     session.on('output', (data: string, offset: number, epoch: number) => {
       this.maybeConfirmTrustPage(session, data, epoch)
       if (this.agentKind(session) === 'workbuddy' && !session.agentSessionId) {

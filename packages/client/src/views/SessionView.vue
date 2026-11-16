@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // 座舱页：终端 + 单行 prompt + 触屏键条 + 会话动词。pty 活在服务端，本页只是"接上驾驶杆"。
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, NTag, useMessage } from 'naive-ui'
 import { useSessionsStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
+import { wsClient } from '../ws'
 import { EXIT_REASON_TEXT, chatCapable, statusTagText, trafficColor } from '../utils/format'
 import TerminalPane from '../components/TerminalPane.vue'
 import PromptBar from '../components/PromptBar.vue'
@@ -26,6 +27,45 @@ const sessionId = computed(() => String(route.params.id))
 const session = computed(() => store.byId(sessionId.value))
 const isLive = computed(() => !!session.value && ['running', 'spawning', 'stopping'].includes(session.value.status))
 const paneRef = ref<InstanceType<typeof TerminalPane> | null>(null)
+// 提交状态横幅：字在框里干等的时候，让屏幕上有句话（重试第 N 次／排队／已受理）
+const submitBanner = ref<{ state: string; attempts: number } | null>(null)
+let bannerTimer: ReturnType<typeof setTimeout> | null = null
+let offSubmit: (() => void) | null = null
+function clearBannerTimer() {
+  if (bannerTimer) {
+    clearTimeout(bannerTimer)
+    bannerTimer = null
+  }
+}
+function showSubmit(state: string, attempts: number) {
+  clearBannerTimer()
+  submitBanner.value = { state, attempts }
+  // 已受理一闪即走；失败常驻到下一次提交；排队/确认中不自动消失
+  if (state === 'ok') bannerTimer = setTimeout(() => (submitBanner.value = null), 1500)
+}
+const SUBMIT_BANNER_TEXT: Record<string, string> = {
+  pending: '已发送，确认中…',
+  queued: '已发出，agent 本轮结束后自动提交',
+  ok: '已受理',
+  failed: '未送达，请再点一次发送',
+}
+const submitBannerText = computed(() => {
+  const b = submitBanner.value
+  if (!b) return ''
+  const base = SUBMIT_BANNER_TEXT[b.state] ?? ''
+  return b.state === 'pending' && b.attempts > 0 ? `未确认，重试第 ${b.attempts} 次…` : base
+})
+onMounted(() => {
+  offSubmit = wsClient.onMessage((msg) => {
+    if (msg.type !== 'submit-state' || msg.sessionId !== sessionId.value) return
+    showSubmit(msg.state, msg.attempts)
+  })
+})
+onBeforeUnmount(() => {
+  clearBannerTimer()
+  offSubmit?.()
+  offSubmit = null
+})
 const lightColor = computed(() =>
   session.value
     ? trafficColor(session.value.trafficState, session.value.status)
@@ -161,6 +201,11 @@ function onMenu(key: string) {
       </Transition>
     </div>
 
+    <!-- 提交状态：字还没进 agent 时这里有一句话，别让人盯着输入框猜 -->
+    <div v-if="submitBanner" class="submit-banner" :class="`submit-${submitBanner.state}`">
+      {{ submitBannerText }}
+    </div>
+
     <!-- 始终占位：v-if 卸载会改变终端容器高度 → resize → kimi TUI 3J 重绘 → 视口跳转 -->
     <MobileKeyBar :session-id="sessionId" :class="{ 'keybar-off': !(ui.isTouch && isLive) }" />
     <!-- 死会话也可直接发：服务端自动 resume 拉起、就绪后注入（gateway sendline 自动恢复） -->
@@ -213,6 +258,24 @@ function onMenu(key: string) {
   position: relative;
   flex: 1;
   min-height: 0;
+}
+.submit-banner {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  background: var(--chip-bg);
+  color: var(--muted);
+}
+.submit-failed {
+  background: color-mix(in srgb, var(--danger, #d03050) 14%, transparent);
+  color: var(--danger, #d03050);
+}
+.submit-ok {
+  background: color-mix(in srgb, #18a058 16%, transparent);
+  color: #18a058;
 }
 .exited-banner {
   position: absolute;

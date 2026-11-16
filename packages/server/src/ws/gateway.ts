@@ -373,6 +373,14 @@ export class Gateway {
     this.manager.on('update', (summary) => {
       this.broadcast({ type: 'sessionUpdate', session: summary })
     })
+    // 提交状态只发给正在看这个会话的连接：横幅是这一屏的事，别打扰其他标签页
+    this.manager.on('submit-state', (msg: ServerMsg) => {
+      const sessionId = (msg as { sessionId?: string }).sessionId
+      if (!sessionId) return
+      for (const conn of this.conns) {
+        if (conn.attached.has(sessionId)) this.send(conn, msg)
+      }
+    })
     this.manager.on('removed', (sessionId: string) => {
       for (const conn of this.conns) conn.attached.delete(sessionId)
       this.broadcast({ type: 'sessionRemoved', sessionId })
