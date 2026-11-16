@@ -55,7 +55,11 @@ class WsClient {
         return
       }
       if (msg.type === 'init') {
-        this.ackSupported = (msg.protocolVersion ?? 0) >= 2
+        const protocol = msg.protocolVersion ?? 0
+        this.ackSupported = protocol >= 2
+        // input-ack 是协议 v3 才有；此前只在 close/forceReconnect 里置 false、从没置过 true，
+        // 于是 sendEnter 永远走「发出即算成功」的快路径，11-14 的回执补发整段是死代码。
+        this.inputAckSupported = protocol >= 3
       }
       if (msg.type === 'pong') {
         this.lastPongAt = Date.now()
