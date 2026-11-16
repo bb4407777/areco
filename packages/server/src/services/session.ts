@@ -329,6 +329,28 @@ export class Session extends EventEmitter {
     this.pty?.write(data)
   }
 
+  /**
+   * TUI 是否要了括号粘贴（ESC[?2004h）。它自己会发这个开关，影子终端如实记下——
+   * 这是 TUI 亲口说的「我支持粘贴边界」，不用猜。
+   */
+  private bracketedPaste(): boolean {
+    return !!this.shadow?.modes.bracketedPasteMode
+  }
+
+  /**
+   * 正文按括号粘贴送出去：ESC[200~ 正文 ESC[201~。
+   *
+   * 不包边界时，codebuddy/kimi 的 InputParser 把「一整段字符 + 紧随的回车」当成一次粘贴合帧，
+   * 回车落在粘贴里就只是换行——字整段停在输入框、屏幕看得见却发不出去，之后再按一下才提交
+   * （2026-11-16 手机端截图实锤：框里挂着「好」，回车没落地）。真实终端粘贴也是这么包的：
+   * 有了 201~ 这个边界，后面的 \r 就是明确的击键，不再是粘贴内容的一部分。
+   */
+  private wrapPaste(body: string): string {
+    if (!body || !this.bracketedPaste()) return body
+    if (body.includes('\x1b[200~') || body.includes('\x1b[201~')) return body
+    return `\x1b[200~${body}\x1b[201~`
+  }
+
   /** 记下终端直输的文字（剥掉 ESC 序列/控制字符），回车时取尾字核对是否还挂在输入框 */
   private noteTypedInput(data: string) {
     // eslint-disable-next-line no-control-regex
@@ -378,13 +400,15 @@ export class Session extends EventEmitter {
     // 写正文之前先取转写基线：agent 提交那一刻会在自己的转写里落一条 user 消息，
     // 那是「字到底进去了没有」的唯一确凿证据，屏幕只是渲染结果（见 submit-ack.ts）
     this.submitAck = body ? prepareSubmitAck(this, body) : null
+    // 正文走括号粘贴（TUI 支持时）：边界一收，回车才是击键，不被合帧成换行
+    const pasted = !!body && this.bracketedPaste()
     // markWorking:false —— working 态本方法已显式置好，且 body 已无尾回车不触发 write 拆分
-    if (body) this.write(body, { markWorking: false })
+    if (body) this.write(pasted ? this.wrapPaste(body) : body, { markWorking: false })
     // write(body) 会把正文记进直输缓冲；程序化通道的提交由 submitUntilAccepted 管，这里清掉，
     // 免得下一轮用户敲回车时把这条正文的尾字当成「自己刚敲的」
     this.typedInput = ''
     this.emitSubmitState(busyAtSend ? 'queued' : 'pending')
-    this.writeEnterWhenSettled(body, boxAtWrite, boxBefore, busyAtSend)
+    this.writeEnterWhenSettled(body, boxAtWrite, boxBefore, busyAtSend, pasted)
     this.promptCount += 1
     if (!this.agentSessionId) this.setAgentBindingPrompt(text)
     // 占位名会话：第一句话即会话名（与历史对话标题同口径）。程序化注入（交接档案提示等）传 autoName:false 跳过。
@@ -419,7 +443,13 @@ export class Session extends EventEmitter {
    * ENTER_QUIET_MS 远小于 onceQuiet 的首屏 1200ms：只需跨过 TUI 的粘贴合帧窗口（实测数十 ms）。
    * ENTER_MAX_WAIT_MS 兜底：持续输出的会话不会让回车无限拖着不发。
    */
-  private writeEnterWhenSettled(body = '', boxAtWrite = true, boxBefore: string | null = null, busy = false) {
+  private writeEnterWhenSettled(
+    body = '',
+    boxAtWrite = true,
+    boxBefore: string | null = null,
+    busy = false,
+    pasted = false,
+  ) {
     const snippet = body.replace(/\s+/g, ' ').trim().slice(-8)
     // 长 prompt（带附件的长路径等）TUI 逐字回显要好几秒，固定 2s 上限会在还在"粘贴"时
     // 就把回车塞进去、被判成换行（2026-11-08 报障的形态）。上限随长度放宽到 8s。
@@ -434,7 +464,7 @@ export class Session extends EventEmitter {
           log.warn(`[submit] steer 注入时会话已退出（尾字「${snippet}」）`)
           return
         }
-        this.submitUntilAccepted(snippet, body, !boxAtWrite, boxBefore, true)
+        this.submitUntilAccepted(snippet, body, !boxAtWrite, boxBefore, true, pasted)
       }, Session.ENTER_STEER_DELAY_MS)
       return
     }
@@ -452,11 +482,12 @@ export class Session extends EventEmitter {
       const quietFor = Date.now() - this.lastOutputAt
       const waited = Date.now() - startedTs
       // 除了"输出安静"，还要看见刚写的尾字已进输入框（文本真的落地了）再按回车。
+      // 括号粘贴已把整段一次交出去，边界之后的渲染只是回声，不再拿尾字当准入门槛。
       // 等满兜底上限也不再盲目按：交给 submitUntilAccepted 看输入框决定——恢复会话首屏
       // 还没画完时按下去只会变成换行（2026-11-09 报障，见该方法注释）。
-      const accepted = snippet.length < 2 || this.inputBoxHasTail(snippet)
+      const accepted = pasted || snippet.length < 2 || this.inputBoxHasTail(snippet)
       if ((quietFor >= Session.ENTER_QUIET_MS && accepted) || waited >= maxWait) {
-        this.submitUntilAccepted(snippet, body, !boxAtWrite, boxBefore)
+        this.submitUntilAccepted(snippet, body, !boxAtWrite, boxBefore, false, pasted)
         return
       }
       setTimeout(tryFire, Session.ENTER_QUIET_MS)
@@ -479,6 +510,7 @@ export class Session extends EventEmitter {
     boxAbsentAtWrite = false,
     boxBefore: string | null = null,
     busy = false,
+    pasted = false,
   ) {
     const gen = ++this.enterGen
     const startedTs = Date.now()
@@ -522,7 +554,7 @@ export class Session extends EventEmitter {
       rewrites++
       lastRewriteAt = Date.now()
       try {
-        this.pty?.write(body)
+        this.pty?.write(pasted ? this.wrapPaste(body) : body)
       } catch {
         /* 会话可能已退出 */
       }
