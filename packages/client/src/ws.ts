@@ -9,7 +9,7 @@ type OpenHandler = () => void
 type AckWaiter = { resolve: (ok: boolean) => void; timer: number }
 
 const ACK_FLUSH_MS = 50
-const SENDLINE_ACK_MS = 8000
+const SENDLINE_ACK_MS = 3000
 /** 回车回执等待：正常同机房往返 <50ms，1.2s 还没回执＝这一帧丢在半死连接上了 */
 const ENTER_ACK_MS = 1200
 const PING_MS = 20_000
@@ -113,17 +113,32 @@ class WsClient {
     // 旧服务端（协议 <2）不认 id、不回执：按老路子发出即算成功，免得每条都误报「没送出去」
     if (!this.ackSupported) return Promise.resolve(this.send({ type: 'sendline', sessionId, text }))
     const id = `${Date.now().toString(36)}-${++this.seq}`
+    return this.sendlineWithRetry(sessionId, text, id, 0)
+  }
+
+  /**
+   * 等回执；等不到就换条干净连接、拿同一个请求号再发一次。
+   * 半死连接上丢的只是这一帧（iOS 切后台回来最常见），不是用户的意思——不重发就只能把
+   * 文字退回输入框、让用户再按一次，这正是「卡在输入栏」的来源。服务端按 id 幂等，
+   * 重发不会把同一条任务投两遍。
+   */
+  private async sendlineWithRetry(sessionId: string, text: string, id: string, attempt: number): Promise<boolean> {
+    if (await this.sendlineOnce(sessionId, text, id)) return true
+    if (attempt >= 1) return false
+    this.forceReconnect()
+    if (!(await this.waitOpen(2500))) return false
+    return this.sendlineWithRetry(sessionId, text, id, attempt + 1)
+  }
+
+  private sendlineOnce(sessionId: string, text: string, id: string): Promise<boolean> {
+    if (this.ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false)
     return new Promise<boolean>((resolve) => {
       const timer = window.setTimeout(() => {
         this.pendingSends.delete(id)
-        // 回执超时基本就是假连接：主动断开，触发重连，别让后面的消息继续往死 socket 里倒
-        this.forceReconnect()
         resolve(false)
       }, SENDLINE_ACK_MS)
       this.pendingSends.set(id, { resolve, timer })
-      if (!this.send({ type: 'sendline', sessionId, text, id })) {
-        this.settle(id, false)
-      }
+      if (!this.send({ type: 'sendline', sessionId, text, id })) this.settle(id, false)
     })
   }
 

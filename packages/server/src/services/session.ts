@@ -293,6 +293,7 @@ export class Session extends EventEmitter {
     // 与 sendline 同口径：尾回车延迟 300ms 单独写，模拟真实键入。单独一个 '\r' 不拆。
     if (data.length > 1 && data.endsWith('\r')) {
       this.noteTypedInput(data.slice(0, -1))
+      const line = this.typedInput.replace(/\s+/g, ' ').trim()
       const snippet = this.takeTypedSnippet()
       log.info(`[typed] 同帧回车 ${this.id.slice(0, 8)} 正文 ${data.length - 1} 字，尾字「${snippet}」`)
       this.pty?.write(data.slice(0, -1))
@@ -300,7 +301,7 @@ export class Session extends EventEmitter {
         try {
           if (this.isRunning) {
             this.pty?.write('\r')
-            this.guardTypedSubmit(snippet)
+            this.guardTypedSubmit(snippet, line)
           }
         } catch {
           /* 会话可能已退出 */
@@ -312,6 +313,7 @@ export class Session extends EventEmitter {
     // 字停在输入框、屏幕上看得见却发不出去（2026-11-14 报障）。sendline 有
     // submitUntilAccepted 兜底，这条直输路径此前一次都没兜。
     if (data === '\r') {
+      const line = this.typedInput.replace(/\s+/g, ' ').trim()
       const snippet = this.takeTypedSnippet()
       // 现场取证（一次回车一行）：回车有没有到、输入框认不认得出、尾字在不在框里。
       // 下次再有人报「卡住」，看这一行就能定位是没到、认不出框、还是框里确实挂着没提交。
@@ -322,7 +324,7 @@ export class Session extends EventEmitter {
         `[typed] 回车 ${this.id.slice(0, 8)} 尾字「${snippet}」框${state} harness=${this.harness ?? '-'}`,
       )
       this.pty?.write(data)
-      this.guardTypedSubmit(snippet)
+      this.guardTypedSubmit(snippet, line)
       return
     }
     this.noteTypedInput(data)
@@ -646,19 +648,26 @@ export class Session extends EventEmitter {
    * 症状：命令字已经画在输入框里、屏幕看得见，就是发不出去——TUI 把紧随其后的回车当粘贴
    * 换行吞了，第一下回车只落成换行，之后再没人补按（sendline 有 submitUntilAccepted，
    * 直输这条路径此前没有任何兜底，2026-11-14 报障）。
-   * 做法：按回车时记下刚敲的尾字，随后看输入框——尾字还在框里 = 这下车没被受理，
-   * 等 pty 安静再补按，直到框里内容变了/被清空；一直没见到尾字则视为已受理，不盲按。
+   * 做法：按回车时记下刚敲的整行与尾字，随后看输入框——尾字还在框里 = 这下车没被受理，
+   * 等 pty 安静再补按，直到框里内容变了/被清空；尾字根本没出现过就看转写：
+   * 转写里有这一句 = 早就进去了，收手；转写里没有、框也空了 = 整行被 TUI 吞了，
+   * 按可靠通道（sendline）重投一次，不让用户打的字凭空消失。
    * 只认得出 agent 输入框（`>`/`❯`/`›` 提示符）的会话才启动，裸 shell、vim、菜单类不碰。
    */
-  private guardTypedSubmit(snippet: string) {
+  private guardTypedSubmit(snippet: string, line = '', probeOverride?: SubmitAck | null) {
     if (snippet.length < 2) return
     if (!this.harness) return // 非 agent 会话（裸 shell 等）不猜
+    // 能读转写的 harness 才有「这一句到底进去了没有」的判据；读不到就退回屏幕判断，绝不重投
+    // （重投一条已经进了的消息，比让用户重打一遍更贵）
+    const probe = probeOverride !== undefined ? probeOverride : line.length >= 2 ? prepareSubmitAck(this, line) : null
     const gen = ++this.rawEnterGen
     const flatSnippet = snippet.replace(/\s+/g, '')
+    const flatLine = line.replace(/\s+/g, '')
     const startedTs = Date.now()
     let seenInBox = false
     let seenSince = 0
     let attempts = 0
+    let recovered = false
     const schedule = () => {
       const elapsed = Date.now() - startedTs
       if (elapsed >= Session.TYPED_SUBMIT_WINDOW_MS) {
@@ -684,6 +693,11 @@ export class Session extends EventEmitter {
         return
       }
       const flatBox = box.replace(/\s+/g, '')
+      // 转写里已有这一句＝回车确实被受理，屏幕怎么画都不再管（2026-11-16 起以转写为准）
+      if (probe && submitAckSeen(probe)) {
+        log.info(`[typed-submit] 已提交（转写已确认，补按 ${attempts} 次）`)
+        return
+      }
       if (flatBox.includes(flatSnippet)) {
         // 尾字还在框里＝这下车被吞了，补按（忙/刷屏时不等安静窗）
         if (!seenInBox) {
@@ -708,7 +722,24 @@ export class Session extends EventEmitter {
         log.info(`[typed-submit] 已提交（补按 ${attempts} 次）`)
         return
       } else if (Date.now() - startedTs >= Session.TYPED_SUBMIT_FIRST_SEEN_MS) {
-        // 一直没见到尾字：文字可能被 TUI 丢了或从未上屏，盲按只会往框里塞换行
+        // 尾字从没在框里出现过、框已经空了：两种可能——早就提交了，或 TUI 把这一行吞了。
+        // 2026-11-18 00:07 实锤：按回车那一刻框里还有整行，两秒多后框空、转写里没有这句，
+        // 用户看到的就是「字在输入栏里凭空消失」。有转写判据就以转写为准：转写里没有＝真的
+        // 没进去，改走可靠通道重投一次（sendline 自带回执、括号粘贴、提交复看），
+        // 不再像旧写法那样把整行留在黑洞里、只留一句「从未见到尾字」。
+        if (probe && !recovered && !flatBox.includes(flatLine)) {
+          recovered = true
+          log.warn(
+            `[typed-submit] 回车未被受理、转写里也没有这一句（${line.length} 字，补按 ${attempts} 次）→ 按可靠通道重投一次`,
+          )
+          try {
+            this.sendline(line)
+          } catch (err) {
+            log.warn(`[typed-submit] 重投失败：${err instanceof Error ? err.message : String(err)}`)
+          }
+          return
+        }
+        // 没有转写判据：文字可能被 TUI 丢了或从未上屏，盲按只会往框里塞换行
         log.warn(`[typed-submit] 框里从未见到尾字「${snippet}」，停止复看`)
         return
       }
@@ -889,8 +920,8 @@ export class Session extends EventEmitter {
   private static readonly TYPED_SUBMIT_WINDOW_MS = 300_000
   /** 直输复看的补按上限：5 分钟 3s 一拍的封顶，别无限按 */
   private static readonly TYPED_SUBMIT_MAX_PRESS = 100
-  /** 按完回车多久内还没在输入框见到尾字，就认定文字已上送（或丢了），不再盲按换行 */
-  private static readonly TYPED_SUBMIT_FIRST_SEEN_MS = 2500
+  /** 按完回车多久内还没在输入框见到尾字，就不再盲按换行（有转写判据时改走重投，见 guardTypedSubmit） */
+  private static readonly TYPED_SUBMIT_FIRST_SEEN_MS = 5000
   onceQuiet(fn: () => void, quietMs = 1200, maxWaitMs = 30_000) {
     let quietTimer: ReturnType<typeof setTimeout> | null = null
     let done = false

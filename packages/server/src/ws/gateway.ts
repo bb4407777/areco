@@ -14,6 +14,7 @@ import type { AppConfig } from '../config'
 import { verifyUpgrade } from '../middleware/auth'
 import { createLogger } from '../logger'
 import { shouldApplyResize } from './resize-policy'
+import { IdempotencyWindow } from '../services/idempotency'
 
 const log = createLogger('gateway')
 
@@ -48,6 +49,8 @@ export class Gateway {
   private controllers = new Map<string, Conn>()
   private heartbeatTimer: NodeJS.Timeout | null = null
   private stallTimer: NodeJS.Timeout | null = null
+  /** sendline 请求号幂等窗：客户端回执超时用同号重发时只投一次 */
+  private sendlineIds = new IdempotencyWindow()
 
   constructor(
     private manager: SessionManager,
@@ -176,6 +179,18 @@ export class Gateway {
         const att = conn.attached.get(msg.sessionId)
         // 收下即回执：客户端拿不到这条就在输入框里留着原文，不再「看着发出去了其实没到」
         const ack = () => this.send(conn, { type: 'sendline-ack', sessionId: msg.sessionId, id: msg.id })
+        // 空正文不往终端送：那等于替用户按一个裸回车，会把他正在框里打的草稿抢先提交
+        if (!msg.text.trim()) {
+          log.warn(`[sendline] ${msg.sessionId.slice(0, 8)} 空正文，忽略（不送裸回车）`)
+          ack()
+          break
+        }
+        // 请求号幂等：客户端回执超时会用同一个号重发，这里只放行一次，别把同一条任务投两遍
+        if (msg.id && !this.sendlineIds.first(msg.id)) {
+          log.info(`[sendline] ${msg.sessionId.slice(0, 8)} 重复请求号 ${msg.id}，只回执不重投`)
+          ack()
+          break
+        }
         log.info(`[sendline] 收到 ${msg.sessionId.slice(0, 8)}，${msg.text.length} 字，${session.isRunning ? '在跑直投' : '需恢复'}`)
         if (!session.isRunning) {
           // 死会话发消息 = 想继续聊：自动 resume 拉起（无恢复凭据退化为全新重启，见 manager.restart），

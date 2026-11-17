@@ -30,14 +30,28 @@ watch(() => props.sessionId, (id, prevId) => {
 watch(text, (v) => ui.setDraft(props.sessionId, v))
 
 const sending = ref(false)
+/** 等回执超过 400ms 才把按钮改成「发送中…」：正常往返几十毫秒，不必闪一下 */
+const sendingSlow = ref(false)
+let sendingSlowTimer: number | null = null
 
 async function send(): Promise<boolean> {
   if (props.disabled || sending.value) return false
   const value = text.value
+  // 空内容不占一条 sendline：服务端会把它当裸回车，替用户提交框里的草稿
+  if (!value.trim()) return false
   sending.value = true
+  sendingSlowTimer = window.setTimeout(() => {
+    sendingSlowTimer = null
+    sendingSlow.value = true
+  }, 400)
   // 等服务端回执再清输入框：没送到（断线/假连接/回执超时）就留着原文，不再静默丢字
   const ok = await wsClient.sendline(props.sessionId, value)
   sending.value = false
+  sendingSlow.value = false
+  if (sendingSlowTimer !== null) {
+    clearTimeout(sendingSlowTimer)
+    sendingSlowTimer = null
+  }
   if (!ok) {
     message.warning('这条没送出去，内容还在输入框里——连接已重置，再按一次发送')
     return false
@@ -211,7 +225,7 @@ function onKeydown(e: KeyboardEvent) {
       enterkeyhint="send"
       @keydown="onKeydown"
     ></textarea>
-    <button class="send-btn" type="button" :disabled="disabled" @click="send">发送</button>
+    <button class="send-btn" type="button" :disabled="disabled || sending" @click="send">{{ sendingSlow ? '发送中…' : '发送' }}</button>
   </div>
   <FileDropOverlay :visible="dragging" />
 </template>
