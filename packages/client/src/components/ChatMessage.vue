@@ -8,7 +8,7 @@ import type { TranscriptMessage } from '../../../shared/protocol'
 import { copyPlainText } from '../utils/clipboard'
 import { extractFileLinks, iconFor, type FileLink } from '../utils/filelinks'
 import { fmtFullTime } from '../utils/format'
-import { isTaskNotification, parseTaskNotification } from '../utils/notify'
+import { isBackgroundCommandNotice, isTaskNotification, parseTaskNotification } from '../utils/notify'
 import { useUiStore } from '../stores/ui'
 import { useMessage } from 'naive-ui'
 import { wsClient } from '../ws'
@@ -80,6 +80,8 @@ const visibleParts = computed(() =>
       return ui.showToolUse
     }
     if (p.kind === 'tool_result') return ui.showToolResult
+    // 后台命令完成通知不进展对话模式（纯执行管道声，原文在终端模式可见）
+    if (p.kind === 'notice' && isBackgroundCommandNotice(p.text)) return false
     return true
   }),
 )
