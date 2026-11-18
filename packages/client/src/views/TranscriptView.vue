@@ -38,7 +38,21 @@ let speechCompletionPending = false
 const { openRename } = useRenameDialog()
 const { isRoleMode, handoffRole } = useSpawnWorker()
 
-const sessionId = computed(() => String(route.params.id))
+// bot 详情页直接传 sessionId（路由参数是 bot id）；会话页仍取 route.params.id
+// terminal=false：bot 不露「切终端」入口；peek 单独控制「⌨️ 终端画面」面板（唤醒后仍可看）
+// composer=false：只读查看（bot 的旧会话历史），输入栏由外层另给
+// Boolean prop 缺省时 Vue 会按 false 处理（不是 undefined），所以显式给 true 默认值：
+// 否则 /session/:id/chat 不传这些 prop，会把「切终端」入口和输入框一起判成 false 隐藏掉
+const props = withDefaults(
+  defineProps<{ sessionId?: string; terminal?: boolean; peek?: boolean; composer?: boolean }>(),
+  { terminal: true, peek: true, composer: true }
+)
+const showTerminalSwitch = computed(() => props.terminal !== false)
+const showPeek = computed(() => props.peek !== false)
+const showComposer = computed(() => props.composer !== false)
+const sessionId = computed(() => props.sessionId || String(route.params.id))
+// bot 语境：返回、会话消失都回 bot 列表，不落回会话 tab
+const inBots = computed(() => route.path.startsWith('/bots'))
 const session = computed(() => store.byId(sessionId.value))
 const artifactAgent = computed(() => session.value ? templateLabel(session.value, store.templates) : '当前 Agent')
 const isLive = computed(() => !!session.value && ['running', 'spawning', 'stopping'].includes(session.value.status))
@@ -117,7 +131,7 @@ function onMenu(key: string) {
 watch(
   () => store.ready && !session.value,
   (gone) => {
-    if (gone) router.replace('/')
+    if (gone) router.replace(inBots.value ? '/bots' : '/')
   }
 )
 
@@ -603,7 +617,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="transcript-view">
     <div class="head">
-      <n-button v-if="!ui.isDesktop" quaternary size="small" @click="router.push('/')">←</n-button>
+      <n-button v-if="!ui.isDesktop" quaternary size="small" @click="router.push(inBots ? '/bots' : '/')">←</n-button>
       <span class="dot" :style="{ background: lightColor, boxShadow: `0 0 0 3px ${lightColor}22` }" />
       <span class="name">{{ session?.name ?? '…' }}</span>
       <n-tag v-if="session" size="small" :bordered="false" class="status-tag">{{ statusTagText(session) }}</n-tag>
@@ -611,7 +625,7 @@ onBeforeUnmount(() => {
       <label class="auto-speech" title="只播新完成的正式文本；刷新后仍关闭">
         <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />自动
       </label>
-      <ViewModeSwitch mode="chat" @switch="switchMode" />
+      <ViewModeSwitch v-if="showTerminalSwitch" mode="chat" @switch="switchMode" />
       <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
         <n-button quaternary size="small">操作 ▾</n-button>
       </n-dropdown>
@@ -653,7 +667,7 @@ onBeforeUnmount(() => {
       @preview="previewPath = $event"
     />
 
-    <div v-if="isLive" class="screen-peek">
+    <div v-if="isLive && showPeek" class="screen-peek">
       <button class="peek-toggle" type="button" @click="toggleScreen">
         <span>⌨️ 终端画面</span>
         <span v-if="awaitingChoice" class="peek-badge">有选项待选</span>
@@ -697,7 +711,11 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 死会话也可直接发：服务端自动 resume 拉起、就绪后注入（gateway sendline 自动恢复） -->
-    <PromptBar :session-id="sessionId" :placeholder="isLive ? undefined : '会话已退出，发送将自动恢复对话…'" />
+    <PromptBar
+      v-if="showComposer"
+      :session-id="sessionId"
+      :placeholder="isLive ? undefined : '会话已退出，发送将自动恢复对话…'"
+    />
     <FilePreview :path="previewPath" @close="previewPath = null" />
   </div>
 </template>
