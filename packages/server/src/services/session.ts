@@ -112,6 +112,8 @@ export class Session extends EventEmitter {
   private enterGen = 0
   /** 提交回执基线：写正文前取，之后只认这之后新落的 user 消息（见 submit-ack.ts） */
   private submitAck: SubmitAck | null = null
+  /** 上次按可靠通道重投的时刻：框空而转写无记录时用它压住连环重投 */
+  private lastRedeliveryAt = 0
   /** 键盘直输回车复看的世代号：再按一次回车即作废上一轮（见 guardTypedSubmit） */
   private rawEnterGen = 0
   /** 终端直输最近键入的文字（剥掉 ESC 序列）：回车后核对是否还挂在输入框 */
@@ -618,9 +620,29 @@ export class Session extends EventEmitter {
           log.info(`[submit] 正文未落地，重写第 ${rewrites + 1} 次（尾字「${snippet}」）`)
           rewrite()
         } else if (!boxAbsentAtWrite && Date.now() - startedTs >= 3000) {
-          log.info(`[submit] 已提交（补按 ${attempt} 次，${Date.now() - startedTs}ms）`)
-          this.emitSubmitState('ok', attempt, Date.now() - startedTs)
-          return
+          // 框空了不等于送达：能读转写时，只有转写里落了这一句才算收下。
+          // 屏幕 3 秒就清空、转写 0 字节、agent 一个请求都没收到——2026-11-18「Cindy」会话
+          // 正是这个形态（新拉起 10 秒就注入，CLI 还在加载插件，正文被启动重绘冲掉，
+          // 旧写法看到框空就宣告 success，那条话就此消失）。
+          if (this.submitAck && !busy && !submitAckSeen(this.submitAck)) {
+            const quietFor = Date.now() - startedTs
+            if (quietFor >= Session.SUBMIT_ACK_GRACE_MS && Date.now() - this.lastRedeliveryAt > Session.SUBMIT_REDELIVER_GAP_MS) {
+              // 走可靠通道（括号粘贴 + 自带复看）重投：由新一代复看接管，本条收工
+              this.lastRedeliveryAt = Date.now()
+              log.warn(`[submit] 框空了但转写里没有这一句，按可靠通道重投（尾字「${snippet}」）`)
+              try {
+                this.sendline(body)
+              } catch {
+                /* 会话可能已退出 */
+              }
+              return
+            }
+            // 宽限期内：继续看，不宣告成功也不重投
+          } else {
+            log.info(`[submit] 已提交（补按 ${attempt} 次，${Date.now() - startedTs}ms）`)
+            this.emitSubmitState('ok', attempt, Date.now() - startedTs)
+            return
+          }
         }
       } else {
         // 框里有内容但认不出尾字（折行/附件 chip/宽字符）：继续按，成功为止。
@@ -915,6 +937,10 @@ export class Session extends EventEmitter {
   private static readonly SUBMIT_QUIET_MS = 250
   /** 尾字在输入框滞留超过这个时长即放开安静门槛强按（持续输出的会话永远等不到安静窗） */
   private static readonly SUBMIT_FORCE_AFTER_MS = 1500
+  /** 框空了之后的宽限：转写落盘比屏幕慢，等满这段时间还见不到这一句才算「没送达」 */
+  private static readonly SUBMIT_ACK_GRACE_MS = 10_000
+  /** 同一条消息两次重投的最小间隔：防止复看连环重投把一条话投成三条 */
+  private static readonly SUBMIT_REDELIVER_GAP_MS = 30_000
   /** 键盘直输回车的复看节奏：前 10s 每秒看一次，之后 3s 一拍；窗口 5 分钟（长任务挂着也等轮末） */
   private static readonly TYPED_SUBMIT_RETRY_MS = 1000
   private static readonly TYPED_SUBMIT_WINDOW_MS = 300_000

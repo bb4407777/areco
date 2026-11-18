@@ -66,6 +66,9 @@ interface Located {
 }
 
 const locateCache = new Map<string, Located>()
+/** 上一次打过的「定位成功」路径：缓存被空文件/占用闸反复作废时，同一路径也只留一行日志。
+ *  （2026-11-18：0 字节转写会话每 750ms 重扫一次，一天刷掉 5.3 万行日志，占全文 90%） */
+const locateLogged = new Map<string, string>()
 /** P2-10 locate 失败退避账本：sessionId → 连败次数 + 下次允许扫盘时刻。
  *  前 LOCATE_BACKOFF_AFTER 次不退避（qclaw 冷启 ~5s 内 transcript 才落盘，退避早了拖绑定），
  *  之后 750ms 起倍增到上限；成功定位/清缓存即复位。 */
@@ -727,6 +730,9 @@ function locate(session: Session, kind: AgentKind, occupied?: (nativeId: string)
     locateFailCache.delete(session.id)
     if (found !== hit?.path) {
       locateCache.set(session.id, { path: found })
+    }
+    if (locateLogged.get(session.id) !== found) {
+      locateLogged.set(session.id, found)
       log.info(`定位 ${kind} 会话文件 ${session.id.slice(0, 8)} → ${path.basename(found)}`)
     }
   } else {
@@ -767,6 +773,9 @@ export function locateClaudeLayoutTranscript(session: Session, projectsDir: stri
   const found = candidates[candidates.length - 1] ?? null
   if (found && found !== hit?.path) {
     locateCache.set(session.id, { path: found })
+  }
+  if (found && locateLogged.get(session.id) !== found) {
+    locateLogged.set(session.id, found)
     log.info(`定位 claude 布局会话文件 ${session.id.slice(0, 8)} → ${path.basename(found)}`)
   }
   return found
@@ -1465,6 +1474,7 @@ export function readAgentTrafficState(
 export function dropAgentTranscriptCache(sessionId: string) {
   parseCache.delete(sessionId)
   locateCache.delete(sessionId)
+  locateLogged.delete(sessionId)
   locateFailCache.delete(sessionId) // 会话重启/解绑后立即恢复全速重扫，不背旧退避
 }
 

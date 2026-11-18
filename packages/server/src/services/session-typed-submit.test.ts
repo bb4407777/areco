@@ -108,3 +108,64 @@ test('转写里已经有这一句 → 认已提交，不重投', async () => {
     session.dispose()
   }
 })
+
+// ---- 输入框通道：屏幕清空了但转写里没有这一句 → 按可靠通道重投（2026-11-18「Cindy」会话）----
+
+test('submitUntilAccepted：框空了、转写没有这一句 → 宽限期后重投一次', async () => {
+  const session = makeSession()
+  session.spawnProcess(catSpec)
+  ;(session as unknown as { harness: string }).harness = 'workbuddy'
+  try {
+    ;(session as unknown as { shadow: unknown }).shadow = await boxScreen(EMPTY_BOX)
+    const file = tempTranscript(wbUserLine('上一条'))
+    const from = fs.statSync(file).size
+    const body = 'Cindy有没有配置好？'
+    const sent: string[] = []
+    ;(session as unknown as { sendline: (t: string) => void }).sendline = (t: string) => {
+      sent.push(t)
+    }
+    ;(session as unknown as { submitAck: unknown }).submitAck = {
+      path: file,
+      from,
+      key: body.replace(/\s+/g, ''),
+      loose: false,
+    }
+    const submit = (session as unknown as {
+      submitUntilAccepted: (s: string, b: string, absent: boolean, before: string | null, busy: boolean, pasted: boolean) => void
+    }).submitUntilAccepted
+    submit.call(session, '配置好？', body, false, '', false, true)
+    await new Promise((r) => setTimeout(r, 12_000))
+    assert.deepEqual(sent, [body])
+  } finally {
+    session.dispose()
+  }
+})
+
+test('submitUntilAccepted：转写里有这一句 → 直接认成功，不重投', async () => {
+  const session = makeSession()
+  session.spawnProcess(catSpec)
+  ;(session as unknown as { harness: string }).harness = 'workbuddy'
+  try {
+    ;(session as unknown as { shadow: unknown }).shadow = await boxScreen(EMPTY_BOX)
+    const body = 'Cindy有没有配置好？'
+    const file = tempTranscript(wbUserLine('上一条') + wbUserLine(body))
+    const sent: string[] = []
+    ;(session as unknown as { sendline: (t: string) => void }).sendline = (t: string) => {
+      sent.push(t)
+    }
+    ;(session as unknown as { submitAck: unknown }).submitAck = {
+      path: file,
+      from: 0,
+      key: body.replace(/\s+/g, ''),
+      loose: false,
+    }
+    const submit = (session as unknown as {
+      submitUntilAccepted: (s: string, b: string, absent: boolean, before: string | null, busy: boolean, pasted: boolean) => void
+    }).submitUntilAccepted
+    submit.call(session, '配置好？', body, false, '', false, true)
+    await new Promise((r) => setTimeout(r, 4000))
+    assert.deepEqual(sent, [])
+  } finally {
+    session.dispose()
+  }
+})
