@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import type { Context } from 'koa'
 import type { RoleResolved, ScreenTailPayload, SessionCleanupResult, StandCodeConfig, StandCodeRole, StatsSummary, Template, TranscriptMessage, TranscriptPage, UiPrefs } from '../../../shared/protocol'
 import type { SessionManager } from '../services/session-manager'
+import type { Session } from '../services/session'
 import type { TemplateStore } from '../services/templates'
 import type { AppConfig } from '../config'
 import { DATA_DIR, saveConfig } from '../config'
@@ -69,13 +70,19 @@ function isLocalBrowserRequest(ctx: Context): boolean {
   return true
 }
 
-/** 路径作为 argv 传入，不拼接 AppleScript 源码，阻断引号/换行注入 */
-const FINDER_OPEN_SCRIPT = `on run argv
+/**
+ * 路径作为 argv 传入，不拼接 AppleScript 源码，阻断引号/换行注入。
+ * 目录用 open（开窗看内容），文件只能 reveal（开所在夹并选中）：
+ * areco 跑在 launchd 后台，LaunchServices 不肯代它拉起默认 App，对文件 `open`
+ * 会弹「应用程序“(null)”没有权限打开 X」，而 osascript 仍返回 0（前端误报成功）。
+ * 同 skill-server `_open_in_finder`（2026-08-08 实测结论，2026-11-18 areco 复现）。
+ */
+const finderScript = (verb: 'open' | 'reveal') => `on run argv
 set targetPath to item 1 of argv
 set targetFile to POSIX file targetPath
 tell application "Finder"
   activate
-  open targetFile
+  ${verb} targetFile
 end tell
 end run`
 
@@ -465,10 +472,14 @@ export class ApiControllers {
       const before = Number.isFinite(beforeRaw) && beforeRaw >= 0 ? beforeRaw : undefined
       const cursor = Math.max(0, Number(ctx.query.cursor ?? 0) || 0)
       const template = this.templates.get(session.templateId)
+      // 换 harness 接续：首载把来源会话的对话层拼在前面，点进来就是一条连续对话（2026-11-18）
+      const prefix = before === undefined && cursor === 0 ? this.handoffPrefix(session) : []
+      const withPrefix = (page: TranscriptPage): TranscriptPage =>
+        prefix.length ? { ...page, messages: [...prefix, ...page.messages] } : page
       // mcode（MiniMax Code CLI）：对话正文落在自家本地 sqlite，不是 claude 布局——单开一支读，
       // 走 claude 布局分支只会找不到文件、对话视图空白（2026-11-10 实测报障）。
       if (isMcodeSession(session.command, template?.harness)) {
-        ok(ctx, readMcodeLiveTranscript(session, { cursor, before }))
+        ok(ctx, withPrefix(readMcodeLiveTranscript(session, { cursor, before })))
         return
       }
       // 定位 transcript 文件：claude 系按 --session-id 直取；在册 agent（codex/codebuddy/
@@ -478,7 +489,7 @@ export class ApiControllers {
       //（qoder 等）走 transcriptDir，缺 claudeSessionId 的 claude 包装器按时间窗兜底
       const kind = agentKindOf(session.command, template?.harness)
       if (kind && !session.claudeSessionId) {
-        ok(ctx, readAgentTranscript(session, kind, { cursor, before }))
+        ok(ctx, withPrefix(readAgentTranscript(session, kind, { cursor, before })))
         return
       }
       let filePath: string | null = null
@@ -491,24 +502,85 @@ export class ApiControllers {
         filePath = home ? locateClaudeTranscript(session, home) : null
       }
       if (!filePath || !fs.existsSync(filePath)) {
-        ok(ctx, { exists: false, messages: [], cursor: 0 } satisfies TranscriptPage)
+        ok(ctx, withPrefix({ exists: false, messages: [], cursor: 0 }))
         return
       }
       // claude 格式：首载（cursor=0）与「加载更早」（before）走尾部倒序字节分页；
       // cursor>0 是既有的向前增量轮询（实时追新）
       if (before !== undefined || cursor === 0) {
         const page = readHistoryPage(filePath, before)
-        ok(ctx, {
-          exists: true,
-          messages: page.messages,
-          cursor: page.end,
-          start: page.start,
-          hasMore: page.hasMore,
-        } satisfies TranscriptPage)
+        ok(
+          ctx,
+          withPrefix({
+            exists: true,
+            messages: page.messages,
+            cursor: page.end,
+            start: page.start,
+            hasMore: page.hasMore,
+          })
+        )
         return
       }
       ok(ctx, readTranscriptFile(filePath, cursor))
     })
+
+  /**
+   * 首载拼接：本会话由别的会话换 harness 接续而来时，把来源会话的对话层压在前面。
+   * 只取尾部 300 条（更早的给一行省略提示），链深上限 8 防环。
+   */
+  private handoffPrefix(session: Session, depth = 0): TranscriptMessage[] {
+    const from = session.handoffFrom
+    if (!from || depth >= 8) return []
+    let src: Session
+    try {
+      src = this.manager.get(from)
+    } catch {
+      return []
+    }
+    const msgs = this.readSessionMessages(src)
+    if (!msgs.length) return []
+    const tail = msgs.length > 300 ? msgs.slice(-300) : msgs
+    const out = this.handoffPrefix(src, depth + 1)
+    if (tail.length < msgs.length) {
+      out.push({
+        role: 'user',
+        parts: [{ kind: 'notice', text: `—— 「${src.name}」更早的 ${msgs.length - tail.length} 条略 ——` }],
+        timestamp: null,
+      })
+    }
+    out.push(...tail)
+    out.push({
+      role: 'user',
+      parts: [
+        { kind: 'notice', text: `—— 以上接续自「${src.name}」（${path.basename(src.command)}），以下为接手会话 ——` },
+      ],
+      timestamp: null,
+    })
+    return out
+  }
+
+  /** 读一会话的全量对话消息（不分页，只给首载拼接用） */
+  private readSessionMessages(session: Session): TranscriptMessage[] {
+    const template = this.templates.get(session.templateId)
+    if (isMcodeSession(session.command, template?.harness)) {
+      return readMcodeLiveTranscript(session, { cursor: 0 }).messages
+    }
+    const kind = agentKindOf(session.command, template?.harness)
+    if (kind && !session.claudeSessionId) {
+      return readAgentTranscript(session, kind, { cursor: 0 }).messages
+    }
+    let filePath: string | null = null
+    if (session.claudeSessionId) {
+      filePath = transcriptPath(session)
+    } else if (session.transcriptDir) {
+      filePath = locateClaudeLayoutTranscript(session, session.transcriptDir)
+    } else {
+      const home = template ? effectiveClaudeHome(template) : null
+      filePath = home ? locateClaudeTranscript(session, home) : null
+    }
+    if (!filePath || !fs.existsSync(filePath)) return []
+    return readHistoryPage(filePath, undefined).messages
+  }
 
   // ---- Phase 3：历史对话浏览 ----
 
@@ -849,7 +921,10 @@ export class ApiControllers {
       }
       if (!messages.length) throw new Error('该会话没有可交接的内容')
 
-      const file = writeHandoffFile({ source, project, id, title: body.name || id.slice(0, 8) }, messages)
+      const file = writeHandoffFile(
+        { source, project, id, title: body.name || id.slice(0, 8), ...(cwd ? { cwd } : {}) },
+        messages
+      )
       ok(ctx, this.spawnWithHandoff(template, file, source, { cwd: cwd || undefined, name: body.name }))
     })
 
@@ -862,13 +937,14 @@ export class ApiControllers {
     template: Template,
     file: string,
     source: string,
-    opts: { cwd?: string; name?: string }
+    opts: { cwd?: string; name?: string; fromSessionId?: string }
   ) {
     const prompt = handoffPrompt(file, source)
     const viaArg = acceptsInitialPromptArg(template)
     const summary = this.manager.spawn(template.id, {
       cwd: opts.cwd,
       name: opts.name,
+      ...(opts.fromSessionId ? { handoffFrom: opts.fromSessionId } : {}),
       extraArgs: viaArg ? [prompt] : undefined,
       agentBindingPrompt: viaArg ? prompt : undefined,
     })
@@ -922,11 +998,26 @@ export class ApiControllers {
 
       if (session.isRunning) session.stop()
 
+      const sourceTemplate = this.templates.get(session.templateId)
       const file = writeHandoffFile(
-        { source: session.command.split('/').pop() ?? 'agent', project: 'session', id: session.id, title: body.name || session.name },
+        {
+          source: session.command.split('/').pop() ?? 'agent',
+          project: 'session',
+          id: session.id,
+          title: body.name || session.name,
+          cwd: session.cwd,
+          ...(sourceTemplate?.model ? { model: sourceTemplate.model } : {}),
+        },
         messages
       )
-      ok(ctx, this.spawnWithHandoff(template, file, session.name, { cwd: session.cwd, name: body.name || session.name }))
+      ok(
+        ctx,
+        this.spawnWithHandoff(template, file, session.name, {
+          cwd: session.cwd,
+          name: body.name || session.name,
+          fromSessionId: session.id,
+        })
+      )
     })
 
   // ---- Phase 4：文件预览 ----
@@ -1113,13 +1204,13 @@ export class ApiControllers {
     })
 
   /**
-   * 桌面端「文件」栏点击 → 系统默认 App 打开。
+   * 桌面端「文件」栏点击 → 在 Finder 中定位（目录则开窗）。
    * 对齐 skill-server(8020) POST /open 常驻服务实证做法（2026-07-31 高律师指点）：
    *  - 复用 FileService.resolve 白名单 realpath 边界，与 meta/raw 同一安全口径；
    *  - loopback/来源闸：Sec-Fetch-Site + Origin/Referer 只接受 127.0.0.1/localhost，
    *    阻断外站对 loopback 的 CSRF/DNS-rebinding（同 skill-server _local_browser_request）；
-   *  - osascript 唤起 Finder activate+open（路径走 argv 不拼脚本源码），
-   *    launchd 常驻环境实证可用且把窗口带到前台。
+   *  - osascript 唤起 Finder（路径走 argv 不拼脚本源码）；**文件走 reveal 不走 open**，
+   *    否则 launchd 后台环境弹「应用程序“(null)”没有权限打开 X」且仍返回成功。
    * 仅桌面浏览器触发（手机端前端仍走内部预览，不会调到这里）。
    */
   fileOpen = async (ctx: Context) => {
@@ -1135,9 +1226,16 @@ export class ApiControllers {
       const { status, code } = statusFor(message)
       return fail(ctx, status, code, message)
     }
+    // 目录 open，文件 reveal：文件用 open 会被 LaunchServices 拒（见 finderScript 注释）
+    let verb: 'open' | 'reveal' = 'reveal'
     try {
-      await execFileAsync('osascript', ['-e', FINDER_OPEN_SCRIPT, '--', real], { timeout: 10000 })
-      ok(ctx, { opened: real })
+      verb = fs.statSync(real).isDirectory() ? 'open' : 'reveal'
+    } catch {
+      /* stat 失败交给 osascript 报错 */
+    }
+    try {
+      await execFileAsync('osascript', ['-e', finderScript(verb), '--', real], { timeout: 10000 })
+      ok(ctx, { opened: real, verb })
     } catch (err) {
       fail(ctx, 500, 'open_failed', err instanceof Error ? err.message : String(err))
     }

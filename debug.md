@@ -331,3 +331,23 @@ agent 转写（`~/.codebuddy/projects/…/<id>.jsonl`）里没有这条 user 消
 
 - `[agent-transcript] 定位 …` 日志：缓存被 0 字节文件反复作废时每次都重打，一天 5.3 万行占全文 90%。
   改为「路径变了才打」（`locateLogged`），缓存失效照旧重扫。
+
+## 2026-11-18（三次）· 点文件芯片弹「应用程序“(null)”没有权限」
+
+### 现象
+
+桌面端点「📦 文件」栏里的芯片，Finder 弹「应用程序“(null)”没有权限打开 X」，
+areco 侧不报错（照旧当成功）。
+
+### 根因
+
+`fileOpen` 让 Finder `open` 该文件。areco 跑在 launchd 后台（`.npm-global/bin/node`，
+无 App 包），LaunchServices 不肯代它拉起默认 App，只能弹这个无名提示；osascript 仍返回 0，
+所以前端拿不到失败。同一坑 skill-server 2026-08-08 已踩过（`_open_in_finder` 注释）。
+
+### 修复
+
+`packages/server/src/controllers/api.ts`：`finderScript(verb)` 按 `fs.statSync().isDirectory()`
+分流——目录 `open`、文件 `reveal`（Finder 自己定位，无需拉起别的 App），响应带 `verb` 便于排查。
+实跑 `osascript -e <脚本> -- <路径>` 的 reveal 返回 0；注意脚本存成文件再跑（`osascript x.applescript -- 路径`）时
+`--` 会被当成第一个参数，只能用 `-e` 形式。

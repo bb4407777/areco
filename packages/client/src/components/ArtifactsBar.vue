@@ -2,7 +2,8 @@
 // 文件栏（原成果栏）：汇总整个对话里提到的文件产物成 chip 列表，免翻记录找文件。
 // 纯前端实现：展开时沿 transcript 分页接口把全程翻一遍（只提取路径不渲染消息），
 // 按「最后一次提及」去重排序，再逐个打 /api/files/meta 过滤掉不存在的（含历史假路径）。
-// 点击行为分端（2026-07-31 高律师定）：桌面端调 /api/files/open 用系统默认 App 直接打开，
+// 点击行为分端（2026-07-31 高律师定）：桌面端调 /api/files/open 交给 Finder 定位
+// （文件 reveal、目录 open——launchd 后台起不了默认 App，文件 open 会弹「(null) 没有权限」），
 // 手机端保持 areco 内部预览；桌面端 open 失败时回退内部预览。
 import { ref, watch } from 'vue'
 import { NSpin } from 'naive-ui'
