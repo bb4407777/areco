@@ -3,13 +3,12 @@ import Combine
 import UIKit
 
 enum ServerMode: String {
-    case lan, wan, custom
+    case lan, wan
 
     var label: String {
         switch self {
         case .lan: return "局域网"
         case .wan: return "公网"
-        case .custom: return "自填"
         }
     }
 }
@@ -19,10 +18,10 @@ struct Endpoint: Equatable {
     let mode: ServerMode
 }
 
-/// 服务器地址不再手填：固定两个地址、固定顺序——先公网 https，不通再局域网。
+/// 服务器地址不手填、也没有设置页：固定两个地址、固定顺序——先公网 https，不通再局域网。
 ///   公网是 Cloudflare 域名，https 是安全上下文，麦克风（语音输入）只有这条线能用；
 ///   局域网 mDNS 名是 http，WebKit 不给麦克风，只作回退。
-/// 手填地址仍然保留，填了就压过自动逻辑（出差/临时换机时用）。
+/// 要连别的机器改这里或前端代理，壳里不再留入口。
 @MainActor
 final class ServerStore: ObservableObject {
     enum Phase: Equatable {
@@ -33,7 +32,6 @@ final class ServerStore: ObservableObject {
 
     static let lanURL = URL(string: "http://gaodeMacBook-Pro.local:8790")!
     static let publicURL = URL(string: "https://areco.gaochengbin.com")!
-    private static let customKey = "areco.customURL"
 
     /// 重试节奏：一轮＝公网→局域网各探一次，探不通就报「正在重连」并隔 5 秒再来，不限轮数。
     /// 网络刚切（Wi-Fi↔蜂窝）、Mac 刚唤醒、公网隧道刚起时头几轮探不通很正常，
@@ -42,13 +40,11 @@ final class ServerStore: ObservableObject {
 
     @Published private(set) var phase: Phase = .probing
     @Published private(set) var active: Endpoint?
-    @Published var customURL: String
     /// 每次 resolve 递增：手动「重试」与自动重连并发时，只让最后一次生效，避免两边互相覆盖
     private var resolveGeneration = 0
 
     init() {
-        customURL = UserDefaults.standard.string(forKey: Self.customKey) ?? ""
-        // 回到前台若还停在失败页，自动再连，不用进设置页点「重连」
+        // 回到前台若还停在失败页，立刻再连，不用等下一轮 5 秒
         NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil,
@@ -61,28 +57,11 @@ final class ServerStore: ObservableObject {
         }
     }
 
-    var isAuto: Bool { customURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-
     func resolve() async {
         resolveGeneration &+= 1
         let generation = resolveGeneration
         phase = .probing
         active = nil
-
-        if let custom = Self.normalize(customURL) {
-            var first = true
-            while generation == resolveGeneration {
-                if await probe(custom, timeout: first ? 5 : 3) {
-                    guard generation == resolveGeneration else { return }
-                    activate(Endpoint(url: custom, mode: .custom))
-                    return
-                }
-                first = false
-                phase = .failed("填写的地址连不上，正在自动重连…")
-                guard await waitRetry(generation: generation) else { return }
-            }
-            return
-        }
 
         var first = true
         while generation == resolveGeneration {
@@ -109,29 +88,16 @@ final class ServerStore: ObservableObject {
         return generation == resolveGeneration
     }
 
-    func saveCustom(_ raw: String) {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(trimmed, forKey: Self.customKey)
-        customURL = trimmed
-    }
-
-    func useAuto() {
-        UserDefaults.standard.removeObject(forKey: Self.customKey)
-        customURL = ""
-    }
-
     /// WebView 加载失败：先原路重探（公网挂了退局域网），探不通就每 5 秒再来，直到连上
     func handlePageFailure(of endpoint: Endpoint) {
         resolveGeneration &+= 1
         let generation = resolveGeneration
         Task { [weak self] in
             guard let self else { return }
-            // 自定义地址先重试自己，再按老规矩退局域网
-            let targets: [(URL, ServerMode)] = switch endpoint.mode {
-            case .lan: [(Self.lanURL, .lan)]
-            case .wan: [(Self.publicURL, .wan), (Self.lanURL, .lan)]
-            case .custom: [(endpoint.url, .custom), (Self.lanURL, .lan)]
-            }
+            // 局域网本来就没得退；公网挂了才退局域网
+            let targets: [(URL, ServerMode)] = endpoint.mode == .lan
+                ? [(Self.lanURL, .lan)]
+                : [(Self.publicURL, .wan), (Self.lanURL, .lan)]
 
             var first = true
             while generation == self.resolveGeneration {
@@ -166,19 +132,5 @@ final class ServerStore: ObservableObject {
         } catch {
             return false
         }
-    }
-
-    /// 手填地址补协议头：`192.168.5.152:8790` 这类地址不能默认 https（局域网没证书）
-    static func normalize(_ raw: String) -> URL? {
-        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return nil }
-        if !s.contains("://") {
-            let host = s.split(separator: "/").first.map(String.init) ?? s
-            let bareHost = host.split(separator: ":").first.map(String.init) ?? host
-            let looksLikeIP = bareHost.first?.isNumber == true
-            let isLocal = bareHost.hasSuffix(".local")
-            s = (looksLikeIP || isLocal ? "http://" : "https://") + s
-        }
-        return URL(string: s)
     }
 }

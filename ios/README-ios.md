@@ -32,13 +32,24 @@ xcrun devicectl device install app --device <devicectl 的 UUID> \
 
 安装时手机要解锁（锁屏状态下 `devicectl process launch` 会报 Locked）。
 
+本机现用机：iPhone 14 Pro Max（iOS 16.6.1，UDID `00008120-001849343AE0C01E`），**先走 USB 有线**。
+iOS 16 不支持 `devicectl`（CoreDevice 只支持 iOS 17+），装 App 用：
+
+```bash
+ios-deploy --id 00008120-001849343AE0C01E --bundle <Areco.app> --no-wifi --justlaunch
+```
+
+`devicectl` 报「device locked / DDI 挂载失败」时先查是不是走成了无线（`xcrun xcdevice list` 看 `interface`）。
+
 ## 手机端使用
 
-- **不用填地址**：固定两个地址、固定顺序——先 `https://areco.gaochengbin.com`（公网，5 秒超时），
-  不通再换 `http://gaodeMacBook-Pro.local:8790`（局域网，3 秒超时）。
+- **不用填地址**：固定两个地址、固定顺序——先 `https://areco.gaochengbin.com`（公网，首轮 5 秒超时），
+  不通再换 `http://gaodeMacBook-Pro.local:8790`（局域网，首轮 3 秒超时）。
   公网优先是因为 https 才有麦克风（语音输入）；局域网 http 是回退，那里点麦克风会提示环境不支持。
+- **自动重连**：探不通不设次数上限——失败后每 5 秒自动再来一轮（首轮超时 5/3 秒，之后收紧到 3/2 秒），
+  网络刚切换、Mac 刚唤醒的几十秒基本能自己连上；回到前台若还停在失败页，也会立刻再连。
 - **语音输入**：需要麦克风权限（首次点麦克风弹系统授权），仅公网 https 下可用。
-- 右下角齿轮只在自动连不上、或要连别的机器时才用：可手动指定地址，也可切回「自动」。
+- **没有设置页、没有齿轮**：地址全自动，连不上就等它自己连（失败页上的「立即重试」只是不想等时催一下）。
 - 首次会弹「本地网络」授权，局域网访问必须允许。
 - 登录一次后 cookie 落盘，杀掉 App 再开仍是登录态；会话/终端数据都在 Mac 上，换手机不影响。
 - 地址栏与浏览器 UI 不出现，全屏即座舱。
@@ -57,8 +68,8 @@ xcrun devicectl device install app --device <devicectl 的 UUID> \
 ios/
   project.yml          # xcodegen 定义（改这里再 generate）
   Info.plist
-  Sources/ArecoApp.swift    # 入口、连接中/失败态、设置页
+  Sources/ArecoApp.swift    # 入口、连接中/失败态
   Sources/WebAppView.swift  # WKWebView 封装、加载失败回调、弹窗/新窗口处理
-  Sources/ServerStore.swift # 局域网→公网自动探测、地址规范化、上次可用模式
+  Sources/ServerStore.swift # 公网→局域网自动探测、每 5 秒无限重试
   Assets.xcassets/AppIcon.appiconset/icon-1024.png
 ```
