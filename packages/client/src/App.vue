@@ -39,12 +39,12 @@ const naiveTheme = computed(() => (ui.theme === 'light' ? null : darkTheme))
 const overrides = computed(() => (ui.theme === 'light' ? lightOverrides : darkOverrides))
 
 // 座舱页/历史正文页寸土寸金，手机上隐藏顶栏；桌面端有导航栏始终显示
-const inSession = computed(() => ui.isMobile && (route.path.startsWith('/session/') || route.path.startsWith('/history/')))
+const inSession = computed(
+  () =>
+    ui.isMobile &&
+    (route.path.startsWith('/session/') || route.path.startsWith('/history/') || route.path.startsWith('/bots/'))
+)
 const connected = wsClient.connected
-
-function onAutoSpeechChange(event: Event) {
-  speech.setAutoEnabled((event.target as HTMLInputElement).checked)
-}
 
 function forceUpdate() {
   if (frontendUpdateBlocked.value && !window.confirm('当前有未发送内容，立即更新会丢失这些文字。仍要更新吗？')) return
@@ -71,10 +71,6 @@ function forceUpdate() {
               <router-link v-if="ui.showProcesses" to="/processes" class="nav-link" :class="{ active: route.path.startsWith('/processes') }">进程</router-link>
               <router-link to="/opc" class="nav-link" :class="{ active: route.path.startsWith('/opc') }">OPC</router-link>
               <router-link to="/settings" class="nav-link" :class="{ active: route.path === '/settings' }">设置</router-link>
-              <label class="speech-auto" title="只播新完成的 Agent 正式文本；刷新后仍关闭">
-                <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />
-                自动播报
-              </label>
               <button class="nav-link theme-btn" type="button" :title="ui.theme === 'dark' ? '切到浅色' : '切到深色'" @click="ui.toggleTheme()">
                 {{ ui.theme === 'dark' ? '☀️' : '🌙' }}
               </button>
@@ -124,7 +120,7 @@ function forceUpdate() {
   align-items: center;
   gap: 8px;
   font-weight: 700;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--text);
   text-decoration: none;
 }
@@ -147,7 +143,7 @@ function forceUpdate() {
   border-radius: 7px;
   color: var(--muted);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 15px;
   border: 0;
   background: none;
   cursor: pointer;
@@ -157,19 +153,6 @@ function forceUpdate() {
 .nav-link.active {
   color: var(--text);
   background: var(--chip-bg);
-}
-.speech-auto {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.speech-auto input {
-  margin: 0;
 }
 .speech-banner {
   padding: 6px 16px;
@@ -189,7 +172,7 @@ function forceUpdate() {
   color: var(--danger);
 }
 .theme-btn {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
   padding: 5px 8px;
 }
@@ -230,11 +213,31 @@ function forceUpdate() {
   cursor: pointer;
 }
 
-/* 小屏与桌面同款样式；375px 等窄屏放不下 6 个 tab 时导航横向滚动兜底，
-   tab 不竖排不裁切（nowrap 在基础样式里） */
-@media (max-width: 520px) {
+/* 窄屏（手机/半屏窗口）：字号一律不缩，只收左右留白；真放不下就折行，不横向滑动 */
+@media (max-width: 560px) {
+  .app-header {
+    padding: 8px 8px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    gap: 6px;
+  }
+  .brand {
+    gap: 6px;
+    flex-shrink: 0;
+  }
   .nav {
-    overflow-x: auto;
+    gap: 8px;
+    row-gap: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .nav-link {
+    padding: 5px 4px;
+    font-size: 15px;
+  }
+  .theme-btn {
+    padding: 5px 4px;
+    font-size: 15px;
   }
 }
 </style>
