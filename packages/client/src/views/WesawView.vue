@@ -3,7 +3,7 @@
 // 去掉中间的微信聊天记录与右侧工作区面板，只留「会话列表 ＋ agent 对话」。
 // 桌面两栏；手机单栏，点会话进对话、左上角返回列表（2026-11-19 高律师定）。
 // 气泡复用 ChatMessage.vue（markdown、折叠工具块、复制、点按播报单源）。
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { NEmpty, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import ChatMessage from '../components/ChatMessage.vue'
@@ -152,6 +152,13 @@ function fmtTime(ms: number): string {
 }
 
 const initial = (name: string) => (name || '?').trim().charAt(0)
+
+/** 头像走服务端按需缓存（weSaw 启动缓存里的 qlogo 直链 → 128px 本地 jpg）；没有就退回首字 */
+const avatarUrl = (r: WesawSessionRow) => `/api/wesaw/avatar/${encodeURIComponent(r.id)}`
+const noAvatar = reactive(new Set<string>())
+function avatarFailed(r: WesawSessionRow): void {
+  noAvatar.add(r.talker)
+}
 
 async function load() {
   loading.value = true
@@ -394,7 +401,17 @@ onUnmounted(() => {
           @click="openSession(r.id)"
         >
           <span class="session-active-mark" aria-hidden />
-          <span class="session-avatar">{{ initial(r.name) }}</span>
+          <span class="session-avatar">
+            {{ initial(r.name) }}
+            <img
+              v-if="!noAvatar.has(r.talker)"
+              :src="avatarUrl(r)"
+              alt=""
+              loading="lazy"
+              decoding="async"
+              @error="avatarFailed(r)"
+            />
+          </span>
           <span class="session-body">
             <span class="session-top">
               <span class="session-name">{{ r.name }}</span>
@@ -643,12 +660,22 @@ onUnmounted(() => {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
+  position: relative;
   overflow: hidden;
   border-radius: 8px;
   background: var(--chip-bg);
   color: var(--accent);
   font-size: 15px;
   font-weight: 700;
+}
+
+.session-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--chip-bg);
 }
 
 .session-body {

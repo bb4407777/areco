@@ -3,6 +3,7 @@
 import type { Context } from 'koa'
 import { listWesawSessions, readWesawTranscript, wesawTalkerOf } from '../services/wesaw'
 import { sendWesawMessage, wesawChatBusy, wesawChatTurns } from '../services/wesaw-chat'
+import { readWesawAvatar } from '../services/wesaw-avatars'
 
 function ok(ctx: Context, data: unknown): void {
   ctx.body = { ok: true, data }
@@ -51,6 +52,37 @@ export function wesawChat(ctx: Context): void {
     ok(ctx, { turns: wesawChatTurns(talker), busy: wesawChatBusy(talker) })
   } catch (err) {
     fail(ctx, 500, 'wesaw_chat_failed', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** GET /api/wesaw/avatar/:id — 会话头像（id 同会话 id：talker 的 base64url）；没有头像回 404 让前端用首字 */
+export async function wesawAvatar(ctx: Context): Promise<void> {
+  const talker = Buffer.from(String(ctx.params.id ?? ''), 'base64url').toString('utf8')
+  if (!/^[\w@.-]{3,120}$/.test(talker)) {
+    ctx.status = 404
+    ctx.body = ''
+    return
+  }
+  try {
+    const hit = await readWesawAvatar(talker)
+    if (!hit) {
+      ctx.status = 404
+      ctx.set('Cache-Control', 'public, max-age=3600')
+      ctx.body = ''
+      return
+    }
+    const etag = `"${hit.mtimeMs.toString(16)}"`
+    ctx.set('Cache-Control', 'public, max-age=604800')
+    ctx.set('ETag', etag)
+    if (ctx.headers['if-none-match'] === etag) {
+      ctx.status = 304
+      ctx.body = null
+      return
+    }
+    ctx.type = 'image/jpeg'
+    ctx.body = hit.buf
+  } catch (err) {
+    fail(ctx, 500, 'wesaw_avatar_failed', err instanceof Error ? err.message : String(err))
   }
 }
 
