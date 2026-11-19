@@ -101,6 +101,8 @@ const selected = ref<string | null>(null)
 const q = ref('')
 
 const msgs = ref<TranscriptMessage[]>([])
+/** 正文实际读的那一路引擎（老绑定工作区也可能是 codebuddy） */
+const agentCli = ref('')
 const msgLoading = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 
@@ -178,11 +180,13 @@ async function openSession(id: string) {
   selected.value = id
   msgs.value = []
   chatTurns.value = []
+  agentCli.value = ''
   msgLoading.value = true
   void loadChat()
   try {
     const page = await api.get<WesawTranscriptPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/transcript`)
     msgs.value = page.exists ? page.messages : []
+    agentCli.value = page.cli ?? ''
     await nextTick()
     if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
   } catch (err) {
@@ -363,7 +367,7 @@ onUnmounted(() => {
       />
       <div v-else ref="scroller" class="msgs">
         <div v-for="(m, i) in allMsgs" :key="i" class="msg-wrap">
-          <ChatMessage :message="m" :agent-label="current?.cli || 'weSaw'" speakable :session-id="`wesaw:${selected}`" />
+          <ChatMessage :message="m" :agent-label="agentCli || current?.cli || 'weSaw'" speakable :session-id="`wesaw:${selected}`" />
         </div>
         <div v-if="chatBusy" class="pane-typing">agent 正在处理…</div>
       </div>

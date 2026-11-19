@@ -3,8 +3,9 @@
 //   右：agent 对话＝该工作区 project.md 的工作纪要条目 + 引擎会话里尚未入账的助手回复
 // 不读微信聊天原文、不展示工作区路径与文件清单（2026-11-19 高律师定）。
 //
-// 引擎绑定存在各工作区 .agent-session.json（{ cli, sessionId }）。qoder 绑定 sessionId 常为空、
-// 且每批都是新会话（weSaw 投喂模型），故 qoder 侧取该 cwd 下最近一份会话文件。
+// 正文统一从 CodeBuddy 会话读（2026-11-19 高律师令「kimi 和 qoder 已经过时很久了，统一用 CodeBuddy」）：
+// 绑定仍是 kimi/pi 的老工作区，实际在跑的是 CodeBuddy，按 cwd 取最近一份 CodeBuddy 会话；
+// 只有该工作区根本没有 CodeBuddy 会话时才回落老引擎的会话文件。
 // 全部只读：只读接口 + 扫盘 + 读文件，不碰 weSaw 进程、不写任何文件。
 import fs from 'node:fs'
 import path from 'node:path'
@@ -15,7 +16,7 @@ import { parseKimi, parsePi } from './agent-transcript'
 const DOC_ROOT = path.join(os.homedir(), 'Documents', 'weSaw', 'document')
 const KIMI_INDEX = path.join(os.homedir(), '.kimi-code', 'session_index.jsonl')
 const PI_ROOT = path.join(os.homedir(), '.pi', 'agent', 'sessions')
-const QODER_ROOT = path.join(os.homedir(), '.qoder', 'projects')
+const CB_ROOT = path.join(os.homedir(), '.codebuddy', 'projects')
 /** 单次读盘的正文上限：超了只读尾部 */
 const MAX_READ_BYTES = 20 * 1024 * 1024
 
@@ -30,7 +31,7 @@ export interface WesawSessionRow {
   talker: string
   /** 最近活动时间（毫秒）：project/readme/绑定/会话文件取最大 */
   updatedAt: number
-  /** 引擎名（qoder/kimi/pi/codebuddy），无绑定为空 */
+  /** 绑定里记的引擎名（老工作区多为 kimi/pi），无绑定为空；正文实际按 CodeBuddy 读 */
   cli: string
   /** 最后一条消息摘要（weSaw 会话行第二行，原样取 app 的 summary） */
   summary: string
@@ -101,9 +102,16 @@ function piFiles(): Map<string, string> {
   return files
 }
 
-/** qoder：~/.qoder/projects/<cwd 斜线换横线>/<uuid>.jsonl，同 Claude Code 布局 */
-function qoderProjectDir(workspaceDir: string): string {
-  return path.join(QODER_ROOT, workspaceDir.replace(/\//g, '-'))
+/** codebuddy：~/.codebuddy/projects/<cwd 非字母数字换横线、去前导横线>/<sessionId>.jsonl */
+function cbProjectDir(workspaceDir: string): string {
+  const slug = path.resolve(workspaceDir).replace(/[^A-Za-z0-9]/g, '-').replace(/^-+/, '')
+  return path.join(CB_ROOT, slug)
+}
+
+function cbSessionFile(workspaceDir: string, sessionId: string): string | null {
+  if (!/^[0-9a-f][0-9a-f-]{7,}$/i.test(sessionId)) return null
+  const file = path.join(cbProjectDir(workspaceDir), `${sessionId}.jsonl`)
+  return fs.existsSync(file) ? file : null
 }
 
 function newestJsonl(dir: string): string | null {
@@ -128,27 +136,44 @@ function newestJsonl(dir: string): string | null {
   return best?.f ?? null
 }
 
-/** 绑定 + 工作区 → 正文文件绝对路径；解析不到返回 null */
-function resolveTranscript(workspaceDir: string, cli: string, sessionId: string): string | null {
+interface Resolved {
+  file: string | null
+  /** 实际读到正文的那一路（旧绑定工作区也会是 codebuddy） */
+  cli: string
+}
+
+function mtimeOf(file: string): number {
+  try {
+    return fs.statSync(file).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * 绑定 + 工作区 → 正文文件。正文统一优先 CodeBuddy：绑定是 codebuddy 就认它的 sessionId，
+ * 否则取该 cwd 下最近一份 CodeBuddy 会话；老引擎（kimi/pi）只在没有 CodeBuddy 会话、
+ * 或老会话比 CodeBuddy 还新时才用。qoder 不再读取（已过时）。
+ */
+function resolveTranscript(workspaceDir: string, cli: string, sessionId: string): Resolved {
+  const cbBound = cli === 'codebuddy' ? cbSessionFile(workspaceDir, sessionId) : null
+  const cbFile = cbBound ?? newestJsonl(cbProjectDir(workspaceDir))
+
+  let legacy: string | null = null
   if (cli === 'kimi') {
     const dir = kimiDirs().get(sessionId)
-    if (!dir) return null
-    const file = path.join(dir, 'agents', 'main', 'wire.jsonl')
-    return fs.existsSync(file) ? file : null
-  }
-  if (cli === 'pi') {
-    const file = piFiles().get(sessionId)
-    return file && fs.existsSync(file) ? file : null
-  }
-  if (cli === 'qoder') {
-    const dir = qoderProjectDir(workspaceDir)
-    if (sessionId) {
-      const file = path.join(dir, `${sessionId}.jsonl`)
-      if (fs.existsSync(file)) return file
+    if (dir) {
+      const file = path.join(dir, 'agents', 'main', 'wire.jsonl')
+      if (fs.existsSync(file)) legacy = file
     }
-    return newestJsonl(dir)
+  } else if (cli === 'pi') {
+    const file = piFiles().get(sessionId)
+    if (file && fs.existsSync(file)) legacy = file
   }
-  return null
+
+  if (cbFile && (!legacy || mtimeOf(cbFile) >= mtimeOf(legacy))) return { file: cbFile, cli: 'codebuddy' }
+  if (legacy) return { file: legacy, cli }
+  return { file: cbFile, cli: cbFile ? 'codebuddy' : '' }
 }
 
 // ---- 列表 ----
@@ -371,7 +396,7 @@ export async function listWesawSessions(
 
 // ---- 正文（weSaw 显示口径：project.md 条目 + 未入账的助手消息）----
 // weSaw 把 project.md 的工作纪要条目还原成 assistant 气泡（三种写法并存），
-// 会话流水里没写进条目的助手回复补在后面；投喂用的微信批次是「聊天记录」，不展示。
+// 会话流水里没写进条目的助手回复补在后面；user 侧照旧走会话流水。
 
 const PROJECT_ENTRY_RE = /^#{2,3}\s+\**\s*(\d{4})[-‑–](\d{2})[-‑–](\d{2})(?:[ T](\d{2}):(\d{2}))?(?::\d{2})?\s*(.*)$/
 const PROJECT_BULLET_RE = /^[-*]\s+\**\s*(\d{4})[-‑–](\d{2})[-‑–](\d{2})(?:[ T](\d{2}):(\d{2}))?\s*(.*)$/
@@ -382,17 +407,7 @@ interface ProjectEntry {
   timestamp: number
 }
 
-/** 老工作区的 project.md 常是聊天逐条摘录（「- 2026-05-26 23:16 我方：…」）——
- *  那不是 agent 对话，是聊天记录，一律不进右栏（2026-11-19 高律师定）。 */
-const CHAT_DIGEST_LINE = /^\s*[-*]?\s*\d{4}[-‑–]\d{2}[-‑–]\d{2}[^：:]{0,16}[：:]\s*(对方|我方)/
-
-function isChatDigest(text: string): boolean {
-  const lines = text.split('\n').filter((l) => l.trim())
-  if (!lines.length) return false
-  const hits = lines.filter((l) => CHAT_DIGEST_LINE.test(l)).length
-  return hits / lines.length >= 0.5
-}
-
+/** project.md → 条目，保持文件序（weSaw 写的时候最新在上，合并时再翻正） */
 function parseProjectEntries(dir: string): ProjectEntry[] {
   let raw: string
   try {
@@ -411,7 +426,7 @@ function parseProjectEntries(dir: string): ProjectEntry[] {
   const flush = () => {
     if (!current) return
     const text = current.lines.join('\n').trim()
-    if (text && !isChatDigest(text)) entries.push({ text, timestamp: current.time })
+    if (text) entries.push({ text, timestamp: current.time })
   }
   for (const line of lines) {
     const hit = matcher.exec(line)
@@ -430,44 +445,93 @@ function parseProjectEntries(dir: string): ProjectEntry[] {
     current = { lines: [line.trim()], time: Number.isFinite(parsed) ? parsed : 0 }
   }
   flush()
-  // weSaw 写 project.md 是「最新在上」；右栏按时间正序展示，最早的在最上面
-  if (entries.length > 1 && entries[0].timestamp > entries[entries.length - 1].timestamp) entries.reverse()
   return entries
 }
 
-/** qoder 会话 jsonl：message.role + content[].text，工具块丢弃 */
-function parseQoder(raw: string): TranscriptMessage[] {
-  const out: TranscriptMessage[] = []
+/** 注入的联系人上下文信封（与 weSaw 同一口径：只留标记后面用户真正说的那句） */
+const INJECTED_CONTEXT_RE = /\n\n---\n\n(用户消息|来信提醒|来信补投|每日来信汇总|会话换届交接|建档引导)：/
+
+/** 用户气泡：剥掉 system-reminder 与投喂信封，合成的运行时提示不还原 */
+function stripUserText(raw: string): string {
+  let text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+  if (!text) return ''
+  if (/^<(task-notification|notification[\s>]|cron-fire[\s>])/.test(text)) return ''
+  const marker = INJECTED_CONTEXT_RE.exec(text)
+  if (marker) {
+    const body = text.slice(marker.index + marker[0].length).trim()
+    text = marker[1] === '用户消息' || !body ? body : `【${marker[1]}】${body}`
+  }
+  return text
+}
+
+type Row = {
+  type?: string
+  id?: string
+  role?: string
+  timestamp?: number | string
+  content?: unknown
+  message?: { role?: string; id?: string; content?: unknown }
+}
+
+function rowContent(row: Row): Array<Record<string, unknown>> {
+  const raw = row.message?.content ?? row.content
+  return Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : []
+}
+
+function rowTime(row: Row): number {
+  const ts = row.timestamp
+  if (typeof ts === 'number') return ts
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts)
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+  return 0
+}
+
+/**
+ * codebuddy 会话 jsonl：type='message' 行，role 在顶层；
+ * user 块是 input_text（带 tool_result 的是工具回包，跳过），assistant 块是 output_text；
+ * 同一 message.id 的多帧取末帧（快照会增长）。
+ */
+function parseCodebuddy(raw: string): TranscriptMessage[] {
+  const items: Array<{ key: string; msg: TranscriptMessage }> = []
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
-    let row: { type?: string; timestamp?: string; message?: { role?: string; content?: unknown } }
+    let row: Row
     try {
-      row = JSON.parse(line)
+      row = JSON.parse(line) as Row
     } catch {
       continue
     }
-    const role = row.message?.role
+    if (row.type !== 'message') continue
+    const role = (row.role ?? row.message?.role) as string | undefined
     if (role !== 'user' && role !== 'assistant') continue
-    const content = row.message?.content
-    const texts: string[] = []
-    if (typeof content === 'string') texts.push(content)
-    else if (Array.isArray(content)) {
-      for (const part of content) {
-        if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
-          const t = (part as { text?: string }).text
-          if (t) texts.push(t)
-        }
+    const blocks = rowContent(row)
+    if (role === 'user' && blocks.some((b) => b?.type === 'tool_result' || b?.type === 'tool_output')) continue
+    const text = blocks
+      .map((b) => (b?.type === 'output_text' || b?.type === 'input_text' ? String(b.text ?? '') : ''))
+      .join('')
+      .trim()
+    if (!text) continue
+    const shown = role === 'user' ? stripUserText(text) : text
+    if (!shown) continue
+    const ts = rowTime(row)
+    const msg = {
+      role,
+      parts: [{ kind: 'text', text: shown }],
+      timestamp: ts ? new Date(ts).toISOString() : null,
+    } as unknown as TranscriptMessage
+    const key = String(row.message?.id ?? row.id ?? '')
+    if (key) {
+      const at = items.findIndex((x) => x.key === key)
+      if (at >= 0) {
+        items[at].msg = msg
+        continue
       }
     }
-    const text = texts.join('\n').trim()
-    if (!text) continue
-    out.push({
-      role,
-      parts: [{ kind: 'text', text }],
-      timestamp: typeof row.timestamp === 'string' ? row.timestamp : null,
-    } as TranscriptMessage)
+    items.push({ key, msg })
   }
-  return out
+  return items.map((x) => x.msg)
 }
 
 function readRaw(file: string): string {
@@ -482,10 +546,6 @@ function readRaw(file: string): string {
   } finally {
     fs.closeSync(fd)
   }
-}
-
-function isFeedPrompt(text: string): boolean {
-  return text.startsWith('【微信消化') || text.includes('<wechat_msg_material>') || text.length > 1200
 }
 
 function messageText(m: TranscriptMessage): string {
@@ -506,7 +566,8 @@ export interface WesawTranscriptPage {
 
 /**
  * 读一个 weSaw 会话的 agent 对话。id = talker（wxid / 群 id / 公众号 id）的 base64url。
- * 顺序：project.md 条目（旧→新）＋ 比最新条目更晚、且未被条目覆盖的助手回复。
+ * 合并口径与 weSaw 一致：会话流水的 user 消息 ＋ project.md 条目（翻成旧→新）
+ * ＋ 比最新条目更晚、且未被条目覆盖的助手回复，按时间正序排。
  */
 export function readWesawTranscript(id: string): WesawTranscriptPage {
   let talker: string
@@ -519,13 +580,19 @@ export function readWesawTranscript(id: string): WesawTranscriptPage {
   if (!dir || !safeIsDir(dir)) return { exists: false, messages: [] }
 
   const bind = readBinding(dir)
-  const file = bind.cli ? resolveTranscript(dir, bind.cli, bind.sessionId) : null
+  const resolved = resolveTranscript(dir, bind.cli, bind.sessionId)
   let session: TranscriptMessage[] = []
-  if (file) {
+  if (resolved.file) {
     try {
-      const raw = readRaw(file)
+      const raw = readRaw(resolved.file)
       session =
-        bind.cli === 'kimi' ? parseKimi(raw) : bind.cli === 'pi' ? parsePi(raw) : bind.cli === 'qoder' ? parseQoder(raw) : []
+        resolved.cli === 'codebuddy'
+          ? parseCodebuddy(raw)
+          : resolved.cli === 'kimi'
+            ? parseKimi(raw)
+            : resolved.cli === 'pi'
+              ? parsePi(raw)
+              : []
     } catch {
       session = []
     }
@@ -539,23 +606,37 @@ export function readWesawTranscript(id: string): WesawTranscriptPage {
     return entryBlob.includes(t.slice(0, 40)) || entryBlob.includes(t.slice(-40))
   }
   const newestEntryTs = entries.reduce((max, e) => Math.max(max, e.timestamp), 0)
+
+  const tsOf = (m: TranscriptMessage): number => {
+    const iso = (m as unknown as { timestamp?: string | null }).timestamp
+    const parsed = iso ? Date.parse(iso) : NaN
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+
+  const users = session.filter((m) => m.role === 'user')
   const tail = session.filter((m) => {
     if (m.role !== 'assistant') return false
     const text = messageText(m)
-    if (!text || isFeedPrompt(text)) return false
-    const ts = m.timestamp ? Date.parse(m.timestamp) : 0
-    return ts > newestEntryTs && !covered(text)
+    if (!text) return false
+    return tsOf(m) > newestEntryTs && !covered(text)
+  })
+  const projectMsgs: TranscriptMessage[] = entries
+    .slice()
+    .reverse()
+    .map(
+      (e) =>
+        ({
+          role: 'assistant',
+          parts: [{ kind: 'text', text: e.text }],
+          timestamp: e.timestamp ? new Date(e.timestamp).toISOString() : null,
+        }) as unknown as TranscriptMessage
+    )
+
+  const messages = [...users, ...projectMsgs, ...tail].sort((a, b) => {
+    const ta = tsOf(a) || Number.MAX_SAFE_INTEGER
+    const tb = tsOf(b) || Number.MAX_SAFE_INTEGER
+    return ta - tb
   })
 
-  const messages: TranscriptMessage[] = []
-  for (const e of entries) {
-    messages.push({
-      role: 'assistant',
-      parts: [{ kind: 'text', text: e.text }],
-      timestamp: e.timestamp ? new Date(e.timestamp).toISOString() : null,
-    })
-  }
-  for (const m of tail) messages.push(m)
-
-  return { exists: messages.length > 0, messages, cli: bind.cli || undefined }
+  return { exists: messages.length > 0, messages, cli: resolved.cli || undefined }
 }
