@@ -1,8 +1,9 @@
 <script setup lang="ts">
-// weSaw（只读）：照 weSaw 现版界面复制一份——会话列表用它的会话行样式，
+// weSaw：照 weSaw 现版界面复制一份——会话列表用它的会话行样式，
 // 去掉中间的微信聊天记录与右侧工作区面板，只留「会话列表 ＋ agent 对话」。
 // 桌面两栏；手机单栏，点会话进对话、左上角返回列表（2026-11-19 高律师定）。
 // 气泡复用 ChatMessage.vue（markdown、折叠工具块、复制、点按播报单源）。
+// 正文只读；唯一的写动作是输入框那颗「自动跟进」开关（转 weSaw 6131，改的是 weSaw 的开关清单）。
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { NEmpty, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
