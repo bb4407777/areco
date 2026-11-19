@@ -1,10 +1,11 @@
 <script setup lang="ts">
-// weSaw 会话（只读）：weSaw 每个联系人/群工作区绑一个 agent 会话，这里直接看会话名 + agent 对话正文。
-// 与微信页（cc-connect 存档）并列的另一半：微信页看「聊天通道」，这里看「weSaw 里跟谁、agent 聊了什么」。
-// 数据源：服务端扫 ~/Documents/weSaw/document 的 .agent-session.json，正文读 kimi/pi 会话文件（services/wesaw.ts）。
-// 气泡复用 ChatMessage.vue（markdown、折叠工具块、复制、播报全部单源）。
+// weSaw 会话（只读）：照搬 weSaw 的显示口径——左边会话列表，右边 agent 对话。
+// 不显示微信聊天原文，也不显示工作区路径/文件清单（2026-11-19 高律师定）。
+// 数据源：服务端扫 ~/Documents/weSaw/document 各工作区，对话 = project.md 工作纪要条目
+// ＋引擎会话里尚未入账的助手回复（services/wesaw.ts）。
+// 气泡复用 ChatMessage.vue（markdown、折叠工具块、复制、点按播报全部单源）。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NEmpty, NSelect, NSpin, useMessage } from 'naive-ui'
+import { NEmpty, NInput, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useSpeechStore } from '../stores/speech'
@@ -17,7 +18,6 @@ interface WesawSessionRow {
   talker: string
   cli: string
   updatedAt: number
-  size: number
 }
 interface WesawListPage {
   sessions: WesawSessionRow[]
@@ -30,7 +30,7 @@ interface WesawTranscriptPage {
   cli?: string
 }
 
-const ALL = 500
+const ALL = 2000
 const message = useMessage()
 const speech = useSpeechStore()
 
@@ -38,24 +38,28 @@ const rows = ref<WesawSessionRow[]>([])
 const total = ref(0)
 const loading = ref(true)
 const selected = ref<string | null>(null)
+const q = ref('')
+const onlyActive = ref(true)
 
 const msgs = ref<TranscriptMessage[]>([])
 const msgLoading = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 
 const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
-const options = computed(() =>
-  rows.value.map((r) => ({
-    label: `${r.name}　·　${r.kind}　·　${fmtTime(r.updatedAt)}`,
-    value: r.id,
-  }))
-)
+const shown = computed(() => {
+  const kw = q.value.trim().toLowerCase()
+  const base = onlyActive.value ? rows.value.filter((r) => r.updatedAt > 0) : rows.value
+  return kw ? base.filter((r) => r.name.toLowerCase().includes(kw) || r.talker.toLowerCase().includes(kw)) : base
+})
+const hasMore = computed(() => rows.value.length < total.value)
 
-function fmtTime(ms: number): string {
+function fmtDay(ms: number): string {
   if (!ms) return ''
   const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  const today = new Date()
+  const sameDay = d.toDateString() === today.toDateString()
+  return sameDay ? `${p(d.getHours())}:${p(d.getMinutes())}` : `${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
 async function load() {
@@ -64,7 +68,7 @@ async function load() {
     const page = await api.get<WesawListPage>(`/api/wesaw/sessions?limit=${ALL}&offset=0`)
     rows.value = page.sessions
     total.value = page.total
-    if (!selected.value && rows.value.length) void openSession(rows.value[0].id)
+    if (!selected.value && shown.value.length) void openSession(shown.value[0].id)
   } catch (err) {
     message.error(`加载 weSaw 会话失败：${(err as Error).message}`)
   } finally {
@@ -88,44 +92,54 @@ async function openSession(id: string) {
   }
 }
 
-function openFromPicker(id: string) {
-  void openSession(id)
-}
-
 onMounted(() => void load())
 
-// 播报只服务当前这一屏：换会话或离开本页即停（同会话页/群聊页口径）
+// 播报只服务当前这一屏：换会话或离开本页即停
 watch(selected, () => speech.stop())
 onUnmounted(() => speech.stop())
 </script>
 
 <template>
   <div class="wesaw">
-    <div class="main-head">
-      <NSelect
-        v-model:value="selected"
-        :options="options"
-        :loading="loading"
-        filterable
-        size="small"
-        placeholder="选择 weSaw 会话"
-        class="ws-picker"
-        @update:value="(v: string) => v && openFromPicker(v)"
-      />
-      <span v-if="current" class="main-sub">
-        {{ current.kind }} · {{ current.cli }} · 共 {{ total }} 个会话
-      </span>
-    </div>
-
-    <NSpin v-if="loading && !msgs.length" class="main-empty" />
-    <NEmpty v-else-if="!rows.length" description="没有可读的 weSaw 会话" class="main-empty" />
-    <NSpin v-else-if="msgLoading && !msgs.length" class="main-empty" />
-    <NEmpty v-else-if="!msgs.length" description="这个会话还没有 agent 记录" class="main-empty" />
-    <div v-else ref="scroller" class="msgs">
-      <div v-for="(m, i) in msgs" :key="i" class="msg-wrap">
-        <ChatMessage :message="m" :agent-label="current?.cli || 'weSaw'" speakable :session-id="`wesaw:${selected}`" />
+    <aside class="list">
+      <div class="list-head">
+        <NInput v-model:value="q" size="small" clearable placeholder="搜索会话" />
+        <label class="only-active">
+          <input v-model="onlyActive" type="checkbox" />
+          只看有记录
+        </label>
       </div>
-    </div>
+      <NSpin v-if="loading" size="small" class="list-spin" />
+      <div v-else class="list-rows">
+        <button
+          v-for="r in shown"
+          :key="r.id"
+          class="row"
+          :class="{ active: r.id === selected }"
+          @click="openSession(r.id)"
+        >
+          <span class="row-name">{{ r.name }}</span>
+          <span class="row-day">{{ fmtDay(r.updatedAt) }}</span>
+          <span class="row-kind">{{ r.kind }}</span>
+        </button>
+        <div v-if="hasMore" class="row-more">仅载入最近 {{ rows.length }} / {{ total }}</div>
+        <NEmpty v-if="!shown.length" size="small" description="没有匹配的会话" class="list-empty" />
+      </div>
+    </aside>
+
+    <section class="pane">
+      <div v-if="current" class="pane-head">
+        <span class="pane-name">{{ current.name }}</span>
+        <span class="pane-kind">{{ current.kind }}</span>
+      </div>
+      <NSpin v-if="msgLoading && !msgs.length" class="pane-empty" />
+      <NEmpty v-else-if="!msgs.length" description="这个会话还没有 agent 记录" class="pane-empty" />
+      <div v-else ref="scroller" class="msgs">
+        <div v-for="(m, i) in msgs" :key="i" class="msg-wrap">
+          <ChatMessage :message="m" :agent-label="current?.cli || 'weSaw'" speakable :session-id="`wesaw:${selected}`" />
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -134,10 +148,101 @@ onUnmounted(() => speech.stop())
   flex: 1;
   min-height: 0;
   display: flex;
+}
+
+.list {
+  width: 260px;
+  flex: 0 0 260px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.list-head {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.only-active {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.list-rows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--hover);
+}
+
+.row.active {
+  background: var(--chip-bg);
+  border-color: var(--border-strong);
+}
+
+.row-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-day {
+  font-size: 11px;
+  color: var(--faint);
+  align-self: center;
+}
+
+.row-kind {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.row-more,
+.list-empty {
+  padding: 10px 8px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.list-spin {
+  margin: 30px auto;
+}
+
+.pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
 }
 
-.main-head {
+.pane-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
@@ -145,15 +250,16 @@ onUnmounted(() => speech.stop())
   border-bottom: 1px solid var(--border);
 }
 
-.main-sub {
-  font-size: 11px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.pane-name {
+  font-size: 13px;
 }
 
-.main-empty {
+.pane-kind {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.pane-empty {
   margin-top: 60px;
 }
 
@@ -169,10 +275,5 @@ onUnmounted(() => speech.stop())
 
 .msg-wrap {
   border-radius: 10px;
-}
-
-.ws-picker {
-  width: 360px;
-  max-width: 60vw;
 }
 </style>

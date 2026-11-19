@@ -12,13 +12,13 @@ function fail(ctx: Context, status: number, code: string, message: string): void
   ctx.body = { ok: false, error: { code, message } }
 }
 
-/** GET /api/wesaw/sessions?limit=&offset=&q= — 有正文可读的 weSaw 会话，最近活动在前 */
-export function wesawList(ctx: Context): void {
+/** GET /api/wesaw/sessions?limit=&offset=&q= — weSaw 最近会话（app 清单），最近活动在前 */
+export async function wesawList(ctx: Context): Promise<void> {
   try {
     const limit = Number(ctx.query.limit ?? 100) || 100
     const offset = Number(ctx.query.offset ?? 0) || 0
     const q = typeof ctx.query.q === 'string' ? ctx.query.q : undefined
-    ok(ctx, listWesawSessions({ limit, offset, q }))
+    ok(ctx, await listWesawSessions({ limit, offset, q }))
   } catch (err) {
     fail(ctx, 500, 'wesaw_read_failed', err instanceof Error ? err.message : String(err))
   }
