@@ -37,6 +37,8 @@ export interface WesawSessionRow {
   summary: string
   /** 二级分类：微信/企业微信、群聊/折叠的群聊、订阅号/服务号 */
   sub: WesawSubKind
+  /** 状态灯（与 weSaw 会话行同口径）：busy 红／todo 黄／idle 绿，无工作区为空 */
+  agent: '' | 'busy' | 'todo' | 'idle'
 }
 
 /** 二级分类键（与 weSaw 侧栏的二级标签一一对应） */
@@ -257,6 +259,7 @@ const WESAW_TOKEN = path.join(os.homedir(), 'skills', 'weSaw', 'data', 'api-toke
 interface RecentChat {
   m_nsUsrName?: string
   m_nsNickName?: string
+  wechatNickname?: string
   remark?: string
   type?: string
   isOfficialAccount?: boolean
@@ -335,18 +338,79 @@ async function allRows(): Promise<WesawSessionRow[]> {
     const bind = dir ? readBinding(dir) : { cli: '', sessionId: '' }
     rows.push({
       id: Buffer.from(talker).toString('base64url'),
-      name: (item.remark || item.m_nsNickName || talker).trim(),
+      name: (item.remark || item.wechatNickname || item.m_nsNickName || talker).trim(),
       kind: chatKind(item),
       talker,
       cli: bind.cli,
       updatedAt: (item.lastTimestamp ?? 0) * 1000,
       summary: (item.summary ?? '').trim(),
       sub: subKind(item),
+      agent: '',
     })
   }
   rows.sort((a, b) => b.updatedAt - a.updatedAt)
   listCache = { at: now, rows }
   return rows
+}
+
+// ---- 状态灯（照 weSaw SessionItem 三态：busy 红 > todo 黄 > idle 绿，无工作区不亮）----
+
+/** weSaw 未完成待办：status=open 按 source.wxid / source.talker 汇总（app 每 5 分钟刷新同源） */
+const TODOS_FILE = path.join(os.homedir(), 'Documents', 'weSaw', 'todos.json')
+let todoIndex: { at: number; byWxid: Map<string, number>; byName: Map<string, number> } | null = null
+
+function todoCounts(): { byWxid: Map<string, number>; byName: Map<string, number> } {
+  if (todoIndex && Date.now() - todoIndex.at < 30_000) return todoIndex
+  const byWxid = new Map<string, number>()
+  const byName = new Map<string, number>()
+  try {
+    const data = JSON.parse(fs.readFileSync(TODOS_FILE, 'utf8')) as {
+      items?: Array<{ status?: string; source?: { talker?: string; wxid?: string } }>
+    }
+    for (const item of data.items ?? []) {
+      if (item.status !== 'open') continue
+      const wxid = (item.source?.wxid ?? '').trim()
+      const name = (item.source?.talker ?? '').trim()
+      if (wxid) byWxid.set(wxid, (byWxid.get(wxid) ?? 0) + 1)
+      if (name) byName.set(name, (byName.get(name) ?? 0) + 1)
+    }
+  } catch {
+    /* 文件缺失按无待办 */
+  }
+  todoIndex = { at: Date.now(), byWxid, byName }
+  return todoIndex
+}
+
+/** 工作区运行锁：.agent-run.lock（{pid, startedAt}），超 20 分钟视为僵锁 */
+const RUN_LOCK_NAME = '.agent-run.lock'
+const RUN_LOCK_STALE_MS = 20 * 60 * 1000
+
+function agentBusy(dir: string): boolean {
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(dir, RUN_LOCK_NAME), 'utf8')) as {
+      pid?: number
+      startedAt?: number
+    }
+    if (Date.now() - (info.startedAt ?? 0) > RUN_LOCK_STALE_MS) return false
+    if (!info.pid) return true
+    try {
+      process.kill(info.pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  } catch {
+    return false
+  }
+}
+
+function agentStateOf(row: WesawSessionRow, dir: string | undefined): WesawSessionRow['agent'] {
+  if (!dir) return ''
+  if (agentBusy(dir)) return 'busy'
+  const t = todoCounts()
+  if ((t.byWxid.get(row.talker) ?? 0) > 0 || (t.byName.get(row.name) ?? 0) > 0) return 'todo'
+  if (fs.existsSync(path.join(dir, '.agent-session.json'))) return 'idle'
+  return ''
 }
 
 /**
@@ -386,8 +450,11 @@ export async function listWesawSessions(
   }
   let rows = kind ? matched.filter((r) => r.kind === kind) : matched
   if (sub) rows = rows.filter((r) => r.sub === sub)
+  const dirs = workspaceDirs()
   return {
-    sessions: rows.slice(offset, offset + limit),
+    sessions: rows
+      .slice(offset, offset + limit)
+      .map((r) => ({ ...r, agent: agentStateOf(r, dirs.get(r.talker)) })),
     total: rows.length,
     hasMore: offset + limit < rows.length,
     counts,

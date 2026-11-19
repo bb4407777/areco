@@ -19,6 +19,8 @@ interface WesawSessionRow {
   cli: string
   updatedAt: number
   summary: string
+  /** 状态灯：busy 红／todo 黄／idle 绿，'' 不亮（与 weSaw 会话行同口径） */
+  agent?: '' | 'busy' | 'todo' | 'idle'
 }
 interface WesawListPage {
   sessions: WesawSessionRow[]
@@ -75,6 +77,12 @@ const SUBS: Record<Category, Array<{ key: Sub; label: string }>> = {
   ],
 }
 const message = useMessage()
+/** 状态灯文案，与 weSaw 的 title 一致 */
+const AGENT_DOT_TITLE: Record<string, string> = {
+  busy: 'Agent 正在工作',
+  todo: '有未完成待办',
+  idle: 'Agent 已配置，待机中',
+}
 const speech = useSpeechStore()
 const ui = useUiStore()
 
@@ -344,6 +352,13 @@ onUnmounted(() => {
             </span>
             <span v-if="r.summary" class="session-summary">{{ r.summary }}</span>
           </span>
+          <span
+            v-if="r.agent"
+            class="session-agent-dot"
+            :class="r.agent"
+            :title="AGENT_DOT_TITLE[r.agent]"
+            aria-hidden
+          />
         </button>
         <div v-if="hasMore" class="sb-more">仅显示最近 {{ rows.length }} / {{ total }}，可搜索</div>
         <NEmpty v-if="!rows.length" size="small" description="没有匹配的会话" class="sb-empty" />
@@ -626,6 +641,30 @@ onUnmounted(() => {
   line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 会话行状态灯（照 weSaw：待机绿 / 工作红 / 有待办黄，8px 带 3px 光晕） */
+.session-agent-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.session-agent-dot.idle {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px #22c55e22;
+}
+
+.session-agent-dot.busy {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px #ef444422;
+}
+
+.session-agent-dot.todo {
+  background: #eab308;
+  box-shadow: 0 0 0 3px #eab30822;
 }
 
 .sb-more,
