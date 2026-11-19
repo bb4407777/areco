@@ -288,7 +288,9 @@ onUnmounted(() => speech.stop())
 
 .sidebar {
   width: 300px;
+  max-width: 100%;
   flex: 0 0 300px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -298,12 +300,14 @@ onUnmounted(() => speech.stop())
 
 .sb-head {
   flex: 0 0 auto;
+  min-width: 0;
   padding: 12px 10px 10px;
   border-bottom: 1px solid var(--border);
 }
 
 .sb-title-row {
   display: flex;
+  min-width: 0;
   align-items: baseline;
   justify-content: space-between;
   padding: 0 2px 10px;
@@ -349,18 +353,23 @@ onUnmounted(() => speech.stop())
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   padding: 6px 10px 8px;
   border-bottom: 1px solid var(--border);
 }
 
 .sb-tabs button {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
   padding: 4px 0;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--muted);
   font: 600 13px/19px inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -393,7 +402,9 @@ onUnmounted(() => speech.stop())
 
 .sb-list {
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 8px 8px 12px;
   overscroll-behavior: contain;
@@ -403,6 +414,7 @@ onUnmounted(() => speech.stop())
   box-sizing: border-box;
   position: relative;
   width: 100%;
+  min-width: 0;
   min-height: 58px;
   display: flex;
   align-items: center;
@@ -596,8 +608,10 @@ onUnmounted(() => speech.stop())
   }
 
   .sidebar {
-    width: auto;
-    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+    flex: 1 1 100%;
+    min-width: 0;
     border-right: 0;
   }
 
