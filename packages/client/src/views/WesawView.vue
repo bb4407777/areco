@@ -184,16 +184,23 @@ async function load() {
   }
 }
 
+const msgSig = ref('')
+
+const sigOf = (list: TranscriptMessage[]): string =>
+  list.map((m) => `${m.role}:${m.parts.map((p) => ('text' in p ? p.text : '')).join('')}`).join('\u0001')
+
 async function openSession(id: string) {
   selected.value = id
   msgs.value = []
   chatTurns.value = []
   agentCli.value = ''
+  msgSig.value = ''
   msgLoading.value = true
   void loadChat()
   try {
     const page = await api.get<WesawTranscriptPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/transcript`)
     msgs.value = page.exists ? page.messages : []
+    msgSig.value = sigOf(msgs.value)
     agentCli.value = page.cli ?? ''
     await nextTick()
     if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
@@ -201,6 +208,30 @@ async function openSession(id: string) {
     message.error(`加载对话失败：${(err as Error).message}`)
   } finally {
     msgLoading.value = false
+  }
+}
+
+/**
+ * 正文跟读：会话文件在 agent 跑动时逐条追加，weSaw 靠 IPC 推送，
+ * 这里按周期重读；用户上翻看旧消息时不抢滚动位置。
+ */
+async function refreshTranscript(): Promise<void> {
+  const id = selected.value
+  if (!id) return
+  try {
+    const page = await api.get<WesawTranscriptPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/transcript`)
+    if (selected.value !== id) return
+    const next = page.exists ? page.messages : []
+    const sig = sigOf(next)
+    if (sig === msgSig.value) return
+    const el = scroller.value
+    const atBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    msgSig.value = sig
+    msgs.value = next
+    agentCli.value = page.cli ?? ''
+    if (atBottom) await scrollToEnd()
+  } catch {
+    // 轮询失败保持当前显示，不打断阅读
   }
 }
 
@@ -255,6 +286,7 @@ function back() {
   selected.value = null
   msgs.value = []
   chatTurns.value = []
+  msgSig.value = ''
 }
 
 onMounted(() => void load())
@@ -276,18 +308,37 @@ watch(sub, () => void load())
 watch(selected, () => speech.stop())
 onUnmounted(() => speech.stop())
 
-// 驻留时轮询对话框（agent 跑完不回推，按 areco 式周期刷新追）
+// 驻留时轮询正文与对话框（agent 跑完不回推，按周期刷新追）
+let msgTimer: ReturnType<typeof setInterval> | null = null
 let chatTimer: ReturnType<typeof setInterval> | null = null
 watch(selected, (id) => {
+  if (msgTimer) clearInterval(msgTimer)
   if (chatTimer) clearInterval(chatTimer)
+  msgTimer = null
   chatTimer = null
   if (!id) return
+  msgTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') void refreshTranscript()
+  }, 2500)
   chatTimer = setInterval(() => {
     if (document.visibilityState === 'visible') void loadChat()
   }, 2000)
 })
+
+// 切回窗口立刻补拉一次（隐藏期间不轮询）
+function onVisible(): void {
+  if (document.visibilityState !== 'visible' || !selected.value) return
+  void refreshTranscript()
+  void loadChat()
+}
+document.addEventListener('visibilitychange', onVisible)
+window.addEventListener('focus', onVisible)
+
 onUnmounted(() => {
+  if (msgTimer) clearInterval(msgTimer)
   if (chatTimer) clearInterval(chatTimer)
+  document.removeEventListener('visibilitychange', onVisible)
+  window.removeEventListener('focus', onVisible)
 })
 </script>
 
