@@ -413,6 +413,8 @@ function parseProjectEntries(dir: string): ProjectEntry[] {
     current = { lines: [line.trim()], time: Number.isFinite(parsed) ? parsed : 0 }
   }
   flush()
+  // weSaw 写 project.md 是「最新在上」；右栏按时间正序展示，最早的在最上面
+  if (entries.length > 1 && entries[0].timestamp > entries[entries.length - 1].timestamp) entries.reverse()
   return entries
 }
 
