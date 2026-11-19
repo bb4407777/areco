@@ -6,6 +6,7 @@ import type { TtsController } from '../controllers/tts'
 import type { ProcessControllers } from '../controllers/processes'
 import type { OpcControllers } from '../controllers/opc'
 import { weixinList, weixinSearch, weixinTranscript } from '../controllers/weixin'
+import { wesawList, wesawTranscript } from '../controllers/wesaw'
 
 export function createApiRouter(
   c: ApiControllers,
@@ -82,6 +83,11 @@ export function createApiRouter(
   router.get('/weixin/sessions', weixinList)
   router.get('/weixin/search', weixinSearch)
   router.get('/weixin/sessions/:id/transcript', weixinTranscript)
+
+  // weSaw 会话只读视图（2026-11-19）：扫 ~/Documents/weSaw/document 的会话绑定，
+  // 正文读 kimi/pi 会话文件；纯只读，不碰 weSaw 进程。
+  router.get('/wesaw/sessions', wesawList)
+  router.get('/wesaw/sessions/:id/transcript', wesawTranscript)
 
   router.get('/history', c.historyList)
   router.get('/history/:source/:project/:id/transcript', c.historyTranscript)

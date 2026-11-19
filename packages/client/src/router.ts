@@ -27,6 +27,8 @@ export const router = createRouter({
     { path: '/messages', redirect: '/tasks' },
     // 微信会话（只读）：读 Hermes state.db 的 source=weixin，消「微信↔areco 割裂」的看得见那一半
     { path: '/weixin', component: () => import('./views/WeixinView.vue') },
+    // weSaw 会话（只读，2026-11-19）：会话名 + agent 对话正文，数据源是 weSaw 工作区的会话绑定
+    { path: '/wesaw', component: () => import('./views/WesawView.vue') },
     // 进程页（2026-11-07）：全机进程一屏，孤儿进程与 OPC 后台任务分色标出，可清孤儿
     { path: '/processes', component: () => import('./views/ProcessesView.vue') },
     // OPC 后台（2026-11-07）：轨道健康 + 看板在办 + 最近跑单，只读
