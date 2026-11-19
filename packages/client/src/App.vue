@@ -67,7 +67,6 @@ function forceUpdate() {
               <router-link v-if="ui.showTasks" to="/tasks" class="nav-link" :class="{ active: route.path.startsWith('/tasks') }">任务</router-link>
               <router-link v-if="ui.showProjects" to="/projects" class="nav-link" :class="{ active: route.path.startsWith('/projects') }">项目</router-link>
               <router-link to="/history" class="nav-link" :class="{ active: route.path.startsWith('/history') }">历史</router-link>
-              <router-link to="/weixin" class="nav-link" :class="{ active: route.path.startsWith('/weixin') }">微信</router-link>
               <router-link to="/wesaw" class="nav-link" :class="{ active: route.path.startsWith('/wesaw') }">weSaw</router-link>
               <router-link v-if="ui.showProcesses" to="/processes" class="nav-link" :class="{ active: route.path.startsWith('/processes') }">进程</router-link>
               <router-link to="/opc" class="nav-link" :class="{ active: route.path.startsWith('/opc') }">OPC</router-link>

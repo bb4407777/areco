@@ -25,6 +25,8 @@ const { isRoleMode, spawnWorker, handoffRole, workerBusy } = useSpawnWorker()
 const emit = defineEmits<{ new: [] }>()
 
 const activeId = computed(() => route.params.id as string | undefined)
+/** 微信栏（2026-11-19）：从顶栏 tab 移进会话列表，顶上单栏，右侧出微信会话正文 */
+const isWeixin = computed(() => route.path === '/weixin')
 const showArchived = ref(false)
 
 /**
@@ -159,6 +161,15 @@ function onMenu(key: string, s: SessionSummary) {
       </div>
     </div>
     <div class="sidebar-list">
+      <!-- 微信：会话列表顶上的独立一栏，点开右侧加载微信会话正文（只读，2026-11-19 高律师定） -->
+      <div class="weixin-section">
+        <button type="button" class="weixin-entry" :class="{ active: isWeixin }" @click="router.push('/weixin')">
+          <span class="weixin-dot" />
+          <span class="weixin-name">微信</span>
+          <span class="weixin-arrow">›</span>
+        </button>
+      </div>
+
       <!-- 活动中：运行中的会话置顶（含项目分组内的，退出后自动回落原位） -->
       <div v-if="activeSessions.length" class="active-section">
         <div class="active-head">活动中（{{ activeSessions.length }}）</div>
@@ -358,6 +369,52 @@ function onMenu(key: string, s: SessionSummary) {
   border-bottom: 1px solid var(--border);
   margin-bottom: 4px;
   padding-bottom: 4px;
+}
+/* 微信栏：与「活动中」同体位（顶上分栏），但整行可点，绿点标识微信来源 */
+.weixin-section {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+}
+.weixin-entry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 9px 14px;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.weixin-entry:hover {
+  background: var(--chip-bg);
+}
+.weixin-entry.active {
+  background: var(--chip-bg);
+  border-left-color: var(--accent);
+}
+.weixin-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #07c160;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.15);
+}
+.weixin-name {
+  flex: 1;
+  min-width: 0;
+}
+.weixin-arrow {
+  color: var(--faint);
+  font-weight: 500;
 }
 .active-head {
   padding: 8px 14px 4px;

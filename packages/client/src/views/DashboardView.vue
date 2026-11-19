@@ -141,6 +141,13 @@ function handoff(id: string, templateId: string) {
       </div>
     </div>
 
+    <!-- 微信：手机端没有侧栏，看板顶上放同款一栏（2026-11-19 从顶栏 tab 移入会话列表） -->
+    <button type="button" class="weixin-entry" @click="router.push('/weixin')">
+      <span class="weixin-dot" />
+      <span class="weixin-name">微信</span>
+      <span class="weixin-arrow">›</span>
+    </button>
+
     <n-empty v-if="store.ready && !store.sessions.length" description="还没有会话" class="empty">
       <template #extra>
         <n-button type="primary" :loading="workerBusy" @click="isRoleMode ? spawnWorker() : (showSpawn = true)">{{ isRoleMode ? '＋ worker' : '启动第一个 agent' }}</n-button>
@@ -288,6 +295,44 @@ function handoff(id: string, templateId: string) {
 .page-title {
   margin: 0;
   font-size: 17px;
+}
+/* 微信入口：看板顶上一整行，与侧栏同体位 */
+.weixin-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bar);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.weixin-entry:active {
+  background: var(--chip-bg);
+}
+.weixin-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #07c160;
+}
+.weixin-name {
+  flex: 1;
+  min-width: 0;
+}
+.weixin-arrow {
+  color: var(--faint);
+  font-weight: 500;
 }
 .grid {
   display: grid;

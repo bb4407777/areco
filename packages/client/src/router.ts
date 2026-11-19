@@ -10,6 +10,10 @@ export const router = createRouter({
         { path: '', component: () => import('./views/DashboardView.vue') },
         { path: 'session/:id', component: () => import('./views/SessionView.vue') },
         { path: 'session/:id/chat', component: () => import('./views/TranscriptView.vue') },
+        // 微信会话（只读）：读 cc-connect 会话存档（services/weixin-sessions.ts）。
+        // 2026-11-19 从顶栏 tab 移进会话列表——桌面由侧栏顶上的「微信」栏进入，右侧出会话正文；
+        // 手机端由看板顶部同款入口进入。挂在 SessionLayout 下才能与侧栏共存。
+        { path: 'weixin', component: () => import('./views/WeixinView.vue') },
       ],
     },
     {
@@ -25,8 +29,6 @@ export const router = createRouter({
     { path: '/tasks', component: () => import('./views/GroupChatView.vue'), meta: { roomKind: 'task' } },
     { path: '/projects', component: () => import('./views/GroupChatView.vue'), meta: { roomKind: 'project' } },
     { path: '/messages', redirect: '/tasks' },
-    // 微信会话（只读）：读 Hermes state.db 的 source=weixin，消「微信↔areco 割裂」的看得见那一半
-    { path: '/weixin', component: () => import('./views/WeixinView.vue') },
     // weSaw 会话（只读，2026-11-19）：会话名 + agent 对话正文，数据源是 weSaw 工作区的会话绑定
     { path: '/wesaw', component: () => import('./views/WesawView.vue') },
     // 进程页（2026-11-07）：全机进程一屏，孤儿进程与 OPC 后台任务分色标出，可清孤儿
