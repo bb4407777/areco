@@ -219,24 +219,6 @@ function safeIsDir(dir: string): boolean {
   }
 }
 
-/** 工作区 readme 的 name（frontmatter），按文件 mtime 缓存；无 readme 返回空 */
-const readmeNameCache = new Map<string, { mtime: number; name: string }>()
-
-function readmeName(dir: string): string {
-  const file = path.join(dir, 'readme.md')
-  try {
-    const mtime = fs.statSync(file).mtimeMs
-    const hit = readmeNameCache.get(dir)
-    if (hit && hit.mtime === mtime) return hit.name
-    const m = fs.readFileSync(file, 'utf8').slice(0, 2000).match(/^name:\s*(.+)$/m)
-    const name = m ? m[1].replace(/^["']|["']$/g, '').trim() : ''
-    readmeNameCache.set(dir, { mtime, name })
-    return name
-  } catch {
-    return ''
-  }
-}
-
 function readBinding(dir: string): { cli: string; sessionId: string } {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(dir, '.agent-session.json'), 'utf8')) as {
@@ -357,15 +339,8 @@ async function allRows(): Promise<WesawSessionRow[]> {
     const nick = (item.m_nsNickName ?? '').trim()
     rows.push({
       id: Buffer.from(talker).toString('base64url'),
-      // weSaw 缓存重载期间 recent_chat 的昵称会回填成 id 本身：此时用工作区 readme 的 name
-      // 兜底，实在没有才显示 id（2026-11-19 高律师「怎么经常用微信号显示出来」）。
-      name: (
-        item.remark ||
-        item.wechatNickname ||
-        (nick && nick !== talker ? nick : '') ||
-        (dir ? readmeName(dir) : '') ||
-        talker
-      ).trim(),
+      // 与 weSaw 侧栏同一行字：SessionItem 只认 contact.m_nsNickName（无则退回 id）
+      name: nick || talker,
       kind: chatKind(item),
       talker,
       cli: bind.cli,
