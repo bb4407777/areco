@@ -6,7 +6,7 @@ import type { TtsController } from '../controllers/tts'
 import type { ProcessControllers } from '../controllers/processes'
 import type { OpcControllers } from '../controllers/opc'
 import { weixinList, weixinSearch, weixinTranscript } from '../controllers/weixin'
-import { wesawList, wesawTranscript } from '../controllers/wesaw'
+import { wesawChat, wesawList, wesawSend, wesawTranscript } from '../controllers/wesaw'
 
 export function createApiRouter(
   c: ApiControllers,
@@ -88,6 +88,9 @@ export function createApiRouter(
   // 正文读 kimi/pi 会话文件；纯只读，不碰 weSaw 进程。
   router.get('/wesaw/sessions', wesawList)
   router.get('/wesaw/sessions/:id/transcript', wesawTranscript)
+  // 对话框：GET 取本路往返、POST 投一条消息给该工作区的 agent（CodeBuddy 无头）
+  router.get('/wesaw/sessions/:id/chat', wesawChat)
+  router.post('/wesaw/sessions/:id/message', wesawSend)
 
   router.get('/history', c.historyList)
   router.get('/history/:source/:project/:id/transcript', c.historyTranscript)

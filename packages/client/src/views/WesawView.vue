@@ -42,6 +42,17 @@ interface WesawTranscriptPage {
   messages: TranscriptMessage[]
   cli?: string
 }
+/** 对话框自己那一路（投给该工作区 agent 的往返），与 project.md 历史分开存 */
+interface WesawChatTurn {
+  role: 'user' | 'assistant'
+  text: string
+  ts: number
+  error?: boolean
+}
+interface WesawChatPage {
+  turns: WesawChatTurn[]
+  busy: boolean
+}
 
 const PAGE = 300
 /** 侧栏分类，与 weSaw 会话列表一致 */
@@ -92,6 +103,25 @@ const q = ref('')
 const msgs = ref<TranscriptMessage[]>([])
 const msgLoading = ref(false)
 const scroller = ref<HTMLElement | null>(null)
+
+// ---- 对话框（照 weSaw 的输入区）----
+const chatTurns = ref<WesawChatTurn[]>([])
+const chatBusy = ref(false)
+const draft = ref('')
+const sending = ref(false)
+
+/** 历史（project.md 条目）在前，本页对话在后，按时间正序渲染 */
+const allMsgs = computed<TranscriptMessage[]>(() => [
+  ...msgs.value,
+  ...chatTurns.value.map(
+    (t) =>
+      ({
+        role: t.role,
+        parts: [{ kind: 'text', text: t.text }],
+        timestamp: new Date(t.ts).toISOString(),
+      }) as unknown as TranscriptMessage
+  ),
+])
 
 const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
 const hasMore = computed(() => rows.value.length < total.value)
@@ -147,7 +177,9 @@ async function load() {
 async function openSession(id: string) {
   selected.value = id
   msgs.value = []
+  chatTurns.value = []
   msgLoading.value = true
+  void loadChat()
   try {
     const page = await api.get<WesawTranscriptPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/transcript`)
     msgs.value = page.exists ? page.messages : []
@@ -160,10 +192,57 @@ async function openSession(id: string) {
   }
 }
 
+async function loadChat(): Promise<void> {
+  const id = selected.value
+  if (!id) return
+  try {
+    const page = await api.get<WesawChatPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/chat`)
+    if (selected.value !== id) return
+    const grew = page.turns.length !== chatTurns.value.length
+    chatTurns.value = page.turns
+    chatBusy.value = page.busy
+    if (grew) await scrollToEnd()
+  } catch {
+    // 对话框读取失败不挡历史显示
+  }
+}
+
+async function scrollToEnd(): Promise<void> {
+  await nextTick()
+  if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+}
+
+async function send(): Promise<void> {
+  const text = draft.value.trim()
+  const id = selected.value
+  if (!text || !id || sending.value || chatBusy.value) return
+  sending.value = true
+  try {
+    const page = await api.post<WesawChatPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/message`, { text })
+    draft.value = ''
+    chatTurns.value = page.turns
+    chatBusy.value = page.busy
+    await scrollToEnd()
+  } catch (err) {
+    message.error(`发送失败：${(err as Error).message}`)
+  } finally {
+    sending.value = false
+  }
+}
+
+function onComposerKey(e: KeyboardEvent): void {
+  // Enter 发送、Shift+Enter 换行；输入法组词中的 Enter 不发送
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    void send()
+  }
+}
+
 /** 手机返回列表；桌面清空选中（回落到空态） */
 function back() {
   selected.value = null
   msgs.value = []
+  chatTurns.value = []
 }
 
 onMounted(() => void load())
@@ -184,6 +263,20 @@ watch(sub, () => void load())
 // 播报只服务当前这一屏：换会话或离开本页即停
 watch(selected, () => speech.stop())
 onUnmounted(() => speech.stop())
+
+// 驻留时轮询对话框（agent 跑完不回推，按 areco 式周期刷新追）
+let chatTimer: ReturnType<typeof setInterval> | null = null
+watch(selected, (id) => {
+  if (chatTimer) clearInterval(chatTimer)
+  chatTimer = null
+  if (!id) return
+  chatTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') void loadChat()
+  }, 2000)
+})
+onUnmounted(() => {
+  if (chatTimer) clearInterval(chatTimer)
+})
 </script>
 
 <template>
@@ -262,12 +355,36 @@ onUnmounted(() => speech.stop())
         </div>
       </header>
 
-      <NSpin v-if="msgLoading && !msgs.length" class="pane-empty" />
-      <NEmpty v-else-if="!msgs.length" description="这个会话还没有 agent 记录" class="pane-empty" />
+      <NSpin v-if="msgLoading && !allMsgs.length" class="pane-empty" />
+      <NEmpty
+        v-else-if="!allMsgs.length && !chatBusy"
+        description="这个会话还没有 agent 记录"
+        class="pane-empty"
+      />
       <div v-else ref="scroller" class="msgs">
-        <div v-for="(m, i) in msgs" :key="i" class="msg-wrap">
+        <div v-for="(m, i) in allMsgs" :key="i" class="msg-wrap">
           <ChatMessage :message="m" :agent-label="current?.cli || 'weSaw'" speakable :session-id="`wesaw:${selected}`" />
         </div>
+        <div v-if="chatBusy" class="pane-typing">agent 正在处理…</div>
+      </div>
+
+      <div v-if="current" class="composer">
+        <textarea
+          v-model="draft"
+          class="composer-input"
+          rows="2"
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+          spellcheck="false"
+          @keydown="onComposerKey"
+        />
+        <button
+          type="button"
+          class="composer-send"
+          :disabled="sending || chatBusy || !draft.trim()"
+          @click="void send()"
+        >
+          {{ chatBusy ? '处理中' : sending ? '发送中…' : '发送' }}
+        </button>
       </div>
     </section>
   </div>
@@ -593,11 +710,74 @@ onUnmounted(() => speech.stop())
   border-radius: 10px;
 }
 
+.pane-typing {
+  padding: 6px 16px 12px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+/* ---- 对话框：照 weSaw 的输入区（圆角输入框 + 右侧发送）---- */
+
+.composer {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.composer-input {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 160px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/20px inherit;
+  resize: none;
+  outline: none;
+  -webkit-appearance: none;
+}
+
+.composer-input:focus {
+  border-color: var(--accent);
+}
+
+.composer-input::placeholder {
+  color: var(--faint);
+}
+
+.composer-send {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font: 600 14px/44px inherit;
+  cursor: pointer;
+}
+
+.composer-send:disabled {
+  background: var(--chip-bg);
+  color: var(--faint);
+  cursor: default;
+}
+
 /* ---- 手机单栏：列表 / 对话二选一，点进去看 ---- */
 
 @media (max-width: 768px) {
   /* 手机上输入框不到 16px，iOS 聚焦会放大整页且回不去，故固定 16px */
-  .sb-search input {
+  .sb-search input,
+  .composer-input {
     font-size: 16px;
   }
 

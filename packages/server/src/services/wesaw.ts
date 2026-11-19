@@ -264,6 +264,23 @@ function workspaceDirs(): Map<string, string> {
   return map
 }
 
+/** 列表 id（base64url）→ talker；解不出或没有该工作区返回 null */
+export function wesawTalkerOf(id: string): string | null {
+  let talker = ''
+  try {
+    talker = Buffer.from(id, 'base64url').toString('utf8')
+  } catch {
+    return null
+  }
+  return workspaceDirs().has(talker) ? talker : null
+}
+
+/** talker → 工作区绝对路径；没有该工作区返回 null */
+export function wesawWorkspaceDir(talker: string): string | null {
+  const dir = workspaceDirs().get(talker)
+  return dir && safeIsDir(dir) ? dir : null
+}
+
 /** weSaw 自带「最近会话」清单：备注名、最后消息时间、类型都由 app 给，不自己扫盘排 */
 async function fetchRecentChats(): Promise<RecentChat[]> {
   const token = fs.readFileSync(WESAW_TOKEN, 'utf8').trim()

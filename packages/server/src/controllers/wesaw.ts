@@ -1,7 +1,8 @@
 // weSaw 会话只读视图的 HTTP 入口：列表（会话名/类型/最近活动）+ 单会话正文。
 // 与 controllers/weixin.ts 同构的 { ok, data | error } 响应，纯只读，不触发任何写盘。
 import type { Context } from 'koa'
-import { listWesawSessions, readWesawTranscript } from '../services/wesaw'
+import { listWesawSessions, readWesawTranscript, wesawTalkerOf } from '../services/wesaw'
+import { sendWesawMessage, wesawChatBusy, wesawChatTurns } from '../services/wesaw-chat'
 
 function ok(ctx: Context, data: unknown): void {
   ctx.body = { ok: true, data }
@@ -36,5 +37,39 @@ export function wesawTranscript(ctx: Context): void {
     ok(ctx, readWesawTranscript(id))
   } catch (err) {
     fail(ctx, 500, 'wesaw_read_failed', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** GET /api/wesaw/sessions/:id/chat — 本页对话框自己那一路的往返（user/assistant 轮次） */
+export function wesawChat(ctx: Context): void {
+  try {
+    const talker = wesawTalkerOf(decodeURIComponent(String(ctx.params.id ?? '')))
+    if (!talker) {
+      fail(ctx, 404, 'wesaw_not_found', '这个会话没有工作区')
+      return
+    }
+    ok(ctx, { turns: wesawChatTurns(talker), busy: wesawChatBusy(talker) })
+  } catch (err) {
+    fail(ctx, 500, 'wesaw_chat_failed', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** POST /api/wesaw/sessions/:id/message { text } — 投给该工作区的 agent，跑完靠轮询 chat 取 */
+export function wesawSend(ctx: Context): void {
+  try {
+    const talker = wesawTalkerOf(decodeURIComponent(String(ctx.params.id ?? '')))
+    if (!talker) {
+      fail(ctx, 404, 'wesaw_not_found', '这个会话没有工作区')
+      return
+    }
+    const body = (ctx.request.body ?? {}) as { text?: string }
+    const result = sendWesawMessage(talker, String(body.text ?? ''))
+    if (!result.ok) {
+      fail(ctx, 400, 'wesaw_send_failed', result.error ?? '发送失败')
+      return
+    }
+    ok(ctx, { turns: wesawChatTurns(talker), busy: true })
+  } catch (err) {
+    fail(ctx, 500, 'wesaw_send_failed', err instanceof Error ? err.message : String(err))
   }
 }
