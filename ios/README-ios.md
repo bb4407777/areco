@@ -43,14 +43,12 @@ ios-deploy --id 00008120-001849343AE0C01E --bundle <Areco.app> --no-wifi --justl
 
 ## 手机端使用
 
-- **不用填地址**：固定两个地址、固定顺序——先 `https://areco.gaochengbin.com`（公网，首轮 5 秒超时），
-  不通再换 `http://gaodeMacBook-Pro.local:8790`（局域网，首轮 3 秒超时）。
-  公网优先是因为 https 才有麦克风（语音输入）；局域网 http 是回退，那里点麦克风会提示环境不支持。
-- **自动重连**：探不通不设次数上限——失败后每 5 秒自动再来一轮（首轮超时 5/3 秒，之后收紧到 3/2 秒），
+- **只连公网**：固定 `https://areco.gaochengbin.com`，不用填地址、也没有局域网回退；https 是安全上下文，
+  麦克风（语音输入）只有这条线能用。
+- **自动重连**：探不通不设次数上限——失败后每 1 秒自动再探一次（首轮超时 5 秒，之后收紧到 2 秒），
   网络刚切换、Mac 刚唤醒的几十秒基本能自己连上；回到前台若还停在失败页，也会立刻再连。
 - **语音输入**：需要麦克风权限（首次点麦克风弹系统授权），仅公网 https 下可用。
 - **没有设置页、没有齿轮**：地址全自动，连不上就等它自己连（失败页上的「立即重试」只是不想等时催一下）。
-- 首次会弹「本地网络」授权，局域网访问必须允许。
 - 登录一次后 cookie 落盘，杀掉 App 再开仍是登录态；会话/终端数据都在 Mac 上，换手机不影响。
 - 地址栏与浏览器 UI 不出现，全屏即座舱。
 
@@ -60,7 +58,7 @@ ios-deploy --id 00008120-001849343AE0C01E --bundle <Areco.app> --no-wifi --justl
 - 锁屏后 WebView 会被系统挂起，实时终端输出暂停（回到前台自动重连，与浏览器切后台一致）。
   需要锁屏不断的话得改原生音频保活，areco 不是语音场景，暂不做。
 - 取不到 APNs 推送：座舱是主动打开用的工具，不做通知。
-- ATS 放开了任意明文（`NSAllowsArbitraryLoads`），只为局域网 http/ws；自用不过审。
+- ATS 放开了任意明文（`NSAllowsArbitraryLoads`）与本地网络用途说明，都是走局域网时期的遗留，保留不影响只走公网的现行为。
 
 ## 目录
 
@@ -70,6 +68,6 @@ ios/
   Info.plist
   Sources/ArecoApp.swift    # 入口、连接中/失败态
   Sources/WebAppView.swift  # WKWebView 封装、加载失败回调、弹窗/新窗口处理
-  Sources/ServerStore.swift # 公网→局域网自动探测、每 5 秒无限重试
+  Sources/ServerStore.swift # 只走公网、每 1 秒无限重试
   Assets.xcassets/AppIcon.appiconset/icon-1024.png
 ```

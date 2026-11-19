@@ -59,7 +59,7 @@ struct ContentView: View {
             case .ready:
                 if let endpoint = store.active {
                     WebAppView(url: endpoint.url, theme: $webTheme) {
-                        store.handlePageFailure(of: endpoint)
+                        store.handlePageFailure()
                     }
                     .id(endpoint.url)
                     .ignoresSafeArea(.container, edges: .bottom)
