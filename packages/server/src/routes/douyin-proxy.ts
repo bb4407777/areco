@@ -10,12 +10,25 @@ const DOUYIN_HOST = process.env.DOUYIN_BOARD_HOST || '127.0.0.1'
 const DOUYIN_PORT = Number(process.env.DOUYIN_BOARD_PORT || 8021)
 const PREFIX = '/douyin'
 
+/** areco 内嵌版式：与 weSaw 页同口径——只留会话列表 ＋ 助手对话框，去掉中间的会话内容与右侧工作区 */
+const EMBED_CSS = `<style>
+main,main.w0,main.a0,main.w0.a0{grid-template-columns:300px minmax(0,1fr)!important}
+section.reader,aside.work,#toggleWork,#toggleAgent{display:none!important}
+@media (max-width:760px){
+  main,main.w0,main.a0,main.w0.a0{grid-template-columns:minmax(0,1fr)!important;grid-template-rows:40% minmax(0,1fr)!important}
+  aside.agentcol{border-left:0;border-top:1px solid var(--line)}
+}
+</style>`
+
 /** 前端内联的根绝对路径 → 带前缀（只动这三种，别的一概不碰） */
 function rewriteHtml(html: string): string {
-  return html
+  const withPrefix = html
     .replace(/(["'])\/api\//g, `$1${PREFIX}/api/`)
     .replace(/(["'])\/media\?/g, `$1${PREFIX}/media?`)
     .replace(/(["'])\/thumb\?/g, `$1${PREFIX}/thumb?`)
+  return withPrefix.includes('</head>')
+    ? withPrefix.replace('</head>', `${EMBED_CSS}</head>`)
+    : withPrefix
 }
 
 export function createDouyinProxy() {
