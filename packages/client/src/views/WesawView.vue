@@ -866,7 +866,8 @@ onUnmounted(() => {
 }
 
 .pane-empty {
-  margin-top: 60px;
+  /* 空会话/加载中：占住中间空档居中，输入栏仍贴底 */
+  margin: auto 0;
 }
 
 .msgs {
@@ -898,6 +899,8 @@ onUnmounted(() => {
 .composer {
   position: relative;
   flex: 0 0 auto;
+  /* 没有消息列表（空会话/加载中）时也钉在底部，不跟着空白上浮 */
+  margin-top: auto;
   display: flex;
   align-items: stretch;
   gap: 8px;
