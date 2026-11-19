@@ -4,6 +4,13 @@
 
 ## 工作纪要
 
+### 2026-11-20 weSaw 页加「自动跟进／已停止」开关（高律师令，两处落点）
+- **令**：「在 areco 的 weSaw 里面加上 weSaw 里面的『自动跟进／已停止』的按钮到发送上面；weSaw 的 agent 对话那边也是放到发送上面」。
+- **改法**：areco `WesawView` 的 composer 右侧改为纵向列（开关在上、发送在下），开关走新端点 `GET/POST /api/wesaw/sessions/:id/autowake` 转 weSaw 6131；weSaw 侧把开关的读写从 IPC handler 抽成模块级函数，新增 `GET/POST /api/v1/agent_autowake` 与注入桥，对话栏那颗按钮从工具栏挪进输入行右侧（`.agent-chat-send-col`）。
+- **为什么走 6131 不直改 JSON**：weSaw 的 toggle service 只在启动时读盘，外部改文件看不到、下次写盘还会覆盖；走主进程才是唯一写者。默认态沿用 weSaw 的类别折算，areco 不重算。
+- **验证**：weSaw 双 tsconfig 0 错、`npm run build` 过、autowake 单测 64/64；出包替换 `/Applications/weSaw.app`（旧包 `~/.backups/20261119-wesaw-autowake/`）。areco `npm run build` 全过。**两处均未重启/重开，未真机点按验证**。
+- **部署**：重开 weSaw 后 6131 才有新端点；areco 需重启 8790（`com.areco`），前端硬刷即出新按钮。档案 `data/handoff/2026-11-20-wesaw-autowake-toggle.md`。
+
 ### 2026-11-19 对话输入框「投递失败」：单字消息没有复看兜底 + 前端重发窗口太窄（高律师报障）
 - **报障**：「刚刚 areco 又出现投递失败」，定位到对话输入框：那个「好」卡了好久没响应，他去终端手动按了一次。
 - **现场**：`14:43:54 [submit] 复看开始（1 字，尾字「好」）`之后**再无任何 submit 日志**；`14:51:37 [typed] 回车 c881bb19 尾字「」`＝用户自己去终端补按。同晚 22:51 前后 WS 全断一次，之后每 20–40 秒客户端主动重连一次。

@@ -1,7 +1,14 @@
 // weSaw 会话只读视图的 HTTP 入口：列表（会话名/类型/最近活动）+ 单会话正文。
 // 与 controllers/weixin.ts 同构的 { ok, data | error } 响应，纯只读，不触发任何写盘。
 import type { Context } from 'koa'
-import { listWesawSessions, readWesawTranscript, wesawTalkerOf } from '../services/wesaw'
+import {
+  listWesawSessions,
+  readWesawAutowake,
+  readWesawTranscript,
+  wesawChatKeyOf,
+  wesawTalkerOf,
+  writeWesawAutowake,
+} from '../services/wesaw'
 import { sendWesawMessage, wesawChatBusy, wesawChatTurns } from '../services/wesaw-chat'
 import { readWesawAvatar } from '../services/wesaw-avatars'
 
@@ -103,5 +110,40 @@ export async function wesawSend(ctx: Context): Promise<void> {
     ok(ctx, { turns: wesawChatTurns(talker), busy: true })
   } catch (err) {
     fail(ctx, 500, 'wesaw_send_failed', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** GET /api/wesaw/sessions/:id/autowake — 该会话「自动跟进」开关现状（weSaw 6131 为准） */
+export async function wesawAutowakeStatus(ctx: Context): Promise<void> {
+  try {
+    const talker = wesawTalkerOf(decodeURIComponent(String(ctx.params.id ?? '')))
+    const chatKey = talker ? wesawChatKeyOf(talker) : null
+    if (!chatKey) {
+      fail(ctx, 404, 'wesaw_not_found', '这个会话没有工作区')
+      return
+    }
+    ok(ctx, await readWesawAutowake(chatKey))
+  } catch (err) {
+    fail(ctx, 503, 'wesaw_autowake_unavailable', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** POST /api/wesaw/sessions/:id/autowake { enabled } — 切换自动跟进（写回 weSaw） */
+export async function wesawAutowakeToggle(ctx: Context): Promise<void> {
+  try {
+    const talker = wesawTalkerOf(decodeURIComponent(String(ctx.params.id ?? '')))
+    const chatKey = talker ? wesawChatKeyOf(talker) : null
+    if (!chatKey) {
+      fail(ctx, 404, 'wesaw_not_found', '这个会话没有工作区')
+      return
+    }
+    const body = (ctx.request.body ?? {}) as { enabled?: unknown }
+    if (typeof body.enabled !== 'boolean') {
+      fail(ctx, 400, 'wesaw_autowake_failed', '缺少 enabled（布尔）')
+      return
+    }
+    ok(ctx, await writeWesawAutowake(chatKey, body.enabled))
+  } catch (err) {
+    fail(ctx, 503, 'wesaw_autowake_unavailable', err instanceof Error ? err.message : String(err))
   }
 }

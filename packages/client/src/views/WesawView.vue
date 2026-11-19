@@ -114,6 +114,11 @@ const pending = ref('')
 const draft = ref('')
 const sending = ref(false)
 
+// ---- 自动跟进开关（与 weSaw 对话栏同一份状态：服务端转 6131，由 weSaw 写盘）----
+const autowakeEnabled = ref(true)
+const autowakeLoading = ref(false)
+const autowakeError = ref('')
+
 /** 正文（与 weSaw 对话栏同源）＋ 刚发出、还没写进会话文件的那一句 */
 const allMsgs = computed<TranscriptMessage[]>(() => {
   const list = [...msgs.value]
@@ -201,6 +206,8 @@ async function openSession(id: string) {
   agentCli.value = ''
   msgSig.value = ''
   msgLoading.value = true
+  autowakeError.value = ''
+  void loadAutowake(id)
   void loadChat()
   try {
     const page = await api.get<WesawTranscriptPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/transcript`)
@@ -259,6 +266,40 @@ async function loadChat(): Promise<void> {
 async function scrollToEnd(): Promise<void> {
   await nextTick()
   if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+}
+
+/** 「自动跟进」现状：weSaw 的开关清单是 SoT，照着显示，不在前端另存状态 */
+async function loadAutowake(id: string): Promise<void> {
+  autowakeLoading.value = true
+  try {
+    const res = await api.get<{ enabled: boolean }>(
+      `/api/wesaw/sessions/${encodeURIComponent(id)}/autowake`
+    )
+    if (selected.value === id) autowakeEnabled.value = res.enabled
+  } catch (err) {
+    if (selected.value === id) autowakeError.value = (err as Error).message
+  } finally {
+    if (selected.value === id) autowakeLoading.value = false
+  }
+}
+
+async function toggleAutowake(): Promise<void> {
+  const id = selected.value
+  if (!id || autowakeLoading.value) return
+  const next = !autowakeEnabled.value
+  autowakeLoading.value = true
+  autowakeError.value = ''
+  try {
+    const res = await api.post<{ enabled: boolean }>(
+      `/api/wesaw/sessions/${encodeURIComponent(id)}/autowake`,
+      { enabled: next }
+    )
+    if (selected.value === id) autowakeEnabled.value = res.enabled
+  } catch (err) {
+    if (selected.value === id) autowakeError.value = `切换失败：${(err as Error).message}`
+  } finally {
+    if (selected.value === id) autowakeLoading.value = false
+  }
 }
 
 async function send(): Promise<void> {
@@ -463,14 +504,29 @@ onUnmounted(() => {
           spellcheck="false"
           @keydown="onComposerKey"
         />
-        <button
-          type="button"
-          class="composer-send"
-          :disabled="sending || chatBusy || !draft.trim()"
-          @click="void send()"
-        >
-          {{ chatBusy ? '处理中' : sending ? '发送中…' : '发送' }}
-        </button>
+        <div class="composer-actions">
+          <button
+            type="button"
+            class="composer-autowake"
+            :class="{ on: autowakeEnabled }"
+            :disabled="autowakeLoading"
+            :title="
+              autowakeError ||
+              (autowakeEnabled ? '关闭当前会话的自动跟进分闸' : '开启当前会话的自动跟进分闸')
+            "
+            @click="void toggleAutowake()"
+          >
+            {{ autowakeLoading ? '保存中…' : autowakeEnabled ? '✓ 自动跟进' : '✗ 已停止' }}
+          </button>
+          <button
+            type="button"
+            class="composer-send"
+            :disabled="sending || chatBusy || !draft.trim()"
+            @click="void send()"
+          >
+            {{ chatBusy ? '处理中' : sending ? '发送中…' : '发送' }}
+          </button>
+        </div>
       </div>
     </section>
   </div>
@@ -872,6 +928,41 @@ onUnmounted(() => {
 
 .composer-input::placeholder {
   color: var(--faint);
+}
+
+/* 发送按钮一列：「自动跟进」在发送正上方，两者同宽 */
+.composer-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.composer-actions .composer-send {
+  width: 100%;
+}
+
+.composer-autowake {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--chip-bg);
+  color: var(--faint);
+  font: 600 12px/26px inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.composer-autowake.on {
+  border-color: #28a745;
+  background: #eaf6ec;
+  color: #1a7f37;
+}
+
+.composer-autowake:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .composer-send {

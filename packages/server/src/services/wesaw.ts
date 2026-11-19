@@ -313,6 +313,59 @@ export function wesawWorkspaceDir(talker: string): string | null {
   return dir && safeIsDir(dir) ? dir : null
 }
 
+/** talker → weSaw 的 chatKey（相对 document/ 的三段式路径，自动跟进清单就用这个键） */
+export function wesawChatKeyOf(talker: string): string | null {
+  const dir = wesawWorkspaceDir(talker)
+  if (!dir) return null
+  return path.relative(DOC_ROOT, dir).split(path.sep).join('/')
+}
+
+/** 自动跟进开关：走 weSaw 本地 API（6131），由 weSaw 主进程改内存态 + 落盘，跨进程一致 */
+export interface WesawAutowakeStatus {
+  enabled: boolean
+}
+
+async function wesawAutowakeRequest(
+  init: RequestInit & { chatKey: string }
+): Promise<WesawAutowakeStatus> {
+  const token = fs.readFileSync(WESAW_TOKEN, 'utf8').trim()
+  const { chatKey, ...rest } = init
+  const res = await fetch(`${WESAW_API}/agent_autowake?chat=${encodeURIComponent(chatKey)}`, {
+    ...rest,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(rest.body ? { 'content-type': 'application/json' } : {}),
+    },
+    signal: AbortSignal.timeout(5000),
+  })
+  if (res.status === 404) throw new Error('weSaw 未提供自动跟进接口，需更新并重启 weSaw')
+  const body = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    enabled?: boolean
+    error?: string
+    message?: string
+  }
+  if (!res.ok || body.success === false || typeof body.enabled !== 'boolean') {
+    throw new Error(body.error || body.message || `weSaw 自动跟进接口 ${res.status}`)
+  }
+  return { enabled: body.enabled }
+}
+
+export function readWesawAutowake(chatKey: string): Promise<WesawAutowakeStatus> {
+  return wesawAutowakeRequest({ chatKey })
+}
+
+export function writeWesawAutowake(
+  chatKey: string,
+  enabled: boolean
+): Promise<WesawAutowakeStatus> {
+  return wesawAutowakeRequest({
+    chatKey,
+    method: 'POST',
+    body: JSON.stringify({ chat: chatKey, enabled }),
+  })
+}
+
 /** weSaw 自带「最近会话」清单：备注名、最后消息时间、类型都由 app 给，不自己扫盘排 */
 async function fetchRecentChats(): Promise<RecentChat[]> {
   const token = fs.readFileSync(WESAW_TOKEN, 'utf8').trim()

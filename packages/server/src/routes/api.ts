@@ -6,7 +6,15 @@ import type { TtsController } from '../controllers/tts'
 import type { ProcessControllers } from '../controllers/processes'
 import type { OpcControllers } from '../controllers/opc'
 import { weixinList, weixinSearch, weixinTranscript } from '../controllers/weixin'
-import { wesawAvatar, wesawChat, wesawList, wesawSend, wesawTranscript } from '../controllers/wesaw'
+import {
+  wesawAutowakeStatus,
+  wesawAutowakeToggle,
+  wesawAvatar,
+  wesawChat,
+  wesawList,
+  wesawSend,
+  wesawTranscript,
+} from '../controllers/wesaw'
 
 export function createApiRouter(
   c: ApiControllers,
@@ -93,6 +101,9 @@ export function createApiRouter(
   // 对话框：GET 取本路往返、POST 投一条消息给该工作区的 agent（CodeBuddy 无头）
   router.get('/wesaw/sessions/:id/chat', wesawChat)
   router.post('/wesaw/sessions/:id/message', wesawSend)
+  // 自动跟进开关：状态与切换都转给 weSaw 6131，两个界面共用同一份清单
+  router.get('/wesaw/sessions/:id/autowake', wesawAutowakeStatus)
+  router.post('/wesaw/sessions/:id/autowake', wesawAutowakeToggle)
 
   router.get('/history', c.historyList)
   router.get('/history/:source/:project/:id/transcript', c.historyTranscript)
