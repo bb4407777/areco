@@ -20,6 +20,7 @@ struct WebAppView: UIViewRepresentable {
         config.mediaTypesRequiringUserActionForPlayback = []
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.userContentController.add(context.coordinator, name: "arecoTheme")
+        config.userContentController.add(AudioBridge.shared, name: AudioBridge.messageName)
         // 默认 websiteDataStore = .default()，登录 cookie 落盘，杀掉 App 再开仍是登录态
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -29,6 +30,7 @@ struct WebAppView: UIViewRepresentable {
         // 键盘外观跟网页主题走，不跟系统（系统深色 + 网页浅色时键盘不会突兀变黑）
         webView.overrideUserInterfaceStyle = theme == "dark" ? .dark : .light
         webView.load(URLRequest(url: url))
+        AudioBridge.shared.attach(to: webView)
         return webView
     }
 
@@ -39,6 +41,7 @@ struct WebAppView: UIViewRepresentable {
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "arecoTheme")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: AudioBridge.messageName)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {

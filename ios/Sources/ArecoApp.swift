@@ -21,7 +21,10 @@ struct ArecoApp: App {
                 .task { await store.resolve() }
                 .onChange(of: scenePhase) { phase in
                     // WebKit 播放媒体时可能把类别改回 ambient，回前台重设一次
-                    if phase == .active { AppAudioSession.apply() }
+                    if phase == .active {
+                        AppAudioSession.apply()
+                        AudioBridge.shared.reactivate()
+                    }
                 }
         }
     }

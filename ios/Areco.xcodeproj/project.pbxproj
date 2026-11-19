@@ -9,11 +9,13 @@
 /* Begin PBXBuildFile section */
 		0402A768B76C244F81F7677F /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6ECC9D43F9BB12EEBA4D53 /* ServerStore.swift */; };
 		2493B4D6C877B8EB85DFB379 /* ArecoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9823BC2E8D9FCD5F1E3AB314 /* ArecoApp.swift */; };
+		794C45D18ED4C84136307966 /* AudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C40F9FD4AC43700D274AC4B /* AudioBridge.swift */; };
 		7FE7318DE384BB6821EF2D4C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E811C3120B70C6C886402DAB /* Assets.xcassets */; };
 		8E560A6F1087CA143C80A72F /* WebAppView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0A395471D1A52408F40AC4 /* WebAppView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		1C40F9FD4AC43700D274AC4B /* AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBridge.swift; sourceTree = "<group>"; };
 		5C6ECC9D43F9BB12EEBA4D53 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		5F0A395471D1A52408F40AC4 /* WebAppView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebAppView.swift; sourceTree = "<group>"; };
 		9823BC2E8D9FCD5F1E3AB314 /* ArecoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArecoApp.swift; sourceTree = "<group>"; };
@@ -43,6 +45,7 @@
 			isa = PBXGroup;
 			children = (
 				9823BC2E8D9FCD5F1E3AB314 /* ArecoApp.swift */,
+				1C40F9FD4AC43700D274AC4B /* AudioBridge.swift */,
 				5C6ECC9D43F9BB12EEBA4D53 /* ServerStore.swift */,
 				5F0A395471D1A52408F40AC4 /* WebAppView.swift */,
 			);
@@ -120,6 +123,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2493B4D6C877B8EB85DFB379 /* ArecoApp.swift in Sources */,
+				794C45D18ED4C84136307966 /* AudioBridge.swift in Sources */,
 				0402A768B76C244F81F7677F /* ServerStore.swift in Sources */,
 				8E560A6F1087CA143C80A72F /* WebAppView.swift in Sources */,
 			);

@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { AudioBlockedError, EmptyAudioError, PcmCancelledError, PcmPlayer, type SpeechPlayer } from '../audio/pcmPlayer'
+import { AudioBlockedError, EmptyAudioError, PcmCancelledError, type SpeechPlayer } from '../audio/pcmPlayer'
+import { createSpeechPlayer } from '../audio/nativePlayer'
 import { splitForSpeech } from '../audio/sentences'
 
 type AudioResult = { response: Response } | { error: unknown }
@@ -32,7 +33,7 @@ export class SpeechQueue {
   private readonly pendingAuto = new Set<string>()
 
   constructor(
-    private readonly player: SpeechPlayer = new PcmPlayer(),
+    private readonly player: SpeechPlayer = createSpeechPlayer(),
     private readonly fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
     private readonly events: SpeechEvents = {},
   ) {}
@@ -204,7 +205,7 @@ export const useSpeechStore = defineStore('speech', {
   actions: {
     core(): SpeechQueue {
       if (!queue) {
-        queue = new SpeechQueue(new PcmPlayer(), globalThis.fetch.bind(globalThis), {
+        queue = new SpeechQueue(createSpeechPlayer(), globalThis.fetch.bind(globalThis), {
           onPlaying: (id) => { this.playingId = id },
           onBlocked: (blocked) => { this.blocked = blocked },
           onError: (error) => { this.error = error },
