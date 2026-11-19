@@ -12,11 +12,12 @@ const PREFIX = '/douyin'
 
 /**
  * areco 内嵌版式：与 weSaw 页同口径——只留会话列表 ＋ 助手对话框，去掉中间的会话内容与右侧工作区。
- * 手机上单栏两页：先看列表，点会话进助手页（左上「‹ 返回」回列表），与 areco 的 weSaw 页同体例。
+ * 手机上分两层：一层是会话列表，点会话才进第二层（agent 对话框），左上「‹」回列表——与 weSaw 页同体例。
  */
 const EMBED_CSS = `<style>
 main,main.w0,main.a0,main.w0.a0{grid-template-columns:300px minmax(0,1fr)!important}
-section.reader,aside.work,#toggleWork,#toggleAgent,.dy-back{display:none!important}
+section.reader,aside.work,#toggleWork,#toggleAgent{display:none!important}
+.dy-back{display:none!important;border:0;background:none;color:var(--text);font-size:24px;line-height:1;padding:0 4px;cursor:pointer}
 @media (max-width:760px){
   header h1{display:none}
   header .stat{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -25,18 +26,18 @@ section.reader,aside.work,#toggleWork,#toggleAgent,.dy-back{display:none!importa
   aside.agentcol{display:none!important;border-left:0}
   body.dy-agent main>aside:first-child{display:none!important}
   body.dy-agent aside.agentcol{display:flex!important}
-  body.dy-agent .dy-back{display:inline-block!important}
+  body.dy-agent .dy-back{display:block!important}
 }
 </style>`
 
-/** 手机上点会话直接进助手页，助手页给一个返列表的按钮（桌面宽度下这个按钮被 CSS 藏掉） */
+/** 手机上点会话才进第二层（助手页），助手页左上给「‹」回列表（桌面宽度下这个按钮被 CSS 藏掉） */
 const EMBED_JS = `<script>
 (function(){
   var acol=document.getElementById('acol'), list=document.getElementById('list');
   if(!acol||!list) return;
   var head=acol.querySelector('.phead');
   var back=document.createElement('button');
-  back.type='button'; back.className='mini dy-back'; back.textContent='‹ 返回';
+  back.type='button'; back.className='dy-back'; back.textContent='‹'; back.setAttribute('aria-label','返回列表');
   back.addEventListener('click',function(){ document.body.classList.remove('dy-agent'); });
   if(head) head.insertBefore(back, head.firstChild);
   list.addEventListener('click',function(e){
