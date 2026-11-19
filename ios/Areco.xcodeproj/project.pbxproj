@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0402A768B76C244F81F7677F /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6ECC9D43F9BB12EEBA4D53 /* ServerStore.swift */; };
 		2493B4D6C877B8EB85DFB379 /* ArecoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9823BC2E8D9FCD5F1E3AB314 /* ArecoApp.swift */; };
+		42A9C3F9A3A72A3A79957BD1 /* WxWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7E6B9EE64EDE3E57FE6CC2E /* WxWatch.swift */; };
 		794C45D18ED4C84136307966 /* AudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C40F9FD4AC43700D274AC4B /* AudioBridge.swift */; };
 		7FE7318DE384BB6821EF2D4C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E811C3120B70C6C886402DAB /* Assets.xcassets */; };
 		8E560A6F1087CA143C80A72F /* WebAppView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0A395471D1A52408F40AC4 /* WebAppView.swift */; };
@@ -19,6 +20,7 @@
 		5C6ECC9D43F9BB12EEBA4D53 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		5F0A395471D1A52408F40AC4 /* WebAppView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebAppView.swift; sourceTree = "<group>"; };
 		9823BC2E8D9FCD5F1E3AB314 /* ArecoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArecoApp.swift; sourceTree = "<group>"; };
+		D7E6B9EE64EDE3E57FE6CC2E /* WxWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WxWatch.swift; sourceTree = "<group>"; };
 		E811C3120B70C6C886402DAB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FAA6DF3445D6CB37B76D2817 /* Areco.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Areco.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -48,6 +50,7 @@
 				1C40F9FD4AC43700D274AC4B /* AudioBridge.swift */,
 				5C6ECC9D43F9BB12EEBA4D53 /* ServerStore.swift */,
 				5F0A395471D1A52408F40AC4 /* WebAppView.swift */,
+				D7E6B9EE64EDE3E57FE6CC2E /* WxWatch.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -126,6 +129,7 @@
 				794C45D18ED4C84136307966 /* AudioBridge.swift in Sources */,
 				0402A768B76C244F81F7677F /* ServerStore.swift in Sources */,
 				8E560A6F1087CA143C80A72F /* WebAppView.swift in Sources */,
+				42A9C3F9A3A72A3A79957BD1 /* WxWatch.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

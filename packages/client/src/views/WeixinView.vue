@@ -14,6 +14,7 @@ import { api } from '../api'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useSpeechStore } from '../stores/speech'
 import { transcriptSpeechId, transcriptSpeechText } from '../utils/speechText'
+import { getNativeSpokenUntil, syncWxWatch } from '../audio/nativePlayer'
 import type { TranscriptMessage, TranscriptPart } from '../../../shared/protocol'
 
 interface WeixinSessionRow {
@@ -321,6 +322,7 @@ async function openSession(id: string) {
     message.error(`加载对话失败：${(err as Error).message}`)
   } finally {
     msgLoading.value = false
+    pushWatch()
   }
 }
 
@@ -358,7 +360,10 @@ onMounted(() => {
 })
 
 // 播报只服务当前这一屏：换会话或离开本页即停（同会话页/群聊页口径，2026-11-08 令）
-watch(selected, () => speech.stop())
+watch(selected, () => {
+  speech.stop()
+  pushWatch()
+})
 
 // ---- 自动播报（2026-11-19 高律师令「加个自动播报的按钮进来微信会话」） ----
 // 微信是外部来消息、没有 WS 推送，靠轮询补：开着时每 5 秒取一次当前会话的新消息（cursor=已载条数，
@@ -372,6 +377,13 @@ function toggleAutoSpeak() {
   speech.setAutoEnabled(next)
   if (next) startAutoPoll()
   else stopAutoPoll()
+  pushWatch()
+}
+
+/** 告诉壳「当前会话 + 已载条数」：网页进后台定时器会停，壳据此接着自己轮询 */
+function pushWatch() {
+  const id = selected.value
+  syncWxWatch({ on: !!id && speech.autoEnabled, session: id ?? undefined, cursor: msgs.value.length })
 }
 
 function startAutoPoll() {
@@ -398,12 +410,17 @@ async function pollNewMessages() {
     const box = scroller.value
     const nearBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 80
     msgs.value = [...msgs.value, ...page.messages]
+    // 后台这段由壳代播过：它报回来的时间戳之前的，补载时只上屏、不再念
+    const spokenUntil = getNativeSpokenUntil()
     for (const m of page.messages) {
       const tm = toTranscript(m)
       const text = transcriptSpeechText(tm)
+      if (!text) continue
+      if (m.timestamp && toMs(m.timestamp) <= spokenUntil) continue
       // id 必须与气泡同口径（ChatMessage 传的 session-id 是 weixin:<id>），否则自动播时不亮「播报中」
-      if (text) speech.enqueueAuto({ messageId: transcriptSpeechId(`weixin:${id}`, tm), text })
+      speech.enqueueAuto({ messageId: transcriptSpeechId(`weixin:${id}`, tm), text })
     }
+    pushWatch()
     if (nearBottom) {
       await nextTick()
       if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
@@ -415,6 +432,7 @@ async function pollNewMessages() {
 
 onUnmounted(() => {
   stopAutoPoll()
+  syncWxWatch({ on: false })
   speech.stop()
 })
 </script>

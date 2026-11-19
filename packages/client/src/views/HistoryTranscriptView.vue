@@ -150,6 +150,7 @@ const RESUME_LABELS: Record<string, string> = {
   reasonix: '⏪ 原生恢复（打开选择器）',
   kimi: '⏪ 原生恢复（kimi -S）',
   codex: '⏪ 原生恢复（codex resume）',
+  codebuddy: '⏪ 原生恢复（codebuddy --resume）',
 }
 const continueOptions = computed(() => {
   const options: { label: string; key: string }[] = []

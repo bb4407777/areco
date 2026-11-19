@@ -29,6 +29,21 @@ export function syncNativeAudioAuto(enabled: boolean) {
   nativeHandler()?.postMessage({ t: 'config', auto: enabled })
 }
 
+/** 原生在后台代播过的最大时间戳（毫秒）：前台补载时按它跳过，免得重念 */
+let nativeSpokenUntil = 0
+
+export function getNativeSpokenUntil(): number {
+  return nativeSpokenUntil
+}
+
+/**
+ * 把「当前微信会话 + 已载条数」交给壳：网页一进后台定时器就停，
+ * 壳据此自己轮询新消息并在后台直接播（前台仍由网页轮询，原生不动）。
+ */
+export function syncWxWatch(state: { on: boolean; session?: string; cursor?: number }) {
+  nativeHandler()?.postMessage({ t: 'wxwatch', ...state })
+}
+
 /** 原生回调登记表：一句播完由原生 __arecoAudioDone(id) 唤醒对应的 await */
 const waiters = new Map<string, (error?: string) => void>()
 let hooksInstalled = false
@@ -48,6 +63,9 @@ function installHooks() {
     const settle = waiters.get(id)
     waiters.delete(id)
     settle?.()
+  }
+  w.__arecoWxSpoken = (ts: number) => {
+    nativeSpokenUntil = Number(ts) || 0
   }
   w.__arecoAudioFail = (id: string, message?: string) => {
     const settle = waiters.get(id)

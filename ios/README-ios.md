@@ -48,7 +48,8 @@ ios-deploy --id 00008120-001849343AE0C01E --bundle <Areco.app> --no-wifi --justl
 - **自动重连**：探不通不设次数上限——失败后每 1 秒自动再探一次（首轮超时 5 秒，之后收紧到 2 秒），
   网络刚切换、Mac 刚唤醒的几十秒基本能自己连上；回到前台若还停在失败页，也会立刻再连。
 - **语音输入**：需要麦克风权限（首次点麦克风弹系统授权），仅公网 https 下可用。
-- **后台播放**：Info.plist 已开 `UIBackgroundModes=audio`，音频会话为 `.playback`；锁屏／切走理论上继续播报（实际以真机验证为准）。
+- **后台播放**：Info.plist 已开 `UIBackgroundModes=audio`，音频会话为 `.playback`；锁屏／切走后播报继续。
+- **后台新消息**：WKWebView 进后台定时器会停，微信自动播报改由原生接管——`WxWatch.swift` 按同一接口每 5 秒轮询当前会话，取到新的 assistant 正文直接调 `/api/tts` 交给 `AVAudioEngine` 播；回前台把已念时间戳报给网页，补载时只上屏不重念。
 - **没有设置页、没有齿轮**：地址全自动，连不上就等它自己连（失败页上的「立即重试」只是不想等时催一下）。
 - 登录一次后 cookie 落盘，杀掉 App 再开仍是登录态；会话/终端数据都在 Mac 上，换手机不影响。
 - 地址栏与浏览器 UI 不出现，全屏即座舱。
@@ -70,5 +71,7 @@ ios/
   Sources/ArecoApp.swift    # 入口、连接中/失败态
   Sources/WebAppView.swift  # WKWebView 封装、加载失败回调、弹窗/新窗口处理
   Sources/ServerStore.swift # 只走公网、每 1 秒无限重试
+  Sources/AudioBridge.swift # 原生音频通道（PCM 播放、静音保活、后台开关）
+  Sources/WxWatch.swift     # 后台微信轮询代播
   Assets.xcassets/AppIcon.appiconset/icon-1024.png
 ```

@@ -31,6 +31,8 @@ export const useRoomsStore = defineStore('rooms', {
     lastMsgAt: {} as Record<string, number>,
     /** 房间 → loadMessages 代数 token：并发/过期响应守卫 */
     loadTokens: {} as Record<string, number>,
+    /** 群聊页是否在前台：不在前台就不自动播报（播报只服务于当前这一屏，2026-11-08） */
+    voiceActive: false,
   }),
   getters: {
     byId: (state) => (id: string) => state.rooms.find((r) => r.id === id),
@@ -57,7 +59,7 @@ export const useRoomsStore = defineStore('rooms', {
         if (isNew) {
           list.push(msg.message)
           const text = roomSpeechText(msg.message, this.humanName)
-          if (text) useSpeechStore().enqueueAuto({ messageId: roomSpeechId(msg.message), text })
+          if (text && this.voiceActive) useSpeechStore().enqueueAuto({ messageId: roomSpeechId(msg.message), text })
         }
         this.lastMsgAt[msg.roomId] = Date.now()
       } else if (msg.type === 'roomDispatches') {
@@ -65,6 +67,10 @@ export const useRoomsStore = defineStore('rooms', {
       }
     },
 
+    /** 群聊页进/出：只有在前台才自动播报（离开即静音，与对话页同口径） */
+    setVoiceActive(active: boolean) {
+      this.voiceActive = active
+    },
     loadReadState() {
       try {
         this.lastRead = JSON.parse(localStorage.getItem('areco-room-read') ?? '{}')

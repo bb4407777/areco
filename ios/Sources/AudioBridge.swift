@@ -39,6 +39,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// 自动播报是否开着：只有开着才在后台保活，免得白耗电
     private var autoSpeak = false
     private var backgroundObserver: NSObjectProtocol?
+    /// 原生自己播的句子（后台微信轮询）：播完调这里的闭包，不走 JS 回调
+    private var nativeDone: [String: () -> Void] = [:]
+
+    /// 网页可读的两个开关：后台微信轮询据此决定要不要接管
+    var autoSpeakEnabled: Bool { autoSpeak }
+    var backgroundAudioEnabled: Bool { backgroundEnabled }
 
     override init() {
         super.init()
@@ -117,9 +123,32 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             if let id = body["id"] as? String { stop(id) }
         case "stopAll":
             stopAll()
+        case "wxwatch":
+            // 后台微信轮询：网页进后台后定时器就停了，改由原生接管这段
+            WxWatch.shared.sync(
+                on: body["on"] as? Bool ?? false,
+                session: body["session"] as? String,
+                cursor: (body["cursor"] as? NSNumber)?.intValue
+            )
         default:
             break
         }
+    }
+
+    /// 原生侧直接送一段 PCM16LE 24kHz：播完回调（后台微信播报用，不经过网页）
+    func speakPCM(_ data: Data, onDone: @escaping () -> Void) {
+        let id = "n-\(UUID().uuidString)"
+        scheduled[id] = 0
+        ended.remove(id)
+        nativeDone[id] = onDone
+        enqueue(id: id, pcm: data)
+        ended.insert(id)
+        finishIfDrained(id)
+    }
+
+    /// 壳内执行 JS（后台把已念时间戳回传给网页做去重）
+    func evaluate(_ script: String) {
+        callJS(script)
     }
 
     /// 音频会话被电话/其他 App 抢走后，回前台补一次（与 AppAudioSession 同口径）
@@ -207,6 +236,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         scheduled[id] = nil
         // 队列空了就暂停播放节点，别让 engine 空转占着音频会话
         if scheduled.isEmpty { player.pause() }
+        if let done = nativeDone.removeValue(forKey: id) {
+            done()
+            return
+        }
         callJS("window.__arecoAudioDone && window.__arecoAudioDone(\(jsString(id)))")
     }
 
@@ -220,7 +253,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private func stopAll() {
         scheduled.removeAll()
         ended.removeAll()
+        let callbacks = nativeDone.values
+        nativeDone.removeAll()
         queueClear()
+        callbacks.forEach { $0() }
     }
 
     private func queueClear() {

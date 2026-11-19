@@ -12,7 +12,13 @@ import { useVoiceDictation } from '../composables/useVoiceDictation'
 import FileDropOverlay from './FileDropOverlay.vue'
 import MicButton from './MicButton.vue'
 
-const props = defineProps<{ sessionId: string; disabled?: boolean; placeholder?: string }>()
+// sendText：交给外部投递（bot 睡着时还没有会话，先叫醒再送），不传就走 ws sendline
+const props = defineProps<{
+  sessionId: string
+  disabled?: boolean
+  placeholder?: string
+  sendText?: (text: string) => Promise<boolean>
+}>()
 
 const ui = useUiStore()
 const message = useMessage()
@@ -45,7 +51,7 @@ async function send(): Promise<boolean> {
     sendingSlow.value = true
   }, 400)
   // 等服务端回执再清输入框：没送到（断线/假连接/回执超时）就留着原文，不再静默丢字
-  const ok = await wsClient.sendline(props.sessionId, value)
+  const ok = props.sendText ? await props.sendText(value) : await wsClient.sendline(props.sessionId, value)
   sending.value = false
   sendingSlow.value = false
   if (sendingSlowTimer !== null) {

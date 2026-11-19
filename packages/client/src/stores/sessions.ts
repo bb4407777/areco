@@ -84,7 +84,7 @@ export const useSessionsStore = defineStore('sessions', {
     async archive(id: string) {
       return api.post<SessionSummary>(`/api/sessions/${id}/archive`)
     },
-    /** 钉选/取消「总台」：房间加成员列表置顶认此字段，改名不影响 */
+    /** 钉选主 Bot：房间加成员列表置顶认此字段，不改名 */
     async pin(id: string, pinned: boolean) {
       return api.post<SessionSummary>(`/api/sessions/${id}/pin`, { pinned })
     },

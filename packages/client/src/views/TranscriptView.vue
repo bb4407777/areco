@@ -44,9 +44,21 @@ const { isRoleMode, handoffRole } = useSpawnWorker()
 // Boolean prop 缺省时 Vue 会按 false 处理（不是 undefined），所以显式给 true 默认值：
 // 否则 /session/:id/chat 不传这些 prop，会把「切终端」入口和输入框一起判成 false 隐藏掉
 const props = withDefaults(
-  defineProps<{ sessionId?: string; terminal?: boolean; peek?: boolean; composer?: boolean }>(),
-  { terminal: true, peek: true, composer: true }
+  defineProps<{
+    sessionId?: string
+    terminal?: boolean
+    peek?: boolean
+    composer?: boolean
+    /** 只读历史：读旧会话的 transcript，不绑定在册会话（bot 的历史视图） */
+    readOnly?: boolean
+    /** 只读时的标题（旧会话名） */
+    title?: string
+    /** 只读时的数据源：/api/bots/:id/history；缺省走 /api/sessions/:id/transcript */
+    source?: string
+  }>(),
+  { terminal: true, peek: true, composer: true, readOnly: false }
 )
+const transcriptUrl = computed(() => props.source || `/api/sessions/${sessionId.value}/transcript`)
 const showTerminalSwitch = computed(() => props.terminal !== false)
 const showPeek = computed(() => props.peek !== false)
 const showComposer = computed(() => props.composer !== false)
@@ -131,7 +143,8 @@ function onMenu(key: string) {
 watch(
   () => store.ready && !session.value,
   (gone) => {
-    if (gone) router.replace(inBots.value ? '/bots' : '/')
+    // bot 页不跳走：绑的会话被清掉时留在原页显示「没有会话」，一跳回列表就像闪退（2026-11-18）
+    if (gone && !props.readOnly && !inBots.value) router.replace('/')
   }
 )
 
@@ -409,9 +422,7 @@ watch(working, async (w, wasWorking) => {
   if (el && el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX) scrollToBottom()
 })
 const lightColor = computed(() =>
-  session.value
-    ? trafficColor(session.value.trafficState, session.value.status)
-    : '#555'
+  props.readOnly ? '#999' : session.value ? trafficColor(session.value.trafficState, session.value.status) : '#555'
 )
 
 // 本轮思考串联：最后一条真人指令之后的所有 thinking 段。任务通知等合成 user 行不算指令边界
@@ -458,7 +469,7 @@ async function poll() {
       return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
     })()
     const isFirstLoad = requestCursor === 0
-    const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?cursor=${requestCursor}`)
+    const page = await api.get<TranscriptPage>(`${transcriptUrl.value}?cursor=${requestCursor}`)
     if (gen !== sessionGen) return // 会话已切换，丢弃过期响应
     exists.value = page.exists
     // 带 start 的是尾页：首载，或 agent 会话（cursor=消息条数）条数收缩触发 total<cursor 的
@@ -527,7 +538,7 @@ async function loadOlder() {
     let next = start
     let more: boolean = hasMore.value
     for (let round = 0; round < 8 && more && batch.length < 20; round++) {
-      const page = await api.get<TranscriptPage>(`/api/sessions/${id}/transcript?before=${next}`)
+      const page = await api.get<TranscriptPage>(`${transcriptUrl.value}?before=${next}`)
       if (gen !== sessionGen) return
       more = page.hasMore ?? false
       next = page.start ?? 0
@@ -619,14 +630,14 @@ onBeforeUnmount(() => {
     <div class="head">
       <n-button v-if="!ui.isDesktop" quaternary size="small" @click="router.push(inBots ? '/bots' : '/')">←</n-button>
       <span class="dot" :style="{ background: lightColor, boxShadow: `0 0 0 3px ${lightColor}22` }" />
-      <span class="name">{{ session?.name ?? '…' }}</span>
-      <n-tag v-if="session" size="small" :bordered="false" class="status-tag">{{ statusTagText(session) }}</n-tag>
+      <span class="name">{{ title || session?.name || '…' }}</span>
+      <n-tag v-if="session && !readOnly" size="small" :bordered="false" class="status-tag">{{ statusTagText(session) }}</n-tag>
       <span class="spacer" />
       <label class="auto-speech" title="只播新完成的正式文本；刷新后仍关闭">
         <input type="checkbox" :checked="speech.autoEnabled" @change="onAutoSpeechChange" />自动
       </label>
       <ViewModeSwitch v-if="showTerminalSwitch" mode="chat" @switch="switchMode" />
-      <n-dropdown trigger="click" :options="menuOptions" @select="onMenu">
+      <n-dropdown v-if="!readOnly" trigger="click" :options="menuOptions" @select="onMenu">
         <n-button quaternary size="small">操作 ▾</n-button>
       </n-dropdown>
     </div>
@@ -661,7 +672,7 @@ onBeforeUnmount(() => {
     </div>
 
     <ArtifactsBar
-      v-if="exists && !loading"
+      v-if="exists && !loading && !readOnly"
       :session-id="sessionId"
       :agent-label="artifactAgent"
       @preview="previewPath = $event"

@@ -182,6 +182,9 @@ onMounted(() => void load(true))
 .src.workbuddy {
   color: #e8a33d;
 }
+.src.codebuddy {
+  color: #d97757;
+}
 .src.cc-connect {
   color: #63a3e8;
 }

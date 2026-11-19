@@ -78,7 +78,7 @@ const menuOptions = computed(() => {
       options.push(t)
     }
   }
-  options.push(s.pinned ? { label: '取消总台钉选', key: 'unpin' } : { label: '钉为总台（房间加成员置顶）', key: 'pin' })
+  options.push(s.pinned ? { label: '取消主 Bot', key: 'unpin' } : { label: '设为主 Bot（房间加成员置顶）', key: 'pin' })
   // 归档/恢复与删除对所有状态开放（运行中也能归档，与运行中能删除同口径）
   if (s.archived) options.push({ label: '恢复到看板', key: 'unarchive' })
   else options.push({ label: '归档（移出看板，保留记录）', key: 'archive' })

@@ -137,10 +137,15 @@ class WsClient {
   }
 
   /** 发一句话并等服务端回执：true = 服务端确实收下；false = 没送到（连接断/回执超时），调用方留着原文 */
-  sendline(sessionId: string, text: string): Promise<boolean> {
-    if (this.ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false)
+  async sendline(sessionId: string, text: string): Promise<boolean> {
+    // 连接正在重连时不要立刻判死：隧道/切网抖动通常一两秒就回来，
+    // 直接把字退回输入框才是「投递失败」的主诉（2026-11-19 高律师）。
+    if (this.ws?.readyState !== WebSocket.OPEN) {
+      this.reconnectNow()
+      if (!(await this.waitOpen(3000))) return false
+    }
     // 旧服务端（协议 <2）不认 id、不回执：按老路子发出即算成功，免得每条都误报「没送出去」
-    if (!this.ackSupported) return Promise.resolve(this.send({ type: 'sendline', sessionId, text }))
+    if (!this.ackSupported) return this.send({ type: 'sendline', sessionId, text })
     const id = `${Date.now().toString(36)}-${++this.seq}`
     return this.sendlineWithRetry(sessionId, text, id, 0)
   }
@@ -150,12 +155,14 @@ class WsClient {
    * 半死连接上丢的只是这一帧（iOS 切后台回来最常见），不是用户的意思——不重发就只能把
    * 文字退回输入框、让用户再按一次，这正是「卡在输入栏」的来源。服务端按 id 幂等，
    * 重发不会把同一条任务投两遍。
+   * 2026-11-19：隧道/切网抖动时一次重连常常不够（断→重连→又被断），重试提到 3 轮，
+   * 每轮换连接后等 3 秒；仍失败才把原文还给输入框。
    */
   private async sendlineWithRetry(sessionId: string, text: string, id: string, attempt: number): Promise<boolean> {
     if (await this.sendlineOnce(sessionId, text, id)) return true
-    if (attempt >= 1) return false
+    if (attempt >= 2) return false
     this.forceReconnect()
-    if (!(await this.waitOpen(2500))) return false
+    if (!(await this.waitOpen(3000))) return false
     return this.sendlineWithRetry(sessionId, text, id, attempt + 1)
   }
 

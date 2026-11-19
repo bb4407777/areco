@@ -94,7 +94,7 @@ function menuFor(s: SessionSummary) {
     )
     for (const t of handoffChildren.value) options.push(t)
   }
-  options.push(s.pinned ? { label: '取消总台钉选', key: 'unpin' } : { label: '钉为总台（房间加成员置顶）', key: 'pin' })
+  options.push(s.pinned ? { label: '取消主 Bot', key: 'unpin' } : { label: '设为主 Bot（房间加成员置顶）', key: 'pin' })
   // 归档/恢复对所有状态开放（运行中也能归档，与运行中能删除同口径）
   options.push(
     s.archived

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 项目协作：项目 = 人 + 多个 agent 成员。@成员/@all 的消息由服务端注入目标终端，
 // agent 用仓内 areco-msg.mjs 回执；消息 SoT 在服务端 tasks.db，本页经 WS（rooms/roomMessage）实时更新，不轮询。
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NEmpty, NInput, NModal, NPopconfirm, NSelect, NSpin, useMessage } from 'naive-ui'
 import type { DeliveryStatus, DispatchMode, ProjectCatalogEntry, ProjectCatalogGroup, RoomInfo, RoomKind, RoomMember, RoomMessage, SessionSummary } from '../../../shared/protocol'
@@ -13,8 +13,10 @@ import { copyPlainText } from '../utils/clipboard'
 import { fmtFullTime, templateColor, trafficColor } from '../utils/format'
 import { api } from '../api'
 import { useFileDrop } from '../composables/useFileDrop'
+import { useVoiceDictation } from '../composables/useVoiceDictation'
 import FileDropOverlay from '../components/FileDropOverlay.vue'
 import FilePreview from '../components/FilePreview.vue'
+import MicButton from '../components/MicButton.vue'
 import ProjectArtifactsBar from '../components/ProjectArtifactsBar.vue'
 import ProjectFilesPanel from '../components/ProjectFilesPanel.vue'
 import TypingIndicator from '../components/TypingIndicator.vue'
@@ -345,6 +347,27 @@ function autoGrow() {
   el.style.height = `${Math.min(el.scrollHeight, MAX_DRAFT_HEIGHT)}px`
 }
 watch(draft, () => nextTick(autoGrow))
+
+// 语音输入：按钮在附件左边，识别文字只写进草稿
+const {
+  listening: voiceListening,
+  starting: voiceStarting,
+  toggle: toggleVoice,
+} = useVoiceDictation({
+  getText: () => draft.value,
+  setText: (value) => {
+    draft.value = value
+  },
+  onError: (msg) => message.error(msg),
+})
+
+async function onMicClick() {
+  try {
+    await toggleVoice()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  }
+}
 const mentionAt = ref<number | null>(null) // 光标前最近一个合法 @ 的位置
 const mentionQuery = ref('')
 const mentionIndex = ref(0)
@@ -734,6 +757,7 @@ watch(kind, (k) => {
 })
 
 onMounted(async () => {
+  rooms.setVoiceActive(true)
   loading.value = true
   try {
     await rooms.refresh()
@@ -745,6 +769,12 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+})
+// 离开群聊页或换房即停播：播报只服务当前这一屏，人走了不该还在耳边念（2026-11-08 高律师令）
+watch([activeId, kind], () => speech.stop())
+onBeforeUnmount(() => {
+  rooms.setVoiceActive(false)
+  speech.stop()
 })
 </script>
 
@@ -1085,6 +1115,7 @@ onMounted(async () => {
             </button>
           </div>
           <input ref="fileInputEl" type="file" multiple hidden @change="onInputChange" />
+          <MicButton :listening="voiceListening" :busy="voiceStarting" @toggle="onMicClick" />
           <button class="attach-btn" type="button" :disabled="uploading" title="上传文件，路径填入输入框" @click="pickFiles">{{ uploading ? '⏳' : '📎' }}</button>
           <textarea
             ref="ta"
