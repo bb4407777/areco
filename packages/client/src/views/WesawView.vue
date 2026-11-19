@@ -899,7 +899,7 @@ onUnmounted(() => {
   position: relative;
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   gap: 8px;
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
