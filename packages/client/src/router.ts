@@ -33,6 +33,10 @@ export const router = createRouter({
     { path: '/processes', component: () => import('./views/ProcessesView.vue') },
     // OPC 后台（2026-11-07）：轨道健康 + 看板在办 + 最近跑单，只读
     { path: '/opc', component: () => import('./views/OpcView.vue') },
+    // 待办看板（2026-11-18）：iPhone 待办网页版内嵌，页面走服务端 /todo 反代到本机 :8023
+    { path: '/todo', component: () => import('./views/TodoView.vue') },
+    // 抖音私信工作台（2026-11-19）：douyin-im-export 的 serve.py 内嵌，服务端 /douyin 反代到本机 :8021
+    { path: '/douyin', component: () => import('./views/DouyinView.vue') },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

@@ -21,6 +21,8 @@ import { RoomControllers } from './controllers/rooms'
 import { createAuthRouter } from './routes/auth'
 import { createApiRouter } from './routes/api'
 import { createHermesWebhookMiddleware, createHermesEventsRouter } from './controllers/webhooks-hermes'
+import { createTodoProxy } from './routes/todo-proxy'
+import { createDouyinProxy } from './routes/douyin-proxy'
 import { createHostOriginGuard, createApiKeyGuard, createSessionGuard } from './middleware/auth'
 import { Gateway } from './ws/gateway'
 import { FileService } from './services/files'
@@ -156,6 +158,10 @@ async function main() {
   // 独立模块自带路由（同 weixin.ts 独立控制器风格），X-API-Key 放行面在 middleware/auth.ts isApiKeyScope
   const hermesEventsRouter = createHermesEventsRouter()
   app.use(hermesEventsRouter.routes()).use(hermesEventsRouter.allowedMethods())
+  // 待办看板（iPhone 待办 App 的网页版）：同源反代到本机 :8023，页面在 /todo
+  app.use(createTodoProxy())
+  // 抖音私信工作台：同源反代到本机 :8021，页面在 /douyin
+  app.use(createDouyinProxy())
 
   // 静态资源 + SPA fallback（CLIENT_DIR 按包布局探测——npm 安装时产物在包内，不在数据根）
   const clientDir = CLIENT_DIR
