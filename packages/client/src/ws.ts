@@ -14,12 +14,21 @@ const SENDLINE_ACK_MS = 3000
 const ENTER_ACK_MS = 1200
 const PING_MS = 20_000
 const PONG_STALE_MS = 45_000
+/**
+ * 握手看门狗：服务重启时新连接的握手可能长期停在 CONNECTING、onopen/onclose 一个都不来，
+ * 连接池里就永远挂着这条半开连接，重连彻底停摆（表现为「连接已断开，正在重连」一直不消）。
+ * 超时没连上就主动换一条。
+ */
+const CONNECT_TIMEOUT_MS = 4000
+/** 退避上限：服务重启通常几秒就回来，等 30 秒才再试等于看着像不会重连 */
+const MAX_BACKOFF_MS = 3000
 
 class WsClient {
   readonly connected = ref(false)
   private ws: WebSocket | null = null
   private retry = 0
   private reconnectTimer: number | null = null
+  private connectTimer: number | null = null
   private msgHandlers = new Set<MsgHandler>()
   private openHandlers = new Set<OpenHandler>()
   private ackQueue = new Map<string, number>() // sessionId → 最新绝对 offset
@@ -39,8 +48,10 @@ class WsClient {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/ws`)
     this.ws = ws
+    this.startConnectWatchdog(ws)
 
     ws.onopen = () => {
+      this.clearConnectWatchdog()
       this.retry = 0
       this.connected.value = true
       this.lastPongAt = Date.now()
@@ -72,6 +83,7 @@ class WsClient {
       for (const h of this.msgHandlers) h(msg)
     }
     ws.onclose = () => {
+      this.clearConnectWatchdog()
       // 竞态守卫：旧连接 CLOSING 期间 connect() 已建好新连接时，旧连接的迟发 close
       // 不得清掉新连接引用（否则 send 全静默失败、旧连接成孤儿）
       if (this.ws !== ws) return
@@ -89,9 +101,26 @@ class WsClient {
     }
   }
 
+  /** 握手超时就换一条：CONNECTING 卡死时不会有任何回调，退避重连根本不会被触发 */
+  private startConnectWatchdog(ws: WebSocket) {
+    this.clearConnectWatchdog()
+    this.connectTimer = window.setTimeout(() => {
+      this.connectTimer = null
+      if (this.ws !== ws || ws.readyState === WebSocket.OPEN) return
+      this.forceReconnect()
+    }, CONNECT_TIMEOUT_MS)
+  }
+
+  private clearConnectWatchdog() {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer)
+      this.connectTimer = null
+    }
+  }
+
   private scheduleReconnect() {
     if (this.reconnectTimer !== null) return
-    const delay = Math.min(30_000, 1000 * 2 ** this.retry) + Math.random() * 500
+    const delay = Math.min(MAX_BACKOFF_MS, 500 * 2 ** this.retry) + Math.random() * 300
     this.retry += 1
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null
@@ -248,6 +277,7 @@ class WsClient {
 
   /** 强断重连：不管 readyState 报什么，直接换一条（半死连接的 readyState 依旧是 OPEN） */
   forceReconnect() {
+    this.clearConnectWatchdog()
     const old = this.ws
     this.ws = null
     this.connected.value = false
