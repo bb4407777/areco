@@ -128,7 +128,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             WxWatch.shared.sync(
                 on: body["on"] as? Bool ?? false,
                 session: body["session"] as? String,
-                cursor: (body["cursor"] as? NSNumber)?.intValue
+                cursor: (body["cursor"] as? NSNumber)?.intValue,
+                since: (body["since"] as? NSNumber)?.doubleValue
             )
         default:
             break

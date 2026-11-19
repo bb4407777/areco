@@ -42,7 +42,8 @@ interface WxPart {
 interface WxMsg {
   role: string
   parts?: WxPart[]
-  timestamp?: number | null
+  /** 服务端给的是 ISO 字符串；早期版本给秒/毫秒数字，两种都要吃 */
+  timestamp?: number | string | null
 }
 interface WxTranscriptPage {
   exists: boolean
@@ -87,11 +88,15 @@ const options = computed(() =>
   }))
 )
 
-/** 服务端 timestamp 可能是秒也可能是毫秒，统一成毫秒 */
-function toMs(ts: number): number {
+/** 服务端 timestamp 可能是秒/毫秒数字，也可能是 ISO 字符串，统一成毫秒 */
+function toMs(ts: number | string): number {
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
   return ts < 1e11 ? ts * 1000 : ts
 }
-function fmtTime(ts: number | null | undefined): string {
+function fmtTime(ts: number | string | null | undefined): string {
   if (!ts) return ''
   const d = new Date(toMs(ts))
   const p = (n: number) => String(n).padStart(2, '0')
@@ -356,12 +361,17 @@ async function loadMoreMsgs() {
 onMounted(() => {
   void load()
   // 开关是全局播报状态：上次开着离开本页，回来接着轮询（否则按钮显示开、实际不补新消息）
-  if (speech.autoEnabled) startAutoPoll()
+  if (speech.autoEnabled) {
+    markAutoStart()
+    startAutoPoll()
+  }
 })
 
 // 播报只服务当前这一屏：换会话或离开本页即停（同会话页/群聊页口径，2026-11-08 令）
 watch(selected, () => {
   speech.stop()
+  // 自动播报只认一个会话：换会话即重置基线，只念换过去之后的新消息
+  if (speech.autoEnabled) markAutoStart()
   pushWatch()
 })
 
@@ -371,19 +381,39 @@ watch(selected, () => {
 // 手动点气泡仍是单条播。离开本页即停轮询（speech.stop 只停声音，定时器单独清）。
 const POLL_MS = 5000
 let autoTimer: number | null = null
+/** 点「自动播报」的时刻：只念这之后到的消息，历史一律不念 */
+let autoSince = 0
+/** 点「自动播报」时所在的会话：只念这个会话，换会话不算 */
+let autoSession: string | null = null
+
+function markAutoStart() {
+  autoSince = Date.now()
+  autoSession = selected.value ?? null
+}
 
 function toggleAutoSpeak() {
   const next = !speech.autoEnabled
   speech.setAutoEnabled(next)
-  if (next) startAutoPoll()
-  else stopAutoPoll()
+  if (next) {
+    markAutoStart()
+    startAutoPoll()
+  } else {
+    autoSince = 0
+    autoSession = null
+    stopAutoPoll()
+  }
   pushWatch()
 }
 
-/** 告诉壳「当前会话 + 已载条数」：网页进后台定时器会停，壳据此接着自己轮询 */
+/** 告诉壳「当前会话 + 已载条数 + 起播时刻」：网页进后台定时器会停，壳据此接着自己轮询 */
 function pushWatch() {
   const id = selected.value
-  syncWxWatch({ on: !!id && speech.autoEnabled, session: id ?? undefined, cursor: msgs.value.length })
+  syncWxWatch({
+    on: !!id && speech.autoEnabled,
+    session: id ?? undefined,
+    cursor: msgs.value.length,
+    since: autoSince,
+  })
 }
 
 function startAutoPoll() {
@@ -402,6 +432,8 @@ async function pollNewMessages() {
   const id = selected.value
   // 换会话/翻页加载中不轮询：此刻 msgs 正在重建，cursor 会算出满页历史，等于把旧话重念一遍
   if (!id || !speech.autoEnabled || msgLoading.value) return
+  // 只念开启时那一个会话；换了会话不补念
+  if (id !== autoSession) return
   try {
     const page = await api.get<WxTranscriptPage>(
       `/api/weixin/sessions/${encodeURIComponent(id)}/transcript?cursor=${msgs.value.length}`
@@ -416,7 +448,10 @@ async function pollNewMessages() {
       const tm = toTranscript(m)
       const text = transcriptSpeechText(tm)
       if (!text) continue
-      if (m.timestamp && toMs(m.timestamp) <= spokenUntil) continue
+      const ms = m.timestamp ? toMs(m.timestamp) : 0
+      // 点「自动播报」之前到的旧消息一律不念
+      if (ms > 0 && ms < autoSince) continue
+      if (ms > 0 && ms <= spokenUntil) continue
       // id 必须与气泡同口径（ChatMessage 传的 session-id 是 weixin:<id>），否则自动播时不亮「播报中」
       speech.enqueueAuto({ messageId: transcriptSpeechId(`weixin:${id}`, tm), text })
     }

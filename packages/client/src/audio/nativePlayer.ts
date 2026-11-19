@@ -40,7 +40,7 @@ export function getNativeSpokenUntil(): number {
  * 把「当前微信会话 + 已载条数」交给壳：网页一进后台定时器就停，
  * 壳据此自己轮询新消息并在后台直接播（前台仍由网页轮询，原生不动）。
  */
-export function syncWxWatch(state: { on: boolean; session?: string; cursor?: number }) {
+export function syncWxWatch(state: { on: boolean; session?: string; cursor?: number; since?: number }) {
   nativeHandler()?.postMessage({ t: 'wxwatch', ...state })
 }
 

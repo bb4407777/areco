@@ -19,6 +19,8 @@ final class WxWatch {
     private var enabled = false
     private var session: String?
     private var cursor = 0
+    /// 网页点「自动播报」的时刻（毫秒）：只念这之后到的消息，历史不碰
+    private var since: Double = 0
     private var timer: Timer?
     private var polling = false
     private var speaking = false
@@ -44,11 +46,12 @@ final class WxWatch {
 
     // MARK: - 网页同步过来的状态
 
-    func sync(on: Bool, session: String?, cursor: Int?) {
+    func sync(on: Bool, session: String?, cursor: Int?, since: Double?) {
         self.enabled = on
         if let session { self.session = session }
         else if !on { self.session = nil }
         if let cursor { self.cursor = cursor }
+        if let since { self.since = since }
         refreshTimer()
     }
 
@@ -104,7 +107,7 @@ final class WxWatch {
             if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
             URLSession.shared.dataTask(with: request) { data, _, _ in
                 defer { DispatchQueue.main.async { self.polling = false } }
-                guard let data, let page = Self.parseTranscript(data) else { return }
+                guard let data, let page = Self.parseTranscript(data, since: self.since) else { return }
                 DispatchQueue.main.async {
                     self.cursor = page.cursor
                     for text in page.texts { self.enqueueSpeech(text) }
@@ -124,7 +127,7 @@ final class WxWatch {
         var maxTs: Double
     }
 
-    private static func parseTranscript(_ data: Data) -> Page? {
+    private static func parseTranscript(_ data: Data, since: Double) -> Page? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let payload = root["data"] as? [String: Any] else { return nil }
         let rows = payload["messages"] as? [[String: Any]] ?? []
@@ -132,10 +135,11 @@ final class WxWatch {
         var texts: [String] = []
         var maxTs: Double = 0
         for row in rows {
-            let ts = (row["timestamp"] as? NSNumber)?.doubleValue ?? 0
-            let ms = ts < 1_000_000_000_000 ? ts * 1000 : ts
+            let ms = messageMs(row["timestamp"])
             maxTs = max(maxTs, ms)
             guard (row["role"] as? String) == "assistant" else { continue }
+            // 点「自动播报」之前的旧消息不念（没带时间戳的照念，宁可多念不漏）
+            if since > 0, ms > 0, ms < since { continue }
             let parts = row["parts"] as? [[String: Any]] ?? []
             let text = parts
                 .filter { ($0["kind"] as? String) == "text" }
@@ -146,6 +150,32 @@ final class WxWatch {
         }
         return Page(cursor: next, texts: texts, maxTs: maxTs)
     }
+
+    /// 服务端给 ISO 字符串；旧的给秒/毫秒数字，两种都吃
+    private static func messageMs(_ raw: Any?) -> Double {
+        if let n = raw as? NSNumber {
+            let v = n.doubleValue
+            return v < 1_000_000_000_000 ? v * 1000 : v
+        }
+        if let text = raw as? String {
+            if let date = isoFractional.date(from: text) ?? isoPlain.date(from: text) {
+                return date.timeIntervalSince1970 * 1000
+            }
+        }
+        return 0
+    }
+
+    private static let isoFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     // MARK: - 播报
 
