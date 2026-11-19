@@ -30,7 +30,7 @@ interface WesawTranscriptPage {
   cli?: string
 }
 
-const ALL = 2000
+const PAGE = 300
 const message = useMessage()
 const speech = useSpeechStore()
 
@@ -39,18 +39,13 @@ const total = ref(0)
 const loading = ref(true)
 const selected = ref<string | null>(null)
 const q = ref('')
-const onlyActive = ref(true)
 
 const msgs = ref<TranscriptMessage[]>([])
 const msgLoading = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 
 const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
-const shown = computed(() => {
-  const kw = q.value.trim().toLowerCase()
-  const base = onlyActive.value ? rows.value.filter((r) => r.updatedAt > 0) : rows.value
-  return kw ? base.filter((r) => r.name.toLowerCase().includes(kw) || r.talker.toLowerCase().includes(kw)) : base
-})
+const shown = computed(() => rows.value)
 const hasMore = computed(() => rows.value.length < total.value)
 
 function fmtDay(ms: number): string {
@@ -65,10 +60,13 @@ function fmtDay(ms: number): string {
 async function load() {
   loading.value = true
   try {
-    const page = await api.get<WesawListPage>(`/api/wesaw/sessions?limit=${ALL}&offset=0`)
+    const kw = q.value.trim()
+    const page = await api.get<WesawListPage>(
+      `/api/wesaw/sessions?limit=${PAGE}&offset=0${kw ? `&q=${encodeURIComponent(kw)}` : ''}`
+    )
     rows.value = page.sessions
     total.value = page.total
-    if (!selected.value && shown.value.length) void openSession(shown.value[0].id)
+    if (!selected.value && rows.value.length) void openSession(rows.value[0].id)
   } catch (err) {
     message.error(`加载 weSaw 会话失败：${(err as Error).message}`)
   } finally {
@@ -94,6 +92,13 @@ async function openSession(id: string) {
 
 onMounted(() => void load())
 
+// 搜索走后端（会话清单几千条，只拉当前这屏）
+let typing: ReturnType<typeof setTimeout> | null = null
+watch(q, () => {
+  if (typing) clearTimeout(typing)
+  typing = setTimeout(() => void load(), 250)
+})
+
 // 播报只服务当前这一屏：换会话或离开本页即停
 watch(selected, () => speech.stop())
 onUnmounted(() => speech.stop())
@@ -104,10 +109,6 @@ onUnmounted(() => speech.stop())
     <aside class="list">
       <div class="list-head">
         <NInput v-model:value="q" size="small" clearable placeholder="搜索会话" />
-        <label class="only-active">
-          <input v-model="onlyActive" type="checkbox" />
-          只看有记录
-        </label>
       </div>
       <NSpin v-if="loading" size="small" class="list-spin" />
       <div v-else class="list-rows">
@@ -122,7 +123,7 @@ onUnmounted(() => speech.stop())
           <span class="row-day">{{ fmtDay(r.updatedAt) }}</span>
           <span class="row-kind">{{ r.kind }}</span>
         </button>
-        <div v-if="hasMore" class="row-more">仅载入最近 {{ rows.length }} / {{ total }}</div>
+        <div v-if="hasMore" class="row-more">仅显示最近 {{ rows.length }} / {{ total }}，可搜索</div>
         <NEmpty v-if="!shown.length" size="small" description="没有匹配的会话" class="list-empty" />
       </div>
     </aside>

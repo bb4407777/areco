@@ -233,7 +233,7 @@ function workspaceDirs(): Map<string, string> {
 /** weSaw 自带「最近会话」清单：备注名、最后消息时间、类型都由 app 给，不自己扫盘排 */
 async function fetchRecentChats(): Promise<RecentChat[]> {
   const token = fs.readFileSync(WESAW_TOKEN, 'utf8').trim()
-  const res = await fetch(`${WESAW_API}/recent_chat?limit=800`, {
+  const res = await fetch(`${WESAW_API}/recent_chat?limit=5000`, {
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(5000),
   })
