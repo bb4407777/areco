@@ -24,6 +24,7 @@ interface WesawListPage {
   sessions: WesawSessionRow[]
   total: number
   hasMore: boolean
+  counts: { all: number; contacts: number; groups: number; official: number }
 }
 interface WesawTranscriptPage {
   exists: boolean
@@ -32,12 +33,17 @@ interface WesawTranscriptPage {
 }
 
 const PAGE = 300
+/** 侧栏分类，与 weSaw 会话列表一致 */
+type Category = '联系人' | '群聊' | '公众号'
+const CATEGORIES: Category[] = ['联系人', '群聊', '公众号']
 const message = useMessage()
 const speech = useSpeechStore()
 const ui = useUiStore()
 
 const rows = ref<WesawSessionRow[]>([])
 const total = ref(0)
+const counts = ref({ all: 0, contacts: 0, groups: 0, official: 0 })
+const category = ref<Category>('联系人')
 const loading = ref(true)
 const selected = ref<string | null>(null)
 const q = ref('')
@@ -48,6 +54,8 @@ const scroller = ref<HTMLElement | null>(null)
 
 const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
 const hasMore = computed(() => rows.value.length < total.value)
+const countOf = (c: Category) =>
+  c === '联系人' ? counts.value.contacts : c === '群聊' ? counts.value.groups : counts.value.official
 
 // weSaw 原生会话列表的时间显示：今天时分、昨天、一周内星期、更早日期
 function fmtTime(ms: number): string {
@@ -73,12 +81,20 @@ async function load() {
   try {
     const kw = q.value.trim()
     const page = await api.get<WesawListPage>(
-      `/api/wesaw/sessions?limit=${PAGE}&offset=0${kw ? `&q=${encodeURIComponent(kw)}` : ''}`
+      `/api/wesaw/sessions?limit=${PAGE}&offset=0&kind=${encodeURIComponent(category.value)}${
+        kw ? `&q=${encodeURIComponent(kw)}` : ''
+      }`
     )
     rows.value = page.sessions
     total.value = page.total
-    // 手机单栏：停在列表，等点了会话再进；桌面直接展开第一个
-    if (!selected.value && rows.value.length && !ui.isMobile) void openSession(rows.value[0].id)
+    counts.value = page.counts
+    // 原选中不在本列（换分类/搜索）就换人；手机单栏停在列表，桌面展开第一条
+    const keep = selected.value && rows.value.some((r) => r.id === selected.value)
+    if (!keep) {
+      selected.value = null
+      msgs.value = []
+      if (rows.value.length && !ui.isMobile) void openSession(rows.value[0].id)
+    }
   } catch (err) {
     message.error(`加载 weSaw 会话失败：${(err as Error).message}`)
   } finally {
@@ -117,6 +133,8 @@ watch(q, () => {
   typing = setTimeout(() => void load(), 250)
 })
 
+watch(category, () => void load())
+
 // 播报只服务当前这一屏：换会话或离开本页即停
 watch(selected, () => speech.stop())
 onUnmounted(() => speech.stop())
@@ -133,6 +151,20 @@ onUnmounted(() => speech.stop())
         <div class="sb-search">
           <input v-model="q" type="search" placeholder="搜索会话" spellcheck="false" />
         </div>
+      </div>
+
+      <div class="sb-tabs" role="tablist">
+        <button
+          v-for="c in CATEGORIES"
+          :key="c"
+          type="button"
+          role="tab"
+          :aria-selected="category === c"
+          :class="{ active: category === c }"
+          @click="category = c"
+        >
+          {{ c }}<span class="sb-tab-count">{{ countOf(c) }}</span>
+        </button>
       </div>
 
       <NSpin v-if="loading" size="small" class="sb-spin" />
@@ -246,6 +278,43 @@ onUnmounted(() => speech.stop())
 
 .sb-search input:focus {
   border-color: var(--accent);
+}
+
+.sb-tabs {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sb-tabs button {
+  flex: 1;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: 600 13px/19px inherit;
+  cursor: pointer;
+}
+
+.sb-tabs button:hover {
+  color: var(--text);
+}
+
+.sb-tabs button.active {
+  background: var(--chip-bg);
+  color: var(--text);
+}
+
+.sb-tab-count {
+  margin-left: 4px;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .sb-list {

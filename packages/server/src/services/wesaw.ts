@@ -203,6 +203,8 @@ export interface WesawListPage {
   sessions: WesawSessionRow[]
   total: number
   hasMore: boolean
+  /** q 过滤后各分类条数（侧栏标签用） */
+  counts: { all: number; contacts: number; groups: number; official: number }
 }
 
 let listCache: { at: number; rows: WesawSessionRow[] } | null = null
@@ -275,17 +277,35 @@ async function allRows(): Promise<WesawSessionRow[]> {
   return rows
 }
 
-/** 列出 weSaw 最近会话（app 清单口径），最近活动在前。q 过滤会话名与 talker。 */
+/**
+ * 列出 weSaw 最近会话（app 清单口径），最近活动在前。
+ * q 过滤会话名与 talker；kind 按 weSaw 侧栏分类过滤（联系人／群聊／公众号）。
+ * counts 是 q 过滤后各分类的条数，供侧栏分类标签显示。
+ */
 export async function listWesawSessions(
-  opts: { limit?: number; offset?: number; q?: string } = {}
+  opts: { limit?: number; offset?: number; q?: string; kind?: string } = {}
 ): Promise<WesawListPage> {
   const limit = Math.min(Math.max(opts.limit ?? 100, 1), 2000)
   const offset = Math.max(opts.offset ?? 0, 0)
   const q = (opts.q ?? '').trim().toLowerCase()
-  const rows = q
-    ? (await allRows()).filter((r) => r.name.toLowerCase().includes(q) || r.talker.toLowerCase().includes(q))
-    : await allRows()
-  return { sessions: rows.slice(offset, offset + limit), total: rows.length, hasMore: offset + limit < rows.length }
+  const kind = (opts.kind ?? '').trim()
+  const all = await allRows()
+  const matched = q
+    ? all.filter((r) => r.name.toLowerCase().includes(q) || r.talker.toLowerCase().includes(q))
+    : all
+  const counts = { all: matched.length, contacts: 0, groups: 0, official: 0 }
+  for (const r of matched) {
+    if (r.kind === '群聊') counts.groups += 1
+    else if (r.kind === '公众号') counts.official += 1
+    else counts.contacts += 1
+  }
+  const rows = kind ? matched.filter((r) => r.kind === kind) : matched
+  return {
+    sessions: rows.slice(offset, offset + limit),
+    total: rows.length,
+    hasMore: offset + limit < rows.length,
+    counts,
+  }
 }
 
 // ---- 正文（weSaw 显示口径：project.md 条目 + 未入账的助手消息）----
