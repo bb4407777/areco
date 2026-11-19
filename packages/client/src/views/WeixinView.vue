@@ -8,10 +8,11 @@
 // 气泡直接复用会话对话模式的 ChatMessage.vue（2026-08-04 高律师：微信界面气泡跟对话模式不一致，
 // 换成同款）——markdown 渲染、折叠工具块、复制按钮、配色变量全部单源，不再各画一份。
 // 数据源沿革见服务端 services/weixin-sessions.ts（2026-11-07 由 Hermes state.db 改读 cc-connect）。
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton, NEmpty, NInput, NSelect, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import ChatMessage from '../components/ChatMessage.vue'
+import { useSpeechStore } from '../stores/speech'
 import type { TranscriptMessage, TranscriptPart } from '../../../shared/protocol'
 
 interface WeixinSessionRow {
@@ -62,6 +63,7 @@ interface WxSearchHit {
 // 会话数不多（实测 24 个），一次载全供下拉选择，省掉分页与侧栏
 const ALL = 500
 const message = useMessage()
+const speech = useSpeechStore()
 
 const rows = ref<WeixinSessionRow[]>([])
 const total = ref(0)
@@ -349,6 +351,10 @@ async function loadMoreMsgs() {
 }
 
 onMounted(() => void load())
+
+// 播报只服务当前这一屏：换会话或离开本页即停（同会话页/群聊页口径，2026-11-08 令）
+watch(selected, () => speech.stop())
+onUnmounted(() => speech.stop())
 </script>
 
 <template>
@@ -397,7 +403,7 @@ onMounted(() => void load())
         :class="{ 'hit-now': i === currentHitIdx }"
         :data-i="i"
       >
-        <ChatMessage :message="m" :agent-label="current?.model || '微信'" :highlight="lastQ && hasTextPart(m) ? lastQ : undefined" :highlight-active="i === currentHitIdx" />
+        <ChatMessage :message="m" :agent-label="current?.model || '微信'" :highlight="lastQ && hasTextPart(m) ? lastQ : undefined" :highlight-active="i === currentHitIdx" speakable :session-id="`weixin:${selected}`" />
       </div>
     </div>
   </div>
