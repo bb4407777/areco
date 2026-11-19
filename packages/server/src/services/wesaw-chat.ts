@@ -116,7 +116,16 @@ function run(talker: string, dir: string, text: string, sessionId: string): void
     save()
     return
   }
-  const args = ['-p', text, '--output-format', 'stream-json', '--permission-mode', 'bypassPermissions']
+  const args = [
+    '-p',
+    text,
+    '--output-format',
+    'stream-json',
+    '--model',
+    'deepseek-v4.1-flash',
+    '--permission-mode',
+    'bypassPermissions',
+  ]
   if (sessionId) args.push('--resume', sessionId)
   args.push('--disallowedTools', DENY_TOOLS)
 
