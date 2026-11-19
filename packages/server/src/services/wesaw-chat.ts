@@ -11,8 +11,8 @@ import { DATA_DIR } from '../config'
 import { wesawWorkspaceDir } from './wesaw'
 
 const STORE = path.join(DATA_DIR, 'wesaw-chat.json')
-/** 单条最长跑 10 分钟，超时杀进程 */
-const MAX_RUN_MS = 10 * 60_000
+/** 单条最长跑 60 分钟，超时杀进程（10 分钟会砍掉读卷宗、出件的长活，2026-11-19 高律师报「完成不了任务就没后续」） */
+const MAX_RUN_MS = 60 * 60_000
 /** weSaw 对话栏同款：封掉会往外说话的自家工具，避免 agent 直接发微信 */
 const DENY_TOOLS = 'WeChatReply,WeComReply,SendMessage,MessageColleague,SpeakInChannel,TeamCreate,TeamDelete'
 
@@ -149,7 +149,7 @@ function run(talker: string, dir: string, text: string, sessionId: string): void
     busy.delete(talker)
   }
   const timer = setTimeout(() => {
-    errTail = '超时：10 分钟未完成，已中止'
+    errTail = '超时：60 分钟未完成，已中止'
     child.kill('SIGTERM')
   }, MAX_RUN_MS)
 
