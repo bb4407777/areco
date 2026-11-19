@@ -1,4 +1,5 @@
 import AVFoundation
+import UIKit
 import WebKit
 
 /// 原生音频通道：网页把 TTS 的 PCM 分片经 WKWebView 桥送进来，这里用 AVAudioEngine 播。
@@ -11,6 +12,7 @@ import WebKit
 ///   { t: "start", id }            开始一句
 ///   { t: "chunk", id, b64 }       PCM16LE 单声道 24kHz 一片
 ///   { t: "end", id }              这一句送完，排空后回调
+///   { t: "config", background }  是否锁屏继续播（设置页「锁屏继续播报」）
 ///   { t: "stop", id } / { t: "stopAll" }
 /// 原生 → JS：window.__arecoAudioDone(id) / window.__arecoAudioFail(id, msg)
 final class AudioBridge: NSObject, WKScriptMessageHandler {
@@ -27,6 +29,20 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     )!
     private var ready = false
     private var attached = false
+    /// 锁屏/切后台是否继续播；关闭时一进后台就停引擎并释放音频会话
+    private var backgroundEnabled = true
+    private var backgroundObserver: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleEnterBackground()
+        }
+    }
 
     /// 每个 id 还有几个 buffer 没播完；收到 end 且归零才回调结束
     private var scheduled: [String: Int] = [:]
@@ -58,6 +74,13 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         if let view = message.webView { webView = view }
 
         switch type {
+        case "config":
+            let enabled = body["background"] as? Bool ?? true
+            backgroundEnabled = enabled
+            // 已经在后台又被关掉：立刻停，不等下一次进后台
+            if !enabled, UIApplication.shared.applicationState != .active {
+                handleEnterBackground()
+            }
         case "start":
             guard let id = body["id"] as? String else { return }
             scheduled[id] = 0
@@ -84,6 +107,16 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     func reactivate() {
         AppAudioSession.apply()
         if ready && !engine.isRunning { try? engine.start() }
+    }
+
+    /// 后台播放开关为关：进后台即清队列、停引擎、放掉音频会话，系统照常挂起 App
+    private func handleEnterBackground() {
+        guard !backgroundEnabled else { return }
+        scheduled.removeAll()
+        ended.removeAll()
+        player.stop()
+        engine.pause()
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
     // MARK: - 播放

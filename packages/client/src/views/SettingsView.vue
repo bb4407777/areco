@@ -544,6 +544,17 @@ function clearLog() {
     </n-card>
 
     <n-card size="small" class="block">
+      <template #header>语音播报</template>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">锁屏继续播报</div>
+          <div class="pref-hint">关闭后 iPhone 壳一锁屏／切后台就停，回到前台才继续。只在 iOS App 里有效，存本机</div>
+        </div>
+        <n-switch :value="ui.backgroundAudio" @update:value="ui.setBackgroundAudio" />
+      </div>
+    </n-card>
+
+    <n-card size="small" class="block">
       <template #header>Agent 模板</template>
       <template #header-extra>
         <n-button size="tiny" type="primary" @click="openCreate">＋ 新建</n-button>

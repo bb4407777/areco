@@ -8,11 +8,15 @@ import { useUiStore } from './stores/ui'
 import { useSpeechStore } from './stores/speech'
 import { wsClient } from './ws'
 import { frontendUpdateAvailable, frontendUpdateBlocked, reloadFrontendNow } from './utils/frontendUpdate'
+import { syncNativeAudioConfig } from './audio/nativePlayer'
 
 const store = useSessionsStore()
 const ui = useUiStore()
 const speech = useSpeechStore()
 const route = useRoute()
+
+// 启动即把「锁屏是否继续播报」告知 iOS 壳（浏览器里静默跳过）
+syncNativeAudioConfig(ui.backgroundAudio)
 
 const darkOverrides: GlobalThemeOverrides = {
   common: {

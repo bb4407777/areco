@@ -1,6 +1,7 @@
 // UI 偏好（localStorage 持久化）：终端字号、最近 cwd、移动端判定
 import { defineStore } from 'pinia'
 import { getUiPrefs, putUiPrefs } from '../api'
+import { syncNativeAudioConfig } from '../audio/nativePlayer'
 
 const LS_KEY = 'areco-ui'
 // 改名前的旧键，读不到新键时迁移一次
@@ -29,12 +30,14 @@ interface UiPrefs {
   showProjects: boolean
   /** 顶栏导航「进程」入口（默认隐藏，打开才显示；直连 /processes 仍可达）。服务端 SoT */
   showProcesses: boolean
+  /** iOS 壳：锁屏/切后台是否继续播报（关掉就退到前台才出声）。本机偏好，不同步服务端 */
+  backgroundAudio: boolean
   /** 新建会话表单形态：role = 只选 Worker/Thinker（默认）；template = 旧模板下拉。
    *  服务端 SoT（GET/PUT /api/ui/prefs），跨浏览器/设备生效；缺省回落 'role' */
   spawnMode: 'role' | 'template'
 }
 
-const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false, showTasks: true, showProjects: true, showProcesses: false, spawnMode: 'template' }
+const DEFAULT_PREFS: UiPrefs = { fontSize: 13, recentCwds: [], promptHistory: [], theme: 'light', sessionView: 'chat', showThinking: false, showToolUse: false, showToolResult: false, showTasks: true, showProjects: true, showProcesses: false, spawnMode: 'template', backgroundAudio: true }
 
 function load(): UiPrefs {
   try {
@@ -60,8 +63,8 @@ export const useUiStore = defineStore('ui', {
   },
   actions: {
     persist() {
-      const { fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, showTasks, showProjects, showProcesses, spawnMode } = this
-      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, showTasks, showProjects, showProcesses, spawnMode }))
+      const { fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, showTasks, showProjects, showProcesses, spawnMode, backgroundAudio } = this
+      localStorage.setItem(LS_KEY, JSON.stringify({ fontSize, recentCwds, promptHistory, theme, sessionView, showThinking, showToolUse, showToolResult, showTasks, showProjects, showProcesses, spawnMode, backgroundAudio }))
     },
     setSessionView(mode: SessionViewMode) {
       this.sessionView = mode
@@ -96,6 +99,12 @@ export const useUiStore = defineStore('ui', {
       this.showProcesses = v
       this.persist()
       this.pushShowPrefs({ showProcesses: v })
+    },
+    /** iOS 壳后台播放开关：存本机并立刻告知原生（浏览器里无此桥，静默跳过） */
+    setBackgroundAudio(v: boolean) {
+      this.backgroundAudio = v
+      this.persist()
+      syncNativeAudioConfig(v)
     },
     /** fire-and-forget 把显示开关写回服务端（SoT）；失败静默——localStorage 已是完整缓存 */
     pushShowPrefs(prefs: Partial<Record<'showThinking' | 'showToolUse' | 'showToolResult' | 'showTasks' | 'showProjects' | 'showProcesses', boolean | null>>) {
