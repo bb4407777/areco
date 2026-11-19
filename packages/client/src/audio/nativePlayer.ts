@@ -14,11 +14,19 @@ interface NativeAudioHandler {
 
 /** 锁屏是否继续播报：设置页可改，随每条 config 消息告知原生 */
 let backgroundAudio = true
+/** 自动播报开关：原生据此决定后台要不要留静音循环保活（不然播完就被挂起，新消息推不动） */
+let autoSpeak = false
 
 /** 同步后台播放开关到原生（浏览器里没有桥，静默跳过） */
 export function syncNativeAudioConfig(enabled: boolean) {
   backgroundAudio = enabled
   nativeHandler()?.postMessage({ t: 'config', background: enabled })
+}
+
+/** 同步自动播报开关到原生（浏览器里静默跳过） */
+export function syncNativeAudioAuto(enabled: boolean) {
+  autoSpeak = enabled
+  nativeHandler()?.postMessage({ t: 'config', auto: enabled })
 }
 
 /** 原生回调登记表：一句播完由原生 __arecoAudioDone(id) 唤醒对应的 await */
@@ -92,7 +100,7 @@ export class NativePcmPlayer implements SpeechPlayer {
 
     let bytes = 0
     // 每次开播带上当前偏好，避免页面刷新后原生还按旧值走
-    handler.postMessage({ t: 'config', background: backgroundAudio })
+    handler.postMessage({ t: 'config', background: backgroundAudio, auto: autoSpeak })
     handler.postMessage({ t: 'start', id })
     try {
       while (true) {

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { AudioBlockedError, EmptyAudioError, PcmCancelledError, type SpeechPlayer } from '../audio/pcmPlayer'
-import { createSpeechPlayer } from '../audio/nativePlayer'
+import { createSpeechPlayer, syncNativeAudioAuto } from '../audio/nativePlayer'
 import { splitForSpeech } from '../audio/sentences'
 
 type AudioResult = { response: Response } | { error: unknown }
@@ -223,6 +223,8 @@ export const useSpeechStore = defineStore('speech', {
     setAutoEnabled(enabled: boolean) {
       this.autoEnabled = enabled
       this.core().setAutoEnabled(enabled)
+      // 壳里后台要能收到新消息并自动播，得让原生留一路静音保活
+      syncNativeAudioAuto(enabled)
     },
     stop() {
       this.core().stop()

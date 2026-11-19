@@ -21,6 +21,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    /// 后台保活用的静音循环：没有这一路，播完一句队列空了系统就判「没在播音频」→ 挂起 App，
+    /// 网页收不到新消息，自动播报自然不触发
+    private let silentNode = AVAudioPlayerNode()
+    private var silentBuffer: AVAudioPCMBuffer?
+    private var keepAlive = false
     private let format = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 24_000,
@@ -31,6 +36,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var attached = false
     /// 锁屏/切后台是否继续播；关闭时一进后台就停引擎并释放音频会话
     private var backgroundEnabled = true
+    /// 自动播报是否开着：只有开着才在后台保活，免得白耗电
+    private var autoSpeak = false
     private var backgroundObserver: NSObjectProtocol?
 
     override init() {
@@ -55,7 +62,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         guard !ready else { return }
         if !attached {
             engine.attach(player)
+            engine.attach(silentNode)
             engine.connect(player, to: engine.mainMixerNode, format: format)
+            engine.connect(silentNode, to: engine.mainMixerNode, format: format)
+            // 0.5 秒静音，循环播；数据默认清零即静音，不会出声
+            silentBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 12_000)
+            silentBuffer?.frameLength = 12_000
             engine.prepare()
             attached = true
         }
@@ -75,11 +87,20 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
         switch type {
         case "config":
-            let enabled = body["background"] as? Bool ?? true
-            backgroundEnabled = enabled
-            // 已经在后台又被关掉：立刻停，不等下一次进后台
-            if !enabled, UIApplication.shared.applicationState != .active {
-                handleEnterBackground()
+            if let enabled = body["background"] as? Bool {
+                backgroundEnabled = enabled
+                // 已经在后台又被关掉：立刻停，不等下一次进后台
+                if !enabled, UIApplication.shared.applicationState != .active {
+                    handleEnterBackground()
+                }
+            }
+            if let auto = body["auto"] as? Bool {
+                autoSpeak = auto
+                if auto, backgroundEnabled, UIApplication.shared.applicationState != .active {
+                    startKeepAlive()
+                } else if !auto {
+                    stopKeepAlive()
+                }
             }
         case "start":
             guard let id = body["id"] as? String else { return }
@@ -105,18 +126,40 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     /// 音频会话被电话/其他 App 抢走后，回前台补一次（与 AppAudioSession 同口径）
     func reactivate() {
+        stopKeepAlive()
         AppAudioSession.apply()
         if ready && !engine.isRunning { try? engine.start() }
     }
 
     /// 后台播放开关为关：进后台即清队列、停引擎、放掉音频会话，系统照常挂起 App
     private func handleEnterBackground() {
-        guard !backgroundEnabled else { return }
-        scheduled.removeAll()
-        ended.removeAll()
-        player.stop()
-        engine.pause()
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        guard backgroundEnabled else {
+            scheduled.removeAll()
+            ended.removeAll()
+            stopKeepAlive()
+            player.stop()
+            engine.pause()
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            return
+        }
+        // 自动播报开着：留一路静音循环，App 不被挂起，网页才能继续收消息、继续播
+        if autoSpeak { startKeepAlive() }
+    }
+
+    private func startKeepAlive() {
+        guard ready, let buffer = silentBuffer else { return }
+        if !engine.isRunning { try? engine.start() }
+        guard !silentNode.isPlaying else { return }
+        silentNode.scheduleBuffer(buffer, at: nil, options: .loops)
+        silentNode.play()
+        keepAlive = true
+    }
+
+    private func stopKeepAlive() {
+        guard keepAlive else { return }
+        keepAlive = false
+        silentNode.stop()
+        if scheduled.isEmpty { player.pause() }
     }
 
     // MARK: - 播放
