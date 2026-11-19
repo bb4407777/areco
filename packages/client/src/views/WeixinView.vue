@@ -370,26 +370,29 @@ onUnmounted(() => speech.stop())
         class="wx-picker"
         @update:value="(v: string) => v && openFromPicker(v)"
       />
-      <NInput
-        v-model:value="searchQ"
-        size="small"
-        clearable
-        placeholder="查找对话内容…"
-        class="wx-search"
-        :loading="searching"
-        @keyup.enter="onSearchEnter"
-        @clear="clearSearch"
-      >
-        <template #prefix>🔍</template>
-      </NInput>
-      <template v-if="hits.length">
-        <span class="match-count">{{ hitPos + 1 }}/{{ hits.length }}</span>
-        <NButton size="tiny" quaternary title="更早的命中（回车同）" @click="nextMatch">↑</NButton>
-        <NButton size="tiny" quaternary title="更新的命中" @click="prevMatch">↓</NButton>
-      </template>
-      <span v-if="current" class="main-sub">
-        {{ current.model }} · {{ fmtTime(current.startedAt) }} · 共 {{ total }} 段
-      </span>
+      <!-- 窄屏三行：会话选择 / 查找（含命中导航） / 模型·时间·段数；桌面仍是一行，靠 .main-head 媒体查询切 -->
+      <div class="wx-tools">
+        <NInput
+          v-model:value="searchQ"
+          size="small"
+          clearable
+          placeholder="查找对话内容…"
+          class="wx-search"
+          :loading="searching"
+          @keyup.enter="onSearchEnter"
+          @clear="clearSearch"
+        >
+          <template #prefix>🔍</template>
+        </NInput>
+        <template v-if="hits.length">
+          <span class="match-count">{{ hitPos + 1 }}/{{ hits.length }}</span>
+          <NButton size="tiny" quaternary title="更早的命中（回车同）" @click="nextMatch">↑</NButton>
+          <NButton size="tiny" quaternary title="更新的命中" @click="prevMatch">↓</NButton>
+        </template>
+        <span v-if="current" class="main-sub">
+          {{ current.model }} · {{ fmtTime(current.startedAt) }} · 共 {{ total }} 段
+        </span>
+      </div>
     </div>
 
     <NSpin v-if="loading && !msgs.length" class="main-empty" />
@@ -426,12 +429,22 @@ onUnmounted(() => speech.stop())
   border-bottom: 1px solid var(--border);
 }
 
+/* 无命中/无当前会话时会坍缩，整组占满剩余宽度，内部仍是一行 */
+.wx-tools {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
 .main-sub {
   font-size: 11px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .main-empty {
@@ -480,5 +493,31 @@ onUnmounted(() => speech.stop())
 .msg-wrap.hit-now {
   background: var(--chip-bg);
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* 窄屏（手机/半屏）：顶栏拆成 3 行——会话选择 / 查找（含 ↑↓ 命中导航） / 模型·时间·段数 */
+@media (max-width: 768px) {
+  .main-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .wx-picker {
+    width: 100%;
+    max-width: none;
+  }
+  .wx-tools {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .wx-search {
+    flex: 1 1 160px;
+    width: auto;
+    max-width: none;
+  }
+  .main-sub {
+    flex: 1 0 100%;
+  }
 }
 </style>

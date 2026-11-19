@@ -9,6 +9,7 @@
 - **改法**：`/weixin` 由顶层路由移入 `SessionLayout` children（URL 不变），桌面侧栏 `.sidebar-list` 顶部加「微信」栏（绿点＋›，选中态同侧栏项），点击后右侧出微信会话正文、侧栏常驻；手机无侧栏，看板顶部加同款整行入口；顶栏「微信」nav 删除。`WeixinView.vue` 逻辑零改动。
 - **验证**：`npm run build` 全过；免密临时实例（`ARECO_ROOT=/tmp`、8799）桌面实测 390/1280 两端——桌面侧栏在、`#/weixin` 186 条消息渲染、nav 已无微信；手机看板 44px 入口正常、点入全宽渲染。档案 `data/handoff/2026-11-19-weixin-sidebar-entry.md`。
 - **部署**：纯前端，dist 已出，无需重启 8790，硬刷即生效。
+- **追补（同日）**：手机端微信顶栏太挤 → 会话选择框 / 搜索（含命中 ↑↓）/ 模型·时间·段数 拆 3 行（`@media (max-width:768px)`，桌面保持 1 行）；390×844 实测三段 y=93/127/161，桌面 1277 单行。
 
 ### 2026-11-07 微信栏数据源 Hermes state.db → cc-connect 会话存档
 - **现象**：微信 tab 最新停在 10-01。查实非渲染/缓存问题——`~/.hermes/state.db` 的 weixin 会话最后一条就是 `2026-10-01 12:20`（库文件 10-10 后未再写），`hermes gateway` 早已停用（`Gateway is not running`），微信入站自 10 月起改由 cc-connect 承接，Hermes 不再记微信会话。
