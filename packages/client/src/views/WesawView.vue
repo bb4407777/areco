@@ -44,15 +44,9 @@ interface WesawTranscriptPage {
   messages: TranscriptMessage[]
   cli?: string
 }
-/** 对话框自己那一路（投给该工作区 agent 的往返），与 project.md 历史分开存 */
-interface WesawChatTurn {
-  role: 'user' | 'assistant'
-  text: string
-  ts: number
-  error?: boolean
-}
+/** 对话框与正文同源（weSaw 绑定的同一份 CodeBuddy 会话），这里只回 busy */
 interface WesawChatPage {
-  turns: WesawChatTurn[]
+  turns: unknown[]
   busy: boolean
 }
 
@@ -114,24 +108,25 @@ const agentCli = ref('')
 const msgLoading = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 
-// ---- 对话框（照 weSaw 的输入区）----
-const chatTurns = ref<WesawChatTurn[]>([])
+// ---- 对话框（照 weSaw 的输入区；消息走正文同一份会话，这里只留本地回显）----
 const chatBusy = ref(false)
+const pending = ref('')
 const draft = ref('')
 const sending = ref(false)
 
-/** 历史（project.md 条目）在前，本页对话在后，按时间正序渲染 */
-const allMsgs = computed<TranscriptMessage[]>(() => [
-  ...msgs.value,
-  ...chatTurns.value.map(
-    (t) =>
-      ({
-        role: t.role,
-        parts: [{ kind: 'text', text: t.text }],
-        timestamp: new Date(t.ts).toISOString(),
-      }) as unknown as TranscriptMessage
-  ),
-])
+/** 正文（与 weSaw 对话栏同源）＋ 刚发出、还没写进会话文件的那一句 */
+const allMsgs = computed<TranscriptMessage[]>(() => {
+  const list = [...msgs.value]
+  const echo = pending.value.trim()
+  if (echo && !msgs.value.some((m) => m.role === 'user' && partText(m).trim() === echo)) {
+    list.push({
+      role: 'user',
+      parts: [{ kind: 'text', text: echo }],
+      timestamp: null,
+    } as unknown as TranscriptMessage)
+  }
+  return list
+})
 
 const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
 const hasMore = computed(() => rows.value.length < total.value)
@@ -187,12 +182,15 @@ async function load() {
 const msgSig = ref('')
 
 const sigOf = (list: TranscriptMessage[]): string =>
-  list.map((m) => `${m.role}:${m.parts.map((p) => ('text' in p ? p.text : '')).join('')}`).join('\u0001')
+  list.map((m) => `${m.role}:${partText(m)}`).join('\u0001')
+
+const partText = (m: TranscriptMessage): string =>
+  (m.parts ?? []).map((p) => ('text' in p ? p.text : '')).join('')
 
 async function openSession(id: string) {
   selected.value = id
   msgs.value = []
-  chatTurns.value = []
+  pending.value = ''
   agentCli.value = ''
   msgSig.value = ''
   msgLoading.value = true
@@ -241,10 +239,11 @@ async function loadChat(): Promise<void> {
   try {
     const page = await api.get<WesawChatPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/chat`)
     if (selected.value !== id) return
-    const grew = page.turns.length !== chatTurns.value.length
-    chatTurns.value = page.turns
     chatBusy.value = page.busy
-    if (grew) await scrollToEnd()
+    // 本地回显一旦进了正文就撤掉，避免同一句出现两次
+    if (pending.value && msgs.value.some((m) => m.role === 'user' && partText(m).trim() === pending.value.trim())) {
+      pending.value = ''
+    }
   } catch {
     // 对话框读取失败不挡历史显示
   }
@@ -263,7 +262,7 @@ async function send(): Promise<void> {
   try {
     const page = await api.post<WesawChatPage>(`/api/wesaw/sessions/${encodeURIComponent(id)}/message`, { text })
     draft.value = ''
-    chatTurns.value = page.turns
+    pending.value = text
     chatBusy.value = page.busy
     await scrollToEnd()
   } catch (err) {
@@ -285,7 +284,7 @@ function onComposerKey(e: KeyboardEvent): void {
 function back() {
   selected.value = null
   msgs.value = []
-  chatTurns.value = []
+  pending.value = ''
   msgSig.value = ''
 }
 

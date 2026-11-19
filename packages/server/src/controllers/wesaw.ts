@@ -54,8 +54,8 @@ export function wesawChat(ctx: Context): void {
   }
 }
 
-/** POST /api/wesaw/sessions/:id/message { text } — 投给该工作区的 agent，跑完靠轮询 chat 取 */
-export function wesawSend(ctx: Context): void {
+/** POST /api/wesaw/sessions/:id/message { text } — 投给该工作区的 agent，跑完靠轮询正文取 */
+export async function wesawSend(ctx: Context): Promise<void> {
   try {
     const talker = wesawTalkerOf(decodeURIComponent(String(ctx.params.id ?? '')))
     if (!talker) {
@@ -63,7 +63,7 @@ export function wesawSend(ctx: Context): void {
       return
     }
     const body = (ctx.request.body ?? {}) as { text?: string }
-    const result = sendWesawMessage(talker, String(body.text ?? ''))
+    const result = await sendWesawMessage(talker, String(body.text ?? ''))
     if (!result.ok) {
       fail(ctx, 400, 'wesaw_send_failed', result.error ?? '发送失败')
       return

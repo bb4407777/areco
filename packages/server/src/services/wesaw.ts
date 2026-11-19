@@ -104,13 +104,17 @@ function piFiles(): Map<string, string> {
   return files
 }
 
-/** codebuddy：~/.codebuddy/projects/<cwd 非字母数字换横线、去前导横线>/<sessionId>.jsonl */
+/**
+ * codebuddy：~/.codebuddy/projects/<cwd 斜杠换横线、去前导横线>/<sessionId>.jsonl
+ * 只换分隔符——下划线、点、@、空格、中文一律原样保留（实测 `private-tmp-测试 CJK_dir`、
+ * `...-wechat-wxid_5tr5ufefwaih22`），把非字母数字也换成横线会找不到会话文件。
+ */
 function cbProjectDir(workspaceDir: string): string {
-  const slug = path.resolve(workspaceDir).replace(/[^A-Za-z0-9]/g, '-').replace(/^-+/, '')
+  const slug = path.resolve(workspaceDir).replace(/\//g, '-').replace(/^-+/, '')
   return path.join(CB_ROOT, slug)
 }
 
-function cbSessionFile(workspaceDir: string, sessionId: string): string | null {
+export function cbSessionFile(workspaceDir: string, sessionId: string): string | null {
   if (!/^[0-9a-f][0-9a-f-]{7,}$/i.test(sessionId)) return null
   const file = path.join(cbProjectDir(workspaceDir), `${sessionId}.jsonl`)
   return fs.existsSync(file) ? file : null
@@ -219,7 +223,7 @@ function safeIsDir(dir: string): boolean {
   }
 }
 
-function readBinding(dir: string): { cli: string; sessionId: string } {
+export function readBinding(dir: string): { cli: string; sessionId: string } {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(dir, '.agent-session.json'), 'utf8')) as {
       cli?: string
@@ -524,7 +528,7 @@ const INJECTED_CONTEXT_RE = /\n\n---\n\n(用户消息|来信提醒|来信补投|
 function stripUserText(raw: string): string {
   let text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
   if (!text) return ''
-  if (/^<(task-notification|notification[\s>]|cron-fire[\s>])/.test(text)) return ''
+  if (/^<(task-notification|notification[\s>]|cron-fire[\s>]|cb_summary[\s>]|conversation_summary[\s>])/.test(text)) return ''
   const marker = INJECTED_CONTEXT_RE.exec(text)
   if (marker) {
     const body = text.slice(marker.index + marker[0].length).trim()
