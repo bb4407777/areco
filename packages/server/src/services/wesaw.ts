@@ -524,10 +524,14 @@ function parseProjectEntries(dir: string): ProjectEntry[] {
 /** 注入的联系人上下文信封（与 weSaw 同一口径：只留标记后面用户真正说的那句） */
 const INJECTED_CONTEXT_RE = /\n\n---\n\n(用户消息|来信提醒|来信补投|每日来信汇总|会话换届交接|建档引导)：/
 
+/** 运行时工具名报错的残句（模型把工具名带空格调错，CLI 直接把错误当助手正文写盘） */
+const TOOL_ERROR_TEXT_RE = /^Tool\s*"[^"]{0,40}"\s*does not exist in the current tool set\.?$/
+
 /** 用户气泡：剥掉 system-reminder 与投喂信封，合成的运行时提示不还原 */
 function stripUserText(raw: string): string {
-  let text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
-  if (!text) return ''
+  // 开场标签常带属性（如 <system-reminder data-role="error-recovery">），不能只认裸标签
+  let text = raw.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, '').trim()
+  if (!text || /^<system-reminder[\s>]/.test(text)) return ''
   if (/^<(task-notification|notification[\s>]|cron-fire[\s>]|cb_summary[\s>]|conversation_summary[\s>])/.test(text)) return ''
   const marker = INJECTED_CONTEXT_RE.exec(text)
   if (marker) {
@@ -586,6 +590,8 @@ function parseCodebuddy(raw: string): TranscriptMessage[] {
       .join('')
       .trim()
     if (!text) continue
+    // 运行时工具报错是失败回合的残句，不是 agent 的答复，不进气泡
+    if (role === 'assistant' && TOOL_ERROR_TEXT_RE.test(text)) continue
     const shown = role === 'user' ? stripUserText(text) : text
     if (!shown) continue
     const ts = rowTime(row)
