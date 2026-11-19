@@ -35,12 +35,10 @@ final class ServerStore: ObservableObject {
     static let publicURL = URL(string: "https://areco.gaochengbin.com")!
     private static let customKey = "areco.customURL"
 
-    /// 自动连接的重试节奏：一轮＝公网→局域网各探一次，轮间留空档再探。
-    /// 网络刚切（Wi-Fi↔蜂窝）、Mac 刚唤醒、公网隧道刚起时，头一两轮常常探不通，
-    /// 隔几秒再探就通了，一轮就报失败会逼用户手点「重连」（2026-11-19 高律师令）。
-    private static let maxAttempts = 4
-    private static let retryDelays: [TimeInterval] = [1.5, 3, 4.5]
-    private static let pageFailureAttempts = 3
+    /// 重试节奏：一轮＝公网→局域网各探一次，探不通就报「正在重连」并隔 5 秒再来，不限轮数。
+    /// 网络刚切（Wi-Fi↔蜂窝）、Mac 刚唤醒、公网隧道刚起时头几轮探不通很正常，
+    /// 隔 5 秒自己再试就能连上，不用手点「重连」（2026-11-19 高律师令）。
+    private static let retryInterval: TimeInterval = 5
 
     @Published private(set) var phase: Phase = .probing
     @Published private(set) var active: Endpoint?
@@ -72,42 +70,42 @@ final class ServerStore: ObservableObject {
         active = nil
 
         if let custom = Self.normalize(customURL) {
-            for attempt in 0..<Self.maxAttempts {
-                if generation != resolveGeneration { return }
-                if await probe(custom, timeout: attempt == 0 ? 5 : 3) {
+            var first = true
+            while generation == resolveGeneration {
+                if await probe(custom, timeout: first ? 5 : 3) {
                     guard generation == resolveGeneration else { return }
                     activate(Endpoint(url: custom, mode: .custom))
                     return
                 }
-                guard await linger(attempt, generation: generation) else { return }
+                first = false
+                phase = .failed("填写的地址连不上，正在自动重连…")
+                guard await waitRetry(generation: generation) else { return }
             }
-            phase = .failed("填写的地址连不上（已重试 \(Self.maxAttempts) 次）")
             return
         }
 
-        for attempt in 0..<Self.maxAttempts {
-            if generation != resolveGeneration { return }
-            // 首轮给足时间，之后每次都收紧，免得重试把等待拖得太长
-            if await probe(Self.publicURL, timeout: attempt == 0 ? 5 : 3) {
+        var first = true
+        while generation == resolveGeneration {
+            // 首轮给足时间，之后每次都收紧，重试不把等待拖太长
+            if await probe(Self.publicURL, timeout: first ? 5 : 3) {
                 guard generation == resolveGeneration else { return }
                 activate(Endpoint(url: Self.publicURL, mode: .wan))
                 return
             }
-            if await probe(Self.lanURL, timeout: attempt == 0 ? 3 : 2) {
+            if await probe(Self.lanURL, timeout: first ? 3 : 2) {
                 guard generation == resolveGeneration else { return }
                 activate(Endpoint(url: Self.lanURL, mode: .lan))
                 return
             }
-            guard await linger(attempt, generation: generation) else { return }
+            first = false
+            phase = .failed("公网和局域网都没连上，正在自动重连…")
+            guard await waitRetry(generation: generation) else { return }
         }
-
-        phase = .failed("公网和局域网都没连上（已重试 \(Self.maxAttempts) 次）")
     }
 
-    /// 轮间空档。返回 false 表示已有一轮新的 resolve 接管，调用方直接退出
-    private func linger(_ attempt: Int, generation: Int) async -> Bool {
-        guard attempt < Self.retryDelays.count else { return true }
-        try? await Task.sleep(nanoseconds: UInt64(Self.retryDelays[attempt] * 1_000_000_000))
+    /// 隔 5 秒再探一轮。返回 false 表示已有新的 resolve 接管，调用方直接退出
+    private func waitRetry(generation: Int) async -> Bool {
+        try? await Task.sleep(nanoseconds: UInt64(Self.retryInterval * 1_000_000_000))
         return generation == resolveGeneration
     }
 
@@ -122,7 +120,7 @@ final class ServerStore: ObservableObject {
         customURL = ""
     }
 
-    /// WebView 加载失败：先原路重探，公网挂了就退局域网，几轮都探不通才判失败
+    /// WebView 加载失败：先原路重探（公网挂了退局域网），探不通就每 5 秒再来，直到连上
     func handlePageFailure(of endpoint: Endpoint) {
         resolveGeneration &+= 1
         let generation = resolveGeneration
@@ -135,24 +133,19 @@ final class ServerStore: ObservableObject {
             case .custom: [(endpoint.url, .custom), (Self.lanURL, .lan)]
             }
 
-            for attempt in 0..<Self.pageFailureAttempts {
-                if generation != self.resolveGeneration { return }
+            var first = true
+            while generation == self.resolveGeneration {
                 for (url, mode) in targets {
-                    if await self.probe(url, timeout: attempt == 0 ? 3 : 2) {
+                    if await self.probe(url, timeout: first ? 3 : 2) {
                         guard generation == self.resolveGeneration else { return }
                         self.activate(Endpoint(url: url, mode: mode))
                         return
                     }
                 }
-                guard await self.linger(attempt, generation: generation) else { return }
+                first = false
+                self.phase = .failed("页面打不开，正在自动重连…")
+                guard await self.waitRetry(generation: generation) else { return }
             }
-
-            guard generation == self.resolveGeneration else { return }
-            phase = .failed(
-                endpoint.mode == .lan
-                    ? "局域网也打不开页面（已重试 \(Self.pageFailureAttempts) 次）"
-                    : "公网与局域网都打不开页面（已重试 \(Self.pageFailureAttempts) 次）"
-            )
         }
     }
 
