@@ -13,6 +13,7 @@ import { NButton, NEmpty, NInput, NSelect, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useSpeechStore } from '../stores/speech'
+import { transcriptSpeechId, transcriptSpeechText } from '../utils/speechText'
 import type { TranscriptMessage, TranscriptPart } from '../../../shared/protocol'
 
 interface WeixinSessionRow {
@@ -350,11 +351,72 @@ async function loadMoreMsgs() {
   }
 }
 
-onMounted(() => void load())
+onMounted(() => {
+  void load()
+  // 开关是全局播报状态：上次开着离开本页，回来接着轮询（否则按钮显示开、实际不补新消息）
+  if (speech.autoEnabled) startAutoPoll()
+})
 
 // 播报只服务当前这一屏：换会话或离开本页即停（同会话页/群聊页口径，2026-11-08 令）
 watch(selected, () => speech.stop())
-onUnmounted(() => speech.stop())
+
+// ---- 自动播报（2026-11-19 高律师令「加个自动播报的按钮进来微信会话」） ----
+// 微信是外部来消息、没有 WS 推送，靠轮询补：开着时每 5 秒取一次当前会话的新消息（cursor=已载条数，
+// 服务端 slice(cursor) 只回增量），新到的 assistant 正文排进播报队列。只念新消息、不重放历史；
+// 手动点气泡仍是单条播。离开本页即停轮询（speech.stop 只停声音，定时器单独清）。
+const POLL_MS = 5000
+let autoTimer: number | null = null
+
+function toggleAutoSpeak() {
+  const next = !speech.autoEnabled
+  speech.setAutoEnabled(next)
+  if (next) startAutoPoll()
+  else stopAutoPoll()
+}
+
+function startAutoPoll() {
+  if (autoTimer !== null) return
+  autoTimer = window.setInterval(() => void pollNewMessages(), POLL_MS)
+}
+
+function stopAutoPoll() {
+  if (autoTimer !== null) {
+    window.clearInterval(autoTimer)
+    autoTimer = null
+  }
+}
+
+async function pollNewMessages() {
+  const id = selected.value
+  // 换会话/翻页加载中不轮询：此刻 msgs 正在重建，cursor 会算出满页历史，等于把旧话重念一遍
+  if (!id || !speech.autoEnabled || msgLoading.value) return
+  try {
+    const page = await api.get<WxTranscriptPage>(
+      `/api/weixin/sessions/${encodeURIComponent(id)}/transcript?cursor=${msgs.value.length}`
+    )
+    if (id !== selected.value || !page.messages.length) return
+    const box = scroller.value
+    const nearBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 80
+    msgs.value = [...msgs.value, ...page.messages]
+    for (const m of page.messages) {
+      const tm = toTranscript(m)
+      const text = transcriptSpeechText(tm)
+      // id 必须与气泡同口径（ChatMessage 传的 session-id 是 weixin:<id>），否则自动播时不亮「播报中」
+      if (text) speech.enqueueAuto({ messageId: transcriptSpeechId(`weixin:${id}`, tm), text })
+    }
+    if (nearBottom) {
+      await nextTick()
+      if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+    }
+  } catch {
+    // 轮询失败静默：下一轮再试，不弹错打断阅读
+  }
+}
+
+onUnmounted(() => {
+  stopAutoPoll()
+  speech.stop()
+})
 </script>
 
 <template>
@@ -389,9 +451,21 @@ onUnmounted(() => speech.stop())
           <NButton size="tiny" quaternary title="更早的命中（回车同）" @click="nextMatch">↑</NButton>
           <NButton size="tiny" quaternary title="更新的命中" @click="prevMatch">↓</NButton>
         </template>
-        <span v-if="current" class="main-sub">
-          {{ current.model }} · {{ fmtTime(current.startedAt) }} · 共 {{ total }} 段
-        </span>
+        <!-- 模型行 + 自动播报（2026-11-19 高律师令：按钮放模型旁边）；开着才轮询新消息 -->
+        <div class="wx-meta">
+          <span v-if="current" class="main-sub">
+            {{ current.model }} · {{ fmtTime(current.startedAt) }} · 共 {{ total }} 段
+          </span>
+          <button
+            type="button"
+            class="auto-speak"
+            :class="{ on: speech.autoEnabled }"
+            :title="speech.autoEnabled ? '新消息自动播报中，点一下关掉' : '打开后新到的微信回复自动念出来（只念新的，不重放历史）'"
+            @click="toggleAutoSpeak"
+          >
+            {{ speech.autoEnabled ? '🔊 自动播报' : '🔇 自动播报' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -445,6 +519,36 @@ onUnmounted(() => speech.stop())
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+/* 模型行 + 自动播报钮（按钮就挨在模型文字后面） */
+.wx-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.auto-speak {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.auto-speak:hover {
+  color: var(--text);
+}
+.auto-speak.on {
+  border-color: var(--accent);
+  background: var(--chip-bg);
+  color: var(--accent);
 }
 
 .main-empty {
@@ -516,8 +620,15 @@ onUnmounted(() => speech.stop())
     width: auto;
     max-width: none;
   }
-  .main-sub {
+  .wx-meta {
     flex: 1 0 100%;
+  }
+  .main-sub {
+    flex: 1 1 0;
+  }
+  .auto-speak {
+    padding: 5px 10px;
+    font-size: 12px;
   }
 }
 </style>
