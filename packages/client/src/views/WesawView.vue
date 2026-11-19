@@ -1,14 +1,14 @@
 <script setup lang="ts">
-// weSaw 会话（只读）：照搬 weSaw 的显示口径——左边会话列表，右边 agent 对话。
-// 不显示微信聊天原文，也不显示工作区路径/文件清单（2026-11-19 高律师定）。
-// 数据源：服务端扫 ~/Documents/weSaw/document 各工作区，对话 = project.md 工作纪要条目
-// ＋引擎会话里尚未入账的助手回复（services/wesaw.ts）。
-// 气泡复用 ChatMessage.vue（markdown、折叠工具块、复制、点按播报全部单源）。
+// weSaw（只读）：照 weSaw 现版界面复制一份——会话列表用它的会话行样式，
+// 去掉中间的微信聊天记录与右侧工作区面板，只留「会话列表 ＋ agent 对话」。
+// 桌面两栏；手机单栏，点会话进对话、左上角返回列表（2026-11-19 高律师定）。
+// 气泡复用 ChatMessage.vue（markdown、折叠工具块、复制、点按播报单源）。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NEmpty, NInput, NSpin, useMessage } from 'naive-ui'
+import { NEmpty, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import ChatMessage from '../components/ChatMessage.vue'
 import { useSpeechStore } from '../stores/speech'
+import { useUiStore } from '../stores/ui'
 import type { TranscriptMessage } from '../../../shared/protocol'
 
 interface WesawSessionRow {
@@ -18,6 +18,7 @@ interface WesawSessionRow {
   talker: string
   cli: string
   updatedAt: number
+  summary: string
 }
 interface WesawListPage {
   sessions: WesawSessionRow[]
@@ -33,6 +34,7 @@ interface WesawTranscriptPage {
 const PAGE = 300
 const message = useMessage()
 const speech = useSpeechStore()
+const ui = useUiStore()
 
 const rows = ref<WesawSessionRow[]>([])
 const total = ref(0)
@@ -45,17 +47,26 @@ const msgLoading = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 
 const current = computed(() => rows.value.find((r) => r.id === selected.value) ?? null)
-const shown = computed(() => rows.value)
 const hasMore = computed(() => rows.value.length < total.value)
 
-function fmtDay(ms: number): string {
+// weSaw 原生会话列表的时间显示：今天时分、昨天、一周内星期、更早日期
+function fmtTime(ms: number): string {
   if (!ms) return ''
   const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
   const p = (n: number) => String(n).padStart(2, '0')
-  const today = new Date()
-  const sameDay = d.toDateString() === today.toDateString()
-  return sameDay ? `${p(d.getHours())}:${p(d.getMinutes())}` : `${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const diff = Math.round((today - day) / 86_400_000)
+  if (diff <= 0) return `${p(d.getHours())}:${p(d.getMinutes())}`
+  if (diff === 1) return '昨天'
+  if (diff < 7) return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()]
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
+
+const initial = (name: string) => (name || '?').trim().charAt(0)
 
 async function load() {
   loading.value = true
@@ -66,7 +77,8 @@ async function load() {
     )
     rows.value = page.sessions
     total.value = page.total
-    if (!selected.value && rows.value.length) void openSession(rows.value[0].id)
+    // 手机单栏：停在列表，等点了会话再进；桌面直接展开第一个
+    if (!selected.value && rows.value.length && !ui.isMobile) void openSession(rows.value[0].id)
   } catch (err) {
     message.error(`加载 weSaw 会话失败：${(err as Error).message}`)
   } finally {
@@ -90,9 +102,15 @@ async function openSession(id: string) {
   }
 }
 
+/** 手机返回列表；桌面清空选中（回落到空态） */
+function back() {
+  selected.value = null
+  msgs.value = []
+}
+
 onMounted(() => void load())
 
-// 搜索走后端（会话清单几千条，只拉当前这屏）
+// 搜索走后端（会话几千条，只拉当前这屏）
 let typing: ReturnType<typeof setTimeout> | null = null
 watch(q, () => {
   if (typing) clearTimeout(typing)
@@ -105,34 +123,53 @@ onUnmounted(() => speech.stop())
 </script>
 
 <template>
-  <div class="wesaw">
-    <aside class="list">
-      <div class="list-head">
-        <NInput v-model:value="q" size="small" clearable placeholder="搜索会话" />
+  <div class="wesaw" :class="{ 'has-selection': !!selected }">
+    <aside class="sidebar">
+      <div class="sb-head">
+        <div class="sb-title-row">
+          <h2>weSaw</h2>
+          <span class="sb-count">{{ total }} 个会话</span>
+        </div>
+        <div class="sb-search">
+          <input v-model="q" type="search" placeholder="搜索会话" spellcheck="false" />
+        </div>
       </div>
-      <NSpin v-if="loading" size="small" class="list-spin" />
-      <div v-else class="list-rows">
+
+      <NSpin v-if="loading" size="small" class="sb-spin" />
+      <div v-else class="sb-list">
         <button
-          v-for="r in shown"
+          v-for="r in rows"
           :key="r.id"
-          class="row"
+          type="button"
+          class="session-item"
           :class="{ active: r.id === selected }"
+          :title="r.talker"
           @click="openSession(r.id)"
         >
-          <span class="row-name">{{ r.name }}</span>
-          <span class="row-day">{{ fmtDay(r.updatedAt) }}</span>
-          <span class="row-kind">{{ r.kind }}</span>
+          <span class="session-active-mark" aria-hidden />
+          <span class="session-avatar">{{ initial(r.name) }}</span>
+          <span class="session-body">
+            <span class="session-top">
+              <span class="session-name">{{ r.name }}</span>
+              <span v-if="r.updatedAt" class="session-time">{{ fmtTime(r.updatedAt) }}</span>
+            </span>
+            <span v-if="r.summary" class="session-summary">{{ r.summary }}</span>
+          </span>
         </button>
-        <div v-if="hasMore" class="row-more">仅显示最近 {{ rows.length }} / {{ total }}，可搜索</div>
-        <NEmpty v-if="!shown.length" size="small" description="没有匹配的会话" class="list-empty" />
+        <div v-if="hasMore" class="sb-more">仅显示最近 {{ rows.length }} / {{ total }}，可搜索</div>
+        <NEmpty v-if="!rows.length" size="small" description="没有匹配的会话" class="sb-empty" />
       </div>
     </aside>
 
     <section class="pane">
-      <div v-if="current" class="pane-head">
-        <span class="pane-name">{{ current.name }}</span>
-        <span class="pane-kind">{{ current.kind }}</span>
-      </div>
+      <header class="pane-head">
+        <button type="button" class="pane-back" aria-label="返回列表" @click="back">‹</button>
+        <div class="pane-titles">
+          <span class="pane-name">{{ current?.name || 'weSaw' }}</span>
+          <span v-if="current" class="pane-sub">{{ current.kind }}</span>
+        </div>
+      </header>
+
       <NSpin v-if="msgLoading && !msgs.length" class="pane-empty" />
       <NEmpty v-else-if="!msgs.length" description="这个会话还没有 agent 记录" class="pane-empty" />
       <div v-else ref="scroller" class="msgs">
@@ -149,114 +186,233 @@ onUnmounted(() => speech.stop())
   flex: 1;
   min-height: 0;
   display: flex;
+  background: var(--bg);
 }
 
-.list {
-  width: 260px;
-  flex: 0 0 260px;
-  border-right: 1px solid var(--border);
+/* ---- 左：会话列表（与 weSaw 现版会话行同尺寸同节奏）---- */
+
+.sidebar {
+  width: 300px;
+  flex: 0 0 300px;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
 }
 
-.list-head {
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.sb-head {
+  flex: 0 0 auto;
+  padding: 12px 10px 10px;
   border-bottom: 1px solid var(--border);
 }
 
-.only-active {
+.sb-title-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--muted);
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 2px 10px;
 }
 
-.list-rows {
+.sb-title-row h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.sb-count {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.sb-search input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font: 14px/20px inherit;
+  outline: none;
+  -webkit-appearance: none;
+}
+
+.sb-search input::placeholder {
+  color: var(--faint);
+}
+
+.sb-search input:focus {
+  border-color: var(--accent);
+}
+
+.sb-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px;
+  padding: 8px 8px 12px;
+  overscroll-behavior: contain;
 }
 
-.row {
+.session-item {
+  box-sizing: border-box;
+  position: relative;
   width: 100%;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 8px;
-  padding: 7px 8px;
-  border: 1px solid transparent;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 13px;
+  border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--text);
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.row:hover {
-  background: var(--hover);
-}
-
-.row.active {
+.session-item:hover {
   background: var(--chip-bg);
-  border-color: var(--border-strong);
 }
 
-.row-name {
+.session-item.active {
+  background: var(--chip-bg);
+}
+
+.session-active-mark {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: transparent;
+}
+
+.session-item.active .session-active-mark {
+  background: var(--accent);
+}
+
+.session-avatar {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--chip-bg);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.session-body {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.session-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-name {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-time {
+  flex-shrink: 0;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.session-summary {
+  overflow: hidden;
+  color: var(--muted);
   font-size: 13px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-more,
+.sb-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.sb-spin {
+  margin: 40px auto;
+}
+
+/* ---- 右：agent 对话 ---- */
+
+.pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.pane-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bar);
+}
+
+.pane-back {
+  display: none;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.pane-titles {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pane-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.row-day {
-  font-size: 11px;
-  color: var(--faint);
-  align-self: center;
-}
-
-.row-kind {
-  grid-column: 1 / -1;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.row-more,
-.list-empty {
-  padding: 10px 8px;
-  font-size: 11px;
-  color: var(--faint);
-}
-
-.list-spin {
-  margin: 30px auto;
-}
-
-.pane {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.pane-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-}
-
-.pane-name {
-  font-size: 13px;
-}
-
-.pane-kind {
-  font-size: 11px;
+.pane-sub {
+  font-size: 12px;
   color: var(--faint);
 }
 
@@ -276,5 +432,32 @@ onUnmounted(() => speech.stop())
 
 .msg-wrap {
   border-radius: 10px;
+}
+
+/* ---- 手机单栏：列表 / 对话二选一，点进去看 ---- */
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: auto;
+    flex: 1 1 auto;
+    border-right: 0;
+  }
+
+  .pane {
+    display: none;
+  }
+
+  .wesaw.has-selection .sidebar {
+    display: none;
+  }
+
+  .wesaw.has-selection .pane {
+    display: flex;
+    flex: 1 1 auto;
+  }
+
+  .pane-back {
+    display: block;
+  }
 }
 </style>

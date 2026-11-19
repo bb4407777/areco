@@ -32,6 +32,8 @@ export interface WesawSessionRow {
   updatedAt: number
   /** 引擎名（qoder/kimi/pi/codebuddy），无绑定为空 */
   cli: string
+  /** 最后一条消息摘要（weSaw 会话行第二行，原样取 app 的 summary） */
+  summary: string
 }
 
 // ---- 引擎会话文件索引 ----
@@ -216,6 +218,7 @@ interface RecentChat {
   type?: string
   isOfficialAccount?: boolean
   lastTimestamp?: number
+  summary?: string
 }
 
 /** 会话 talker（wxid / 群 id / 公众号 id）→ 工作区目录，weSaw 的目录名就是 talker */
@@ -264,6 +267,7 @@ async function allRows(): Promise<WesawSessionRow[]> {
       talker,
       cli: bind.cli,
       updatedAt: (item.lastTimestamp ?? 0) * 1000,
+      summary: (item.summary ?? '').trim(),
     })
   }
   rows.sort((a, b) => b.updatedAt - a.updatedAt)
