@@ -21,8 +21,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    /// 后台保活用的静音循环：没有这一路，播完一句队列空了系统就判「没在播音频」→ 挂起 App，
-    /// 网页收不到新消息，自动播报自然不触发
+    /// 保活用的静音循环：自动播报一打开就常驻播着，不等进后台、更不等一句播完。
+    /// 没有这一路，队列一空系统就判「没在播音频」→ 挂起 App，网页收不到新消息
     private let silentNode = AVAudioPlayerNode()
     private var silentBuffer: AVAudioPCMBuffer?
     private var keepAlive = false
@@ -89,6 +89,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "config":
             if let enabled = body["background"] as? Bool {
                 backgroundEnabled = enabled
+                if enabled, autoSpeak { startKeepAlive() } else if !enabled { stopKeepAlive() }
                 // 已经在后台又被关掉：立刻停，不等下一次进后台
                 if !enabled, UIApplication.shared.applicationState != .active {
                     handleEnterBackground()
@@ -96,11 +97,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
             if let auto = body["auto"] as? Bool {
                 autoSpeak = auto
-                if auto, backgroundEnabled, UIApplication.shared.applicationState != .active {
-                    startKeepAlive()
-                } else if !auto {
-                    stopKeepAlive()
-                }
+                // 一打开自动播报就起保活（前台也播着），不留「进后台那一刻才起」的空窗
+                if auto, backgroundEnabled { startKeepAlive() } else { stopKeepAlive() }
             }
         case "start":
             guard let id = body["id"] as? String else { return }
@@ -126,9 +124,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     /// 音频会话被电话/其他 App 抢走后，回前台补一次（与 AppAudioSession 同口径）
     func reactivate() {
-        stopKeepAlive()
         AppAudioSession.apply()
         if ready && !engine.isRunning { try? engine.start() }
+        // 保活是常驻的：回前台不掉，只把静音循环重新排上（引擎重启后原循环可能已清空）
+        if keepAlive {
+            silentNode.stop()
+            keepAlive = false
+            startKeepAlive()
+        }
     }
 
     /// 后台播放开关为关：进后台即清队列、停引擎、放掉音频会话，系统照常挂起 App
@@ -142,7 +145,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
             return
         }
-        // 自动播报开着：留一路静音循环，App 不被挂起，网页才能继续收消息、继续播
+        // 自动播报开着：静音循环本来就该在跑，这里补一次防中途被系统清掉
         if autoSpeak { startKeepAlive() }
     }
 
