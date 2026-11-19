@@ -120,7 +120,17 @@ function run(talker: string, dir: string, text: string, sessionId: string): void
   if (sessionId) args.push('--resume', sessionId)
   args.push('--disallowedTools', DENY_TOOLS)
 
-  const child = spawn(bin, args, { cwd: dir, env: process.env })
+  // CodeBuddy CLI 是 `#!/usr/bin/env node` 脚本：服务由 launchd/start.sh 起时 PATH 只有
+  // /opt/homebrew/bin，node 装在 ~/.npm-global/bin 找不到 → env: node: No such file。
+  // 把当前 node 可执行文件所在目录补进 PATH（2026-11-19 赵云播发送失败实录）。
+  const nodeDir = path.dirname(process.execPath)
+  const env = {
+    ...process.env,
+    PATH: [nodeDir, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH ?? '']
+      .filter(Boolean)
+      .join(':'),
+  }
+  const child = spawn(bin, args, { cwd: dir, env })
   let buffered = ''
   let answer = ''
   let errTail = ''
