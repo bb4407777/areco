@@ -576,14 +576,14 @@ onUnmounted(() => {
 }
 
 .sb-tabs.sub {
+  /* 与主行同样的上下节奏：两行等高、各自带分隔线、不挤在一起 */
+  padding: 6px 10px 8px;
   justify-content: center;
-  padding-top: 0;
 }
 
 .sb-tabs.sub button {
   flex: 0 0 auto;
-  padding: 3px 14px;
-  font-size: 12px;
+  padding: 4px 14px;
 }
 
 .sb-list {
