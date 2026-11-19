@@ -24,7 +24,18 @@ interface WesawListPage {
   sessions: WesawSessionRow[]
   total: number
   hasMore: boolean
-  counts: { all: number; contacts: number; groups: number; official: number }
+  counts: {
+    all: number
+    contacts: number
+    groups: number
+    official: number
+    wechat: number
+    wecom: number
+    normal: number
+    folded: number
+    subscription: number
+    service: number
+  }
 }
 interface WesawTranscriptPage {
   exists: boolean
@@ -35,15 +46,45 @@ interface WesawTranscriptPage {
 const PAGE = 300
 /** 侧栏分类，与 weSaw 会话列表一致 */
 type Category = '联系人' | '群聊' | '公众号'
+type Sub = 'wechat' | 'wecom' | 'normal' | 'folded' | 'subscription' | 'service'
 const CATEGORIES: Category[] = ['联系人', '群聊', '公众号']
+/** 二级分类：联系人分微信/企业微信，群聊分群聊/折叠，公众号分订阅号/服务号 */
+const SUBS: Record<Category, Array<{ key: Sub; label: string }>> = {
+  联系人: [
+    { key: 'wechat', label: '微信' },
+    { key: 'wecom', label: '企业微信' },
+  ],
+  群聊: [
+    { key: 'normal', label: '群聊' },
+    { key: 'folded', label: '折叠的群聊' },
+  ],
+  公众号: [
+    { key: 'subscription', label: '订阅号' },
+    { key: 'service', label: '服务号' },
+  ],
+}
 const message = useMessage()
 const speech = useSpeechStore()
 const ui = useUiStore()
 
 const rows = ref<WesawSessionRow[]>([])
 const total = ref(0)
-const counts = ref({ all: 0, contacts: 0, groups: 0, official: 0 })
+const counts = ref({
+  all: 0,
+  contacts: 0,
+  groups: 0,
+  official: 0,
+  wechat: 0,
+  wecom: 0,
+  normal: 0,
+  folded: 0,
+  subscription: 0,
+  service: 0,
+})
 const category = ref<Category>('联系人')
+const sub = ref<Sub>('wechat')
+
+const subTabs = computed(() => SUBS[category.value])
 const loading = ref(true)
 const selected = ref<string | null>(null)
 const q = ref('')
@@ -56,6 +97,7 @@ const current = computed(() => rows.value.find((r) => r.id === selected.value) ?
 const hasMore = computed(() => rows.value.length < total.value)
 const countOf = (c: Category) =>
   c === '联系人' ? counts.value.contacts : c === '群聊' ? counts.value.groups : counts.value.official
+const countOfSub = (k: Sub) => counts.value[k]
 
 // weSaw 原生会话列表的时间显示：今天时分、昨天、一周内星期、更早日期
 function fmtTime(ms: number): string {
@@ -81,7 +123,7 @@ async function load() {
   try {
     const kw = q.value.trim()
     const page = await api.get<WesawListPage>(
-      `/api/wesaw/sessions?limit=${PAGE}&offset=0&kind=${encodeURIComponent(category.value)}${
+      `/api/wesaw/sessions?limit=${PAGE}&offset=0&kind=${encodeURIComponent(category.value)}&sub=${sub.value}${
         kw ? `&q=${encodeURIComponent(kw)}` : ''
       }`
     )
@@ -133,7 +175,11 @@ watch(q, () => {
   typing = setTimeout(() => void load(), 250)
 })
 
-watch(category, () => void load())
+// 换大类时二级分类回到该类的第一项，由 sub 的 watcher 触发一次加载
+watch(category, () => {
+  sub.value = SUBS[category.value][0].key
+})
+watch(sub, () => void load())
 
 // 播报只服务当前这一屏：换会话或离开本页即停
 watch(selected, () => speech.stop())
@@ -164,6 +210,20 @@ onUnmounted(() => speech.stop())
           @click="category = c"
         >
           {{ c }}<span class="sb-tab-count">{{ countOf(c) }}</span>
+        </button>
+      </div>
+
+      <div class="sb-tabs sub" role="tablist">
+        <button
+          v-for="t in subTabs"
+          :key="t.key"
+          type="button"
+          role="tab"
+          :aria-selected="sub === t.key"
+          :class="{ active: sub === t.key }"
+          @click="sub = t.key"
+        >
+          {{ t.label }}<span class="sb-tab-count">{{ countOfSub(t.key) }}</span>
         </button>
       </div>
 
@@ -216,8 +276,11 @@ onUnmounted(() => speech.stop())
 <style scoped>
 .wesaw {
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  max-width: 100%;
   display: flex;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -315,6 +378,17 @@ onUnmounted(() => speech.stop())
   color: var(--faint);
   font-size: 12px;
   font-weight: 500;
+}
+
+.sb-tabs.sub {
+  justify-content: center;
+  padding-top: 0;
+}
+
+.sb-tabs.sub button {
+  flex: 0 0 auto;
+  padding: 3px 14px;
+  font-size: 12px;
 }
 
 .sb-list {
@@ -491,7 +565,9 @@ onUnmounted(() => speech.stop())
 
 .msgs {
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 10px 0;
   display: flex;
@@ -500,12 +576,25 @@ onUnmounted(() => speech.stop())
 }
 
 .msg-wrap {
+  min-width: 0;
+  max-width: 100%;
   border-radius: 10px;
 }
 
 /* ---- 手机单栏：列表 / 对话二选一，点进去看 ---- */
 
 @media (max-width: 768px) {
+  /* 手机上输入框不到 16px，iOS 聚焦会放大整页且回不去，故固定 16px */
+  .sb-search input {
+    font-size: 16px;
+  }
+
+  .sb-tabs button,
+  .session-item,
+  .pane-back {
+    touch-action: manipulation;
+  }
+
   .sidebar {
     width: auto;
     flex: 1 1 auto;

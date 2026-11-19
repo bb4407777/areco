@@ -13,8 +13,8 @@ function fail(ctx: Context, status: number, code: string, message: string): void
 }
 
 /**
- * GET /api/wesaw/sessions?limit=&offset=&q=&kind= — weSaw 最近会话（app 清单），最近活动在前。
- * kind 取 联系人／群聊／公众号；不传＝全部。
+ * GET /api/wesaw/sessions?limit=&offset=&q=&kind=&sub= — weSaw 最近会话（app 清单），最近活动在前。
+ * kind 取 联系人／群聊／公众号；sub 取 wechat/wcom…（二级分类键）；不传＝全部。
  */
 export async function wesawList(ctx: Context): Promise<void> {
   try {
@@ -22,7 +22,8 @@ export async function wesawList(ctx: Context): Promise<void> {
     const offset = Number(ctx.query.offset ?? 0) || 0
     const q = typeof ctx.query.q === 'string' ? ctx.query.q : undefined
     const kind = typeof ctx.query.kind === 'string' ? ctx.query.kind : undefined
-    ok(ctx, await listWesawSessions({ limit, offset, q, kind }))
+    const sub = typeof ctx.query.sub === 'string' ? ctx.query.sub : undefined
+    ok(ctx, await listWesawSessions({ limit, offset, q, kind, sub }))
   } catch (err) {
     fail(ctx, 500, 'wesaw_read_failed', err instanceof Error ? err.message : String(err))
   }
