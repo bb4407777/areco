@@ -117,6 +117,8 @@ export class NativePcmPlayer implements SpeechPlayer {
     })
 
     let bytes = 0
+    /** 网络分片按字节切，可能落在半个采样上；攒到下一片再发，别让原生读成噪声 */
+    let pending: number | null = null
     // 每次开播带上当前偏好，避免页面刷新后原生还按旧值走
     handler.postMessage({ t: 'config', background: backgroundAudio, auto: autoSpeak })
     handler.postMessage({ t: 'start', id })
@@ -126,8 +128,21 @@ export class NativePcmPlayer implements SpeechPlayer {
         if (finished) break
         if (generation !== this.generation) throw new PcmCancelledError()
         if (!value?.byteLength) continue
-        bytes += value.byteLength
-        handler.postMessage({ t: 'chunk', id, b64: toBase64(value) })
+        let chunk = value
+        if (pending !== null) {
+          const merged = new Uint8Array(chunk.byteLength + 1)
+          merged[0] = pending
+          merged.set(chunk, 1)
+          chunk = merged
+          pending = null
+        }
+        if (chunk.byteLength % 2 === 1) {
+          pending = chunk[chunk.byteLength - 1]!
+          chunk = chunk.subarray(0, chunk.byteLength - 1)
+        }
+        if (!chunk.byteLength) continue
+        bytes += chunk.byteLength
+        handler.postMessage({ t: 'chunk', id, b64: toBase64(chunk) })
       }
       if (generation !== this.generation) throw new PcmCancelledError()
       // 一句里一个样本都没有（纯标点）：服务端没合成出音频，跳过这一句

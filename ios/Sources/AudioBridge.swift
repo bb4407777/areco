@@ -34,6 +34,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     )!
     private var ready = false
     private var attached = false
+    /// 分片可能落在半个采样上：留一个字节接到下一片，字节错位会让整句变成电流声
+    private var oddByte: [String: UInt8] = [:]
+    private var sessionObservers: [NSObjectProtocol] = []
+    /// 重建引擎时防止重入（路由变化常连发几次通知）
+    private var rebuilding = false
+    private var lastRebuild = Date.distantPast
     /// 锁屏/切后台是否继续播；关闭时一进后台就停引擎并释放音频会话
     private var backgroundEnabled = true
     /// 自动播报是否开着：只有开着才在后台保活，免得白耗电
@@ -55,6 +61,47 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         ) { [weak self] _ in
             self?.handleEnterBackground()
         }
+
+        // 耳机插拔、蓝牙接管、来电打断、媒体服务重启：硬件采样率会变，
+        // 旧引擎还按老格式输出就是一片电流声，必须按新路由重建一次
+        let center = NotificationCenter.default
+        sessionObservers.append(center.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scheduleRebuild()
+        })
+        sessionObservers.append(center.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
+            switch AVAudioSession.InterruptionType(rawValue: raw) {
+            case .began:
+                AppAudioSession.invalidate()
+            case .ended:
+                self?.scheduleRebuild(force: true)
+            default:
+                break
+            }
+        })
+        sessionObservers.append(center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scheduleRebuild(force: true)
+        })
+        // 引擎自己也会在硬件格式变化时停一下，这条一到必须重建
+        sessionObservers.append(center.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scheduleRebuild(force: true)
+        })
     }
 
     /// 每个 id 还有几个 buffer 没播完；收到 end 且归零才回调结束
@@ -66,23 +113,31 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         self.webView = webView
         // 连续播报时不希望每次 start 都重启引擎，起一次、队列空了暂停播放节点
         guard !ready else { return }
-        if !attached {
-            engine.attach(player)
-            engine.attach(silentNode)
-            engine.connect(player, to: engine.mainMixerNode, format: format)
-            engine.connect(silentNode, to: engine.mainMixerNode, format: format)
-            // 0.5 秒静音，循环播；数据默认清零即静音，不会出声
-            silentBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 12_000)
-            silentBuffer?.frameLength = 12_000
-            engine.prepare()
-            attached = true
-        }
+        if !attached { buildGraph() }
+        AppAudioSession.apply()
         do {
             try engine.start()
             ready = true
         } catch {
             ready = false
         }
+    }
+
+    /// 建图：24kHz 单声道 float 直接接混音器，硬件采样率由引擎自己转
+    private func buildGraph() {
+        engine.attach(player)
+        engine.attach(silentNode)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        engine.connect(silentNode, to: engine.mainMixerNode, format: format)
+        // 0.5 秒静音，循环播；显式清零，别让未初始化内存变成噪声
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 12_000)!
+        buffer.frameLength = 12_000
+        if let channel = buffer.floatChannelData?[0] {
+            for i in 0..<12_000 { channel[i] = 0 }
+        }
+        silentBuffer = buffer
+        engine.prepare()
+        attached = true
     }
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -114,7 +169,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "chunk":
             guard let id = body["id"] as? String, let b64 = body["b64"] as? String else { return }
             guard let data = Data(base64Encoded: b64) else { return }
-            enqueue(id: id, pcm: data)
+            enqueue(id: id, pcm: align(id: id, data: data))
         case "end":
             guard let id = body["id"] as? String else { return }
             ended.insert(id)
@@ -142,7 +197,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         scheduled[id] = 0
         ended.remove(id)
         nativeDone[id] = onDone
-        enqueue(id: id, pcm: data)
+        enqueue(id: id, pcm: align(id: id, data: data))
         ended.insert(id)
         finishIfDrained(id)
     }
@@ -155,13 +210,67 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// 音频会话被电话/其他 App 抢走后，回前台补一次（与 AppAudioSession 同口径）
     func reactivate() {
         AppAudioSession.apply()
-        if ready && !engine.isRunning { try? engine.start() }
+        if !engine.isRunning {
+            rebuildEngine()
+            return
+        }
         // 保活是常驻的：回前台不掉，只把静音循环重新排上（引擎重启后原循环可能已清空）
         if keepAlive {
             silentNode.stop()
             keepAlive = false
             startKeepAlive()
         }
+    }
+
+    /// 路由/打断变化后延迟重建一次，避开系统连发的几条通知。
+    /// 没在出声、也没有保活时不折腾；硬件格式真变了，配置变更通知会强制重建。
+    private func scheduleRebuild(force: Bool = false) {
+        guard attached else { return }
+        if !force, scheduled.isEmpty, !keepAlive { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.rebuildEngine()
+        }
+    }
+
+    /// 按当前硬件重新建图并重启引擎：路由一变采样率就变，旧图继续跑就是电流声
+    private func rebuildEngine() {
+        guard attached, !rebuilding else { return }
+        // 配置变更通知可能连发，短时间内只重建一次
+        let now = Date()
+        if now.timeIntervalSince(lastRebuild) < 2 { return }
+        lastRebuild = now
+        rebuilding = true
+        defer { rebuilding = false }
+
+        let wasKeepAlive = keepAlive
+        let pending = Array(scheduled.keys)
+        player.stop()
+        silentNode.stop()
+        engine.stop()
+        engine.disconnectNodeInput(player)
+        engine.disconnectNodeInput(silentNode)
+        engine.detach(player)
+        engine.detach(silentNode)
+        attached = false
+        ready = false
+        keepAlive = false
+
+        buildGraph()
+        AppAudioSession.apply()
+        do {
+            try engine.start()
+            ready = true
+        } catch {
+            ready = false
+        }
+
+        // 老队列已随 stop() 丢掉：把这几句收尾，别让网页一直等回调
+        for id in pending {
+            scheduled[id] = 0
+            ended.insert(id)
+            finishIfDrained(id)
+        }
+        if wasKeepAlive { startKeepAlive() }
     }
 
     /// 后台播放开关为关：进后台即清队列、停引擎、放掉音频会话，系统照常挂起 App
@@ -173,6 +282,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             player.stop()
             engine.pause()
             try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            AppAudioSession.invalidate()
             return
         }
         // 自动播报开着：静音循环本来就该在跑，这里补一次防中途被系统清掉
@@ -231,10 +341,28 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         return buffer
     }
 
+    /// 把落在半个采样上的那一个字节留到下一片，保证每片都从采样边界开始。
+    /// 网络分片按字节切，不管样本边界；错一个字节后整句都会被读成噪声。
+    private func align(id: String, data: Data) -> Data {
+        var bytes = data
+        if let leftover = oddByte[id] {
+            var merged = Data([leftover])
+            merged.append(data)
+            bytes = merged
+            oddByte[id] = nil
+        }
+        if bytes.count % 2 == 1 {
+            oddByte[id] = bytes.last
+            bytes = Data(bytes.dropLast())
+        }
+        return bytes
+    }
+
     private func finishIfDrained(_ id: String) {
         guard ended.contains(id), (scheduled[id] ?? 0) <= 0 else { return }
         ended.remove(id)
         scheduled[id] = nil
+        oddByte[id] = nil
         // 队列空了就暂停播放节点，别让 engine 空转占着音频会话
         if scheduled.isEmpty { player.pause() }
         if let done = nativeDone.removeValue(forKey: id) {

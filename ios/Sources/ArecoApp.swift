@@ -35,8 +35,23 @@ enum AppAudioSession {
     /// playback 类别不受静音键影响，播报在静音模式下也能出声。
     static func apply() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        try? session.setActive(true)
+        // 只在配置不一致时才改：播放中反复 setCategory 会触发路由/采样率重配，
+        // 正在发声的 AVAudioEngine 会因此爆出电流声（2026-11-20 排查）
+        if session.category != .playback || session.categoryOptions != [.mixWithOthers] {
+            try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        }
+        if !activated {
+            try? session.setActive(true)
+            activated = true
+        }
+    }
+
+    /// setActive 重复调用虽幂等，但每次都可能牵动路由；只在真没激活时叫一次
+    private static var activated = false
+
+    /// 被系统打断或主动释放后要复位，下次播放重新激活
+    static func invalidate() {
+        activated = false
     }
 }
 
