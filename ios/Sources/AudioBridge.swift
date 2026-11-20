@@ -45,6 +45,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// 自动播报是否开着：只有开着才在后台保活，免得白耗电
     private var autoSpeak = false
     private var backgroundObserver: NSObjectProtocol?
+    /// 网页正在用麦克风（语音输入）：这段时间别去抢会话，等它收了再整块复位
+    private var micActive = false
+    /// 通道被抢后的自愈巡检：每 2 秒看一次，类别不对或引擎停了就复位
+    private var healTimer: Timer?
     /// 原生自己播的句子（后台微信轮询）：播完调这里的闭包，不走 JS 回调
     private var nativeDone: [String: () -> Void] = [:]
 
@@ -102,6 +106,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         ) { [weak self] _ in
             self?.scheduleRebuild(force: true)
         })
+
+        // 麦克风抢过通道后系统不会自己还回来，靠这条定时巡检兜底
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            self?.healTick()
+        }
+        timer.tolerance = 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        healTimer = timer
     }
 
     /// 每个 id 还有几个 buffer 没播完；收到 end 且归零才回调结束
@@ -178,6 +190,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             if let id = body["id"] as? String { stop(id) }
         case "stopAll":
             stopAll()
+        case "mic":
+            setMicActive(body["on"] as? Bool ?? false)
         case "wxwatch":
             // 后台微信轮询：网页进后台后定时器就停了，改由原生接管这段
             WxWatch.shared.sync(
@@ -225,10 +239,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     /// 路由/打断变化后延迟重建一次，避开系统连发的几条通知。
     /// 没在出声、也没有保活时不折腾；硬件格式真变了，配置变更通知会强制重建。
     private func scheduleRebuild(force: Bool = false) {
-        guard attached else { return }
+        guard attached, !micActive else { return }
         if !force, scheduled.isEmpty, !keepAlive { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.rebuildEngine()
+            guard let self, !self.micActive else { return }
+            self.rebuildEngine()
         }
     }
 
@@ -271,6 +286,45 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             finishIfDrained(id)
         }
         if wasKeepAlive { startKeepAlive() }
+    }
+
+    /// 语音输入的开与收：收麦时别跟它抢会话，收完等它拆干净再整块复位
+    private func setMicActive(_ active: Bool) {
+        guard micActive != active else { return }
+        micActive = active
+        guard !active else { return }
+        // WebKit 停录后还会异步释放采集会话；早一步复位会被它再抢回去，留半秒
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, !self.micActive else { return }
+            self.hardReset()
+        }
+    }
+
+    /// 通道自愈巡检：语音输入、来电、别的 App 抢会话之后，类别常挂在非 playback、
+    /// 引擎也早停了。网页不一定报得上来，这里自己看，一旦不对就复位。
+    private func healTick() {
+        guard attached, !micActive, !rebuilding else { return }
+        // 没在出声、也没保活时不自作主张，免得白折腾路由
+        guard keepAlive || !scheduled.isEmpty else { return }
+        let session = AVAudioSession.sharedInstance()
+        if !engine.isRunning {
+            hardReset()
+            return
+        }
+        // playAndRecord 是录音中（可能 mic 消息还没到），别去抢
+        if session.category != .playback, session.category != .playAndRecord {
+            hardReset()
+        }
+    }
+
+    /// 整块复位：会话类别与激活状态、引擎图全部重来，再按需把保活挂回去。
+    /// 麦克风抢过通道之后只有这一条能把声音救回来（旧的引擎图已经跟不上新会话）。
+    private func hardReset() {
+        guard attached, !rebuilding else { return }
+        AppAudioSession.reset()
+        lastRebuild = .distantPast
+        rebuildEngine()
+        if autoSpeak, backgroundEnabled { startKeepAlive() }
     }
 
     /// 后台播放开关为关：进后台即清队列、停引擎、放掉音频会话，系统照常挂起 App

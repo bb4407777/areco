@@ -39,11 +39,23 @@ enum AppAudioSession {
         // 正在发声的 AVAudioEngine 会因此爆出电流声（2026-11-20 排查）
         if session.category != .playback || session.categoryOptions != [.mixWithOthers] {
             try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // 类别刚被动过（多半是 WebKit 收麦改的），激活状态不可信，下面重激活一次
+            activated = false
         }
         if !activated {
             try? session.setActive(true)
             activated = true
         }
+    }
+
+    /// 麦克风用完后的整块复位：类别改回 playback、重新激活、不信任旧状态。
+    /// WebKit 的 getUserMedia 会把共享会话改成 playAndRecord，停录后不还原，
+    /// 原生引擎再播就是一片静音（2026-11-20 报障「语音输入之后不播了」）。
+    static func reset() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+        activated = true
     }
 
     /// setActive 重复调用虽幂等，但每次都可能牵动路由；只在真没激活时叫一次

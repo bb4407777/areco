@@ -3,6 +3,7 @@
 // 再点一下停止。断句出 final 时交给 onUtterance——调用方接了它就是「说完自动发送」，
 // 不接则退回纯听写（识别文字只填输入框）。
 import { ref, onBeforeUnmount } from 'vue'
+import { syncNativeMic } from '../audio/nativePlayer'
 
 export interface VoiceDictationOptions {
   getText: () => string
@@ -46,6 +47,8 @@ export function useVoiceDictation(opts: VoiceDictationOptions) {
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close()
       ws = null
     }
+    // 麦克风已放开：让原生把音频会话复位回播放通道
+    syncNativeMic(false)
   }
 
   function commitPartial() {
@@ -63,6 +66,8 @@ export function useVoiceDictation(opts: VoiceDictationOptions) {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       })
+      // 收麦一开就告知原生：它会避开音频会话，不至于把正在播的报推给系统掐掉
+      syncNativeMic(true)
       ctx = new AudioContext()
       await ctx.resume()
       await ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}asr-mic-worklet.js`)

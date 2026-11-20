@@ -29,6 +29,14 @@ export function syncNativeAudioAuto(enabled: boolean) {
   nativeHandler()?.postMessage({ t: 'config', auto: enabled })
 }
 
+/**
+ * 语音输入开关同步给原生：收麦期间别去抢音频会话（会被打断），
+ * 停录后原生自己把会话复位回 playback，否则播报一直哑着。
+ */
+export function syncNativeMic(on: boolean) {
+  nativeHandler()?.postMessage({ t: 'mic', on })
+}
+
 /** 原生在后台代播过的最大时间戳（毫秒）：前台补载时按它跳过，免得重念 */
 let nativeSpokenUntil = 0
 
