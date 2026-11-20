@@ -13,6 +13,8 @@ export interface SpeechItem {
 interface QueueEntry {
   item: SpeechItem
   manual: boolean
+  /** 自动播报：这条消息到目前为止的全文；念的是尾巴时据此记账，下轮才知道念到哪 */
+  fullText?: string
 }
 
 interface SpeechEvents {
@@ -29,7 +31,7 @@ export class SpeechQueue {
   private generation = 0
   private pumping = false
   private abort: AbortController | null = null
-  private readonly playedAuto = new Set<string>()
+  private readonly playedAuto = new Map<string, string>()
   private readonly pendingAuto = new Set<string>()
 
   constructor(
@@ -50,11 +52,19 @@ export class SpeechQueue {
   }
 
   enqueueAuto(item: SpeechItem): boolean {
-    if (!this.autoEnabled || !item.text.trim()) return false
-    if (this.playedAuto.has(item.messageId) || this.pendingAuto.has(item.messageId)) return false
+    if (!this.autoEnabled) return false
+    const full = item.text.trim()
+    if (!full) return false
+    // 同一条消息续写：键不变，只念新增的尾巴，不再从头念一遍
+    const spoken = this.playedAuto.get(item.messageId)
+    if (spoken === full) return false
+    if (spoken !== undefined && !full.startsWith(spoken)) return false
+    if (this.pendingAuto.has(item.messageId)) return false
     if (this.current?.manual || this.queue.some((entry) => entry.manual)) return false
+    const text = spoken === undefined ? full : full.slice(spoken.length).trim()
+    if (!text) return false
     this.pendingAuto.add(item.messageId)
-    this.queue.push({ item, manual: false })
+    this.queue.push({ item: { messageId: item.messageId, text }, manual: false, fullText: full })
     this.pump()
     return true
   }
@@ -183,7 +193,7 @@ export class SpeechQueue {
           }
           if (!entry.manual) {
             this.pendingAuto.delete(entry.item.messageId)
-            if (succeeded) this.playedAuto.add(entry.item.messageId)
+            if (succeeded) this.playedAuto.set(entry.item.messageId, entry.fullText ?? entry.item.text)
           }
         }
       }

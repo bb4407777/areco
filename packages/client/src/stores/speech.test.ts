@@ -141,6 +141,19 @@ test('默认 fetch 绑定 globalThis，避免浏览器 Illegal invocation', asyn
   }
 })
 
+test('同一条消息续写只念新增的尾巴，不从头重念', async () => {
+  const player = new FakePlayer()
+  const texts: string[] = []
+  const queue = new SpeechQueue(player, fakeFetch(texts))
+  queue.setAutoEnabled(true)
+  assert.equal(queue.enqueueAuto({ messageId: 'm1', text: '第一句。' }), true)
+  await waitFor(() => queue.hasPlayedAuto('m1'))
+  assert.equal(queue.enqueueAuto({ messageId: 'm1', text: '第一句。第二句。' }), true)
+  await waitFor(() => texts.length === 2)
+  assert.deepEqual(texts, ['第一句。', '第二句。'])
+  assert.equal(queue.enqueueAuto({ messageId: 'm1', text: '第一句。第二句。' }), false)
+})
+
 test('长文本按句拆成多次请求，首句合成完即播', async () => {
   const player = new FakePlayer()
   const texts: string[] = []

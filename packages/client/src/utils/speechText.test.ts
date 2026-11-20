@@ -40,6 +40,17 @@ test('Transcript 首载不回放，完成后只交新增消息并去重', () => 
   assert.deepEqual(tracker.complete('s', [old, final]), [])
 })
 
+test('同一时间戳正文续写不换键，续写交全文由队列只念尾巴', () => {
+  const partial = assistant('2026-11-07T00:00:02Z', '前半句。')
+  const full = assistant('2026-11-07T00:00:02Z', '前半句。后半句。')
+  assert.equal(transcriptSpeechId('s', partial), transcriptSpeechId('s', full))
+
+  const tracker = new TranscriptSpeechTracker()
+  tracker.reset('s', [partial])
+  assert.deepEqual(tracker.complete('s', [full]), [{ messageId: transcriptSpeechId('s', full), text: '前半句。后半句。' }])
+  assert.deepEqual(tracker.complete('s', [full]), [])
+})
+
 test('历史翻页只建立基线', () => {
   const tracker = new TranscriptSpeechTracker()
   tracker.reset('s', [])
